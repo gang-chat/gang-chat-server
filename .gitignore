@@ -12,3 +12,6 @@ gang-chat.db-shm
 /deploy/deploy.env
 /deploy/logs/
 /deploy/run/
+
+# Local notes containing secrets — never commit
+*.local.txt
