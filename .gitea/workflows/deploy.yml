@@ -1,0 +1,85 @@
+name: build-and-deploy
+
+# Build the Go binary on a Linux runner, then ship it to the remote server
+# over SSH and restart the app. No Docker — the app runs in the background
+# via the deploy/*.sh scripts.
+
+on:
+  push:
+    branches: [master]
+  workflow_dispatch:        # allow manual runs from the Gitea UI
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Ensure C toolchain (go-sqlite3 needs CGO)
+        run: |
+          if ! command -v gcc >/dev/null 2>&1; then
+            if command -v sudo >/dev/null 2>&1; then
+              sudo apt-get update && sudo apt-get install -y --no-install-recommends build-essential
+            else
+              apt-get update && apt-get install -y --no-install-recommends build-essential
+            fi
+          fi
+          gcc --version
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Build gang-server (linux/amd64, CGO)
+        run: |
+          mkdir -p dist
+          CGO_ENABLED=1 GOOS=linux GOARCH=amd64 \
+            go build -trimpath -ldflags "-s -w" -o dist/gang-server .
+
+      - name: Configure SSH
+        env:
+          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_PORT: ${{ secrets.DEPLOY_PORT }}
+        run: |
+          mkdir -p ~/.ssh && chmod 700 ~/.ssh
+          printf '%s\n' "$DEPLOY_SSH_KEY" > ~/.ssh/id_deploy
+          chmod 600 ~/.ssh/id_deploy
+          ssh-keyscan -p "${DEPLOY_PORT:-22}" -H "$DEPLOY_HOST" >> ~/.ssh/known_hosts 2>/dev/null || true
+
+      - name: Upload binary, config and scripts
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_PORT: ${{ secrets.DEPLOY_PORT }}
+          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+          DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
+        run: |
+          PORT="${DEPLOY_PORT:-22}"
+          SSH="ssh -i ~/.ssh/id_deploy -p $PORT"
+          SCP="scp -i ~/.ssh/id_deploy -P $PORT"
+          TARGET="$DEPLOY_USER@$DEPLOY_HOST"
+
+          $SSH "$TARGET" "mkdir -p '$DEPLOY_PATH'"
+          # Scripts + livekit config (overwrites in place).
+          $SCP deploy/lib.sh deploy/start.sh deploy/stop.sh deploy/restart.sh \
+               "$TARGET:$DEPLOY_PATH/"
+          $SCP livekit-server/livekit.yaml "$TARGET:$DEPLOY_PATH/"
+          # New binary lands as .new, swapped in atomically in the next step.
+          $SCP dist/gang-server "$TARGET:$DEPLOY_PATH/gang-server.new"
+
+      - name: Swap binary and restart gang-server
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_PORT: ${{ secrets.DEPLOY_PORT }}
+          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+          DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
+        run: |
+          PORT="${DEPLOY_PORT:-22}"
+          ssh -i ~/.ssh/id_deploy -p "$PORT" "$DEPLOY_USER@$DEPLOY_HOST" \
+            "cd '$DEPLOY_PATH' \
+             && chmod +x lib.sh start.sh stop.sh restart.sh gang-server.new \
+             && mv -f gang-server.new gang-server \
+             && ./restart.sh gang"
