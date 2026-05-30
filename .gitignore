@@ -15,3 +15,6 @@ gang-chat.db-shm
 
 # Local notes containing secrets — never commit
 *.local.txt
+
+# Linux livekit binary — lives only on the deploy server, not in git
+/livekit-server/livekit-server
