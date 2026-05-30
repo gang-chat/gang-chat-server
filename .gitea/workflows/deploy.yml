@@ -12,9 +12,15 @@ on:
 jobs:
   build-and-deploy:
     runs-on: ubuntu-latest
+    env:
+      # 国内 Go 代理，避免 proxy.golang.org 被墙；goproxy.cn 同时代理 checksum
+      # 校验，以及 GOTOOLCHAIN 自动下载的 Go 工具链（golang.org/toolchain）。
+      GOPROXY: https://goproxy.cn,direct
+      GOTOOLCHAIN: auto
     steps:
+      # 从 gitea.com 的镜像拉 action，不走被墙的 github.com。
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: https://gitea.com/actions/checkout@v4
 
       - name: Ensure C toolchain (go-sqlite3 needs CGO)
         run: |
@@ -27,18 +33,11 @@ jobs:
           fi
           gcc --version
 
-      - name: Set up Go
-        uses: actions/setup-go@v5
-        with:
-          go-version-file: go.mod
-          cache: true
-
+      # 不用 actions/setup-go：镜像自带 Go，go.mod 里的 1.26.3 工具链由
+      # GOTOOLCHAIN=auto 通过 goproxy.cn 自动拉取，省掉从 github/google 下载 SDK。
       - name: Build gang-server (linux/amd64, CGO)
-        env:
-          # 国内 Go 代理，避免 proxy.golang.org 被墙；goproxy.cn 也会代理 checksum 校验。
-          GOPROXY: https://goproxy.cn,direct
-          GOTOOLCHAIN: auto
         run: |
+          go version
           mkdir -p dist
           CGO_ENABLED=1 GOOS=linux GOARCH=amd64 \
             go build -trimpath -ldflags "-s -w" -o dist/gang-server .
