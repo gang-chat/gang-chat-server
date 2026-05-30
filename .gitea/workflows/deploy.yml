@@ -34,6 +34,10 @@ jobs:
           cache: true
 
       - name: Build gang-server (linux/amd64, CGO)
+        env:
+          # 国内 Go 代理，避免 proxy.golang.org 被墙；goproxy.cn 也会代理 checksum 校验。
+          GOPROXY: https://goproxy.cn,direct
+          GOTOOLCHAIN: auto
         run: |
           mkdir -p dist
           CGO_ENABLED=1 GOOS=linux GOARCH=amd64 \
