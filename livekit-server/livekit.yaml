@@ -5,8 +5,8 @@ rtc:
   port_range_end: 50100
   use_external_ip: false
 keys:
-  devkey: secret
+  ikun: yingmianzoulaidenirangworucichunchunyudong
 webhook:
-  api_key: devkey
+  api_key: ikun
   urls:
     - http://127.0.0.1:21116/webhooks/livekit
