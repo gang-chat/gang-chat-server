@@ -33,8 +33,19 @@ jobs:
           fi
           gcc --version
 
-      # 不用 actions/setup-go：镜像自带 Go，go.mod 里的 1.26.3 工具链由
-      # GOTOOLCHAIN=auto 通过 goproxy.cn 自动拉取，省掉从 github/google 下载 SDK。
+      # 镜像不自带 Go，从国内镜像 golang.google.cn 装。版本直接读 go.mod，
+      # 以后升级 Go 不用再改这里。
+      - name: Setup Go
+        run: |
+          GO_VERSION="$(awk '/^go [0-9]/{print $2; exit}' go.mod)"
+          echo "installing Go ${GO_VERSION}"
+          SUDO=""; command -v sudo >/dev/null 2>&1 && SUDO="sudo"
+          wget -qO /tmp/go.tgz "https://golang.google.cn/dl/go${GO_VERSION}.linux-amd64.tar.gz"
+          $SUDO rm -rf /usr/local/go
+          $SUDO tar -C /usr/local -xzf /tmp/go.tgz
+          echo "/usr/local/go/bin" >> "$GITHUB_PATH"
+          /usr/local/go/bin/go version
+
       - name: Build gang-server (linux/amd64, CGO)
         run: |
           go version
