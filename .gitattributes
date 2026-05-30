@@ -1,0 +1,5 @@
+# Scripts and configs that run on Linux must keep LF endings,
+# regardless of the committer's OS (otherwise bash sees `\r`).
+*.sh    text eol=lf
+*.yml   text eol=lf
+*.yaml  text eol=lf

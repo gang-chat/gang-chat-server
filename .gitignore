@@ -5,3 +5,10 @@ gang-chat.db-shm
 
 # Build output (reproducible via `go build`)
 /gang-server.exe
+/gang-server
+/dist/
+
+# Deploy runtime (server-side, never committed)
+/deploy/deploy.env
+/deploy/logs/
+/deploy/run/
