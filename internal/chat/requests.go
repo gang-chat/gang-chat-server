@@ -1,0 +1,112 @@
+package chat
+
+type roomSettingsRequest struct {
+	Name                       *string `json:"name"`
+	AvatarAssetID              *string `json:"avatar_asset_id"`
+	Visibility                 *string `json:"visibility"`
+	JoinPolicy                 *string `json:"join_policy"`
+	AIVoiceAnnounceEnabled     *bool   `json:"ai_voice_announce_enabled"`
+	MessageRecallPolicy        *string `json:"message_recall_policy"`
+	MessageRecallWindowSeconds *int64  `json:"message_recall_window_seconds"`
+}
+
+type myRoomSettingsRequest struct {
+	RemarkName        *string `json:"remark_name"`
+	RoomDisplayName   *string `json:"room_display_name"`
+	RoomAvatarAssetID *string `json:"room_avatar_asset_id"`
+	NotificationLevel *string `json:"notification_level"`
+}
+
+type userIDRequest struct {
+	UserID string `json:"user_id"`
+}
+
+type roleRequest struct {
+	Role string `json:"role"`
+}
+
+type decisionRequest struct {
+	Decision string `json:"decision"`
+}
+
+type muteRequest struct {
+	DurationSeconds *int64 `json:"duration_seconds"`
+	Reason          string `json:"reason"`
+}
+
+type confirmRequest struct {
+	Confirm bool   `json:"confirm"`
+	Reason  string `json:"reason"`
+}
+
+type reasonRequest struct {
+	Reason string `json:"reason"`
+}
+
+type liveModerationRequest struct {
+	Action string `json:"action"`
+	Reason string `json:"reason"`
+}
+
+type stickerPackRequest struct {
+	Scope     string `json:"scope"`
+	RoomID    string `json:"room_id"`
+	Name      string `json:"name"`
+	SortOrder *int   `json:"sort_order"`
+}
+
+type stickerRequest struct {
+	AssetID   string `json:"asset_id"`
+	Name      string `json:"name"`
+	SortOrder *int   `json:"sort_order"`
+}
+
+type musicPlaybackRequest struct {
+	Action        string `json:"action"`
+	Mode          string `json:"mode"`
+	PlaylistID    string `json:"playlist_id"`
+	PlaylistScope string `json:"playlist_scope"`
+}
+
+type musicQueueRequest struct {
+	SourceURL  string `json:"source_url"`
+	Title      string `json:"title"`
+	Artist     string `json:"artist"`
+	DurationMS *int64 `json:"duration_ms"`
+}
+
+type musicSessionRequest struct {
+	Action        string `json:"action"`
+	QueueID       string `json:"queue_id"`
+	TargetUserID  string `json:"target_user_id"`
+	Mode          string `json:"mode"`
+	PlaylistID    string `json:"playlist_id"`
+	PlaylistScope string `json:"playlist_scope"`
+	PositionMS    *int64 `json:"position_ms"`
+}
+
+type musicInviteRequest struct {
+	TargetUserIDs          []string `json:"target_user_ids"`
+	IncludeAllNotListening bool     `json:"include_all_not_listening"`
+}
+
+type playlistRequest struct {
+	Name string `json:"name"`
+}
+
+type playlistTrackRequest struct {
+	Title      string `json:"title"`
+	Artist     string `json:"artist"`
+	Source     string `json:"source"`
+	SourceURL  string `json:"source_url"`
+	DurationMS *int64 `json:"duration_ms"`
+	SortOrder  *int   `json:"sort_order"`
+}
+
+type saveStickerRequest struct {
+	StickerID    string `json:"sticker_id"`
+	TargetScope  string `json:"target_scope"`
+	TargetPackID string `json:"target_pack_id"`
+	Name         string `json:"name"`
+	SortOrder    *int   `json:"sort_order"`
+}

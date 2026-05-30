@@ -1,0 +1,7 @@
+gang-chat.db
+gang-chat.db-wal
+gang-chat.db-shm
+.env
+
+# Build output (reproducible via `go build`)
+/gang-server.exe
