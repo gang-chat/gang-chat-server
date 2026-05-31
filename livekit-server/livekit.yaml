@@ -4,6 +4,13 @@ rtc:
   port_range_start: 50000
   port_range_end: 50100
   use_external_ip: false
+  node_ip: 103.47.83.189
+turn:
+  enabled: true
+  tls_port: 443
+  domain: loganz2.cn
+  cert_file: /etc/livekit/cert.pem
+  key_file: /etc/livekit/key.pem
 keys:
   ikun: yingmianzoulaidenirangworucichunchunyudong
 webhook:
