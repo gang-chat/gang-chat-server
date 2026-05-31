@@ -5,6 +5,8 @@ rtc:
   port_range_end: 50100
   use_external_ip: false
   node_ip: 103.47.83.189
+  stun_servers:
+    - 103.47.83.189:3478
 turn:
   enabled: true
   tls_port: 443
