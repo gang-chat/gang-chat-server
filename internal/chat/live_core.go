@@ -59,6 +59,17 @@ func (h *Handler) joinLive(c *gin.Context) {
 		h.jsonError(c, http.StatusInternalServerError, "internal_error", "failed to join live")
 		return
 	}
+	// Re-apply any persistent voice ban onto the fresh participant row so a
+	// banned user who rejoins comes back muted/blocked. The token issued below
+	// already reflects the ban (canPublish=false) via liveKitMediaPermissions.
+	if h.isVoiceBanned(roomID, userID) {
+		_, _ = h.DB.Exec(
+			`UPDATE live_participants
+			 SET mic_muted = 1, headphones_muted = 1, voice_blocked = 1, updated_at = ?
+			 WHERE room_id = ? AND user_id = ?`,
+			now, roomID, userID,
+		)
+	}
 	_, _ = h.DB.Exec(`UPDATE rooms SET updated_at = ? WHERE id = ?`, now, roomID)
 
 	participant, err := h.liveParticipantForUser(roomID, userID)
@@ -116,7 +127,9 @@ func (h *Handler) updateMyLiveState(c *gin.Context) {
 	}
 
 	var voiceBlocked int
-	_ = h.DB.QueryRow(`SELECT voice_blocked FROM live_participants WHERE room_id = ? AND user_id = ?`, roomID, userID).Scan(&voiceBlocked)
+	if h.isVoiceBanned(roomID, userID) {
+		voiceBlocked = 1
+	}
 
 	sets := []string{"updated_at = ?"}
 	args := []any{nowMillis()}
@@ -253,12 +266,25 @@ func (h *Handler) liveKitToken(roomID, userID string) (string, time.Time, error)
 }
 
 func (h *Handler) liveKitMediaPermissions(roomID, userID string) (bool, bool) {
-	var headphonesMuted, voiceBlocked int
+	var headphonesMuted int
 	_ = h.DB.QueryRow(
-		`SELECT headphones_muted, voice_blocked FROM live_participants WHERE room_id = ? AND user_id = ?`,
+		`SELECT headphones_muted FROM live_participants WHERE room_id = ? AND user_id = ?`,
 		roomID, userID,
-	).Scan(&headphonesMuted, &voiceBlocked)
-	canPublish := voiceBlocked == 0
-	canSubscribe := voiceBlocked == 0 && headphonesMuted == 0
+	).Scan(&headphonesMuted)
+	// A voice ban is persistent and room-scoped (room_voice_bans), so it's the
+	// authority on whether this user may publish — not the easily-reset
+	// participant row.
+	voiceBlocked := h.isVoiceBanned(roomID, userID)
+	canPublish := !voiceBlocked
+	canSubscribe := !voiceBlocked && headphonesMuted == 0
 	return canPublish, canSubscribe
+}
+
+// isVoiceBanned reports whether the user has a persistent voice ban in the
+// room. This survives leave/rejoin, unlike the live_participants.voice_blocked
+// projection.
+func (h *Handler) isVoiceBanned(roomID, userID string) bool {
+	var count int
+	_ = h.DB.QueryRow(`SELECT COUNT(*) FROM room_voice_bans WHERE room_id = ? AND user_id = ?`, roomID, userID).Scan(&count)
+	return count > 0
 }

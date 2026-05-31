@@ -21,6 +21,31 @@ type apiHarness struct {
 	t      *testing.T
 	router *gin.Engine
 	db     *sql.DB
+	live   *fakeLiveController
+}
+
+// fakeLiveController records the LiveKit media-control calls moderation makes,
+// so tests can assert the server drove the media session (not just the DB).
+type fakeLiveController struct {
+	removed    []string // "room/identity"
+	publishSet []string // "room/identity=true|false"
+	micMuted   []string // "room/identity=true|false"
+	removeErr  error
+}
+
+func (f *fakeLiveController) RemoveParticipant(room, identity string) error {
+	f.removed = append(f.removed, room+"/"+identity)
+	return f.removeErr
+}
+
+func (f *fakeLiveController) SetCanPublish(room, identity string, canPublish bool) error {
+	f.publishSet = append(f.publishSet, room+"/"+identity+"="+strconv.FormatBool(canPublish))
+	return nil
+}
+
+func (f *fakeLiveController) MuteMicrophone(room, identity string, muted bool) error {
+	f.micMuted = append(f.micMuted, room+"/"+identity+"="+strconv.FormatBool(muted))
+	return nil
 }
 
 type testSession struct {
@@ -50,9 +75,10 @@ func newAPIHarness(t *testing.T) *apiHarness {
 	authMW := &auth.AuthMiddleware{DB: pool, JWTSecret: cfg.JWTSecret}
 	chatGroup := api.Group("")
 	chatGroup.Use(authMW.Handle)
-	RegisterRoutes(chatGroup, pool, cfg, nil)
+	live := &fakeLiveController{}
+	RegisterRoutes(chatGroup, pool, cfg, nil, live)
 
-	return &apiHarness{t: t, router: router, db: pool}
+	return &apiHarness{t: t, router: router, db: pool, live: live}
 }
 
 func (h *apiHarness) request(method, path, token string, body any) (int, map[string]any) {
@@ -374,6 +400,16 @@ func TestLiveHeadphonesAndVoiceBlock(t *testing.T) {
 	})
 	api.requireStatus(status, http.StatusOK, response)
 
+	// block_voice must drive the LiveKit media session, not just the DB: revoke
+	// publish and server-side mute the mic.
+	memberKey := roomID + "/" + member.User["id"].(string)
+	if !contains(api.live.publishSet, memberKey+"=false") {
+		t.Fatalf("block_voice should revoke publish on LiveKit: %v", api.live.publishSet)
+	}
+	if !contains(api.live.micMuted, memberKey+"=true") {
+		t.Fatalf("block_voice should server-mute the mic on LiveKit: %v", api.live.micMuted)
+	}
+
 	status, response = api.request(http.MethodGet, "/rooms/"+roomID+"/live", owner.Token, nil)
 	api.requireStatus(status, http.StatusOK, response)
 	live := response["live"].(map[string]any)
@@ -396,6 +432,9 @@ func TestLiveHeadphonesAndVoiceBlock(t *testing.T) {
 		"action": "restore_voice",
 	})
 	api.requireStatus(status, http.StatusOK, response)
+	if !contains(api.live.publishSet, memberKey+"=true") {
+		t.Fatalf("restore_voice should re-grant publish on LiveKit: %v", api.live.publishSet)
+	}
 	status, response = api.request(http.MethodPatch, "/rooms/"+roomID+"/live/me", member.Token, map[string]any{
 		"headphones_muted": false,
 	})
@@ -404,6 +443,35 @@ func TestLiveHeadphonesAndVoiceBlock(t *testing.T) {
 	if participant["voice_blocked"] != false || participant["headphones_muted"] != false {
 		t.Fatalf("voice restore should allow headphones again: %v", participant)
 	}
+
+	// A voice ban must outlive the live session: re-block, leave (drop the
+	// participant row), rejoin, and confirm the user comes back blocked.
+	status, response = api.request(http.MethodPost, "/rooms/"+roomID+"/live/participants/"+member.User["id"].(string)+"/moderation", owner.Token, map[string]any{
+		"action": "block_voice",
+	})
+	api.requireStatus(status, http.StatusOK, response)
+	// Simulate a disconnect: clear the live row the way leave / the webhook would.
+	if _, err := api.db.Exec(`DELETE FROM live_participants WHERE room_id = ? AND user_id = ?`, roomID, member.User["id"].(string)); err != nil {
+		t.Fatalf("failed to clear live participant: %v", err)
+	}
+	status, response = api.request(http.MethodPost, "/rooms/"+roomID+"/live/join", member.Token, map[string]any{
+		"client_live_session_id": "clive_test_member_rejoin",
+		"source":                 "live_panel",
+	})
+	api.requireStatus(status, http.StatusOK, response)
+	participant = response["participant"].(map[string]any)
+	if participant["voice_blocked"] != true || participant["mic_muted"] != true {
+		t.Fatalf("voice ban should persist across rejoin: %v", participant)
+	}
+}
+
+func contains(haystack []string, needle string) bool {
+	for _, s := range haystack {
+		if s == needle {
+			return true
+		}
+	}
+	return false
 }
 
 func TestUserAudioSettings(t *testing.T) {

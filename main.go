@@ -28,6 +28,13 @@ func main() {
 		cfg.LiveKitAPIKey,
 		cfg.LiveKitAPISecret,
 	)
+	// liveController drives the LiveKit media session for moderation (kick /
+	// mute / voice-block). Without API credentials there's no usable control
+	// plane, so leave it nil and let the chat layer degrade to DB-only state.
+	var liveController *livekithandler.Controller
+	if cfg.LiveKitAPIKey != "" && cfg.LiveKitAPISecret != "" {
+		liveController = livekithandler.NewController(roomClient)
+	}
 
 	bus := eventbus.New()
 
@@ -44,7 +51,7 @@ func main() {
 	authMW := &auth.AuthMiddleware{DB: pool, JWTSecret: cfg.JWTSecret}
 	chatGroup := api.Group("")
 	chatGroup.Use(authMW.Handle)
-	chatHandler := chat.RegisterRoutes(chatGroup, pool, cfg, bus)
+	chatHandler := chat.RegisterRoutes(chatGroup, pool, cfg, bus, liveController)
 
 	lkGroup := r.Group("/livekit")
 	lkGroup.Use(authMW.Handle)

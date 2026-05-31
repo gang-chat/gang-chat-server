@@ -8,18 +8,42 @@ import (
 	"github.com/zhuangkaiyi/gang-chat/server/internal/eventbus"
 )
 
+// liveMediaController is the subset of LiveKit room-control operations the
+// chat layer drives. *livekit.Controller satisfies it; tests inject a fake.
+// When LiveKit isn't configured (dev mode / tests) RegisterRoutes substitutes
+// noopLiveController so call sites never hold a nil interface and moderation
+// degrades cleanly to DB-only bookkeeping.
+type liveMediaController interface {
+	RemoveParticipant(room, identity string) error
+	SetCanPublish(room, identity string, canPublish bool) error
+	MuteMicrophone(room, identity string, muted bool) error
+}
+
+// noopLiveController is the DB-only fallback: every media-control op succeeds
+// without touching a LiveKit session.
+type noopLiveController struct{}
+
+func (noopLiveController) RemoveParticipant(string, string) error    { return nil }
+func (noopLiveController) SetCanPublish(string, string, bool) error  { return nil }
+func (noopLiveController) MuteMicrophone(string, string, bool) error { return nil }
+
 type Handler struct {
-	DB  *sql.DB
-	Cfg *config.Config
-	Bus *eventbus.Bus
+	DB   *sql.DB
+	Cfg  *config.Config
+	Bus  *eventbus.Bus
+	Live liveMediaController
 }
 
 // RegisterRoutes wires the chat API onto g and returns the handler so the
 // caller (main.go) can reuse it elsewhere — e.g. to let the LiveKit webhook
 // publish live snapshots through the same bus. bus may be nil (tests); all
-// publish paths tolerate a nil bus.
-func RegisterRoutes(g *gin.RouterGroup, db *sql.DB, cfg *config.Config, bus *eventbus.Bus) *Handler {
-	h := &Handler{DB: db, Cfg: cfg, Bus: bus}
+// publish paths tolerate a nil bus. live may be nil; moderation then degrades
+// to DB-only bookkeeping without driving the LiveKit media session.
+func RegisterRoutes(g *gin.RouterGroup, db *sql.DB, cfg *config.Config, bus *eventbus.Bus, live liveMediaController) *Handler {
+	if live == nil {
+		live = noopLiveController{}
+	}
+	h := &Handler{DB: db, Cfg: cfg, Bus: bus, Live: live}
 
 	g.GET("/me/stream", h.liveStream)
 

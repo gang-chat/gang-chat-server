@@ -7,12 +7,6 @@ rtc:
   node_ip: 103.47.83.189
   stun_servers:
     - 103.47.83.189:3478
-turn:
-  enabled: true
-  tls_port: 443
-  domain: loganz2.cn
-  cert_file: /etc/livekit/cert.pem
-  key_file: /etc/livekit/key.pem
 keys:
   ikun: yingmianzoulaidenirangworucichunchunyudong
 webhook:
