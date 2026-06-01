@@ -120,6 +120,11 @@ func (h *Handler) joinRoom(c *gin.Context) {
 		h.jsonError(c, http.StatusInternalServerError, "internal_error", "failed to read room")
 		return
 	}
+	// New member gets the room added to their list; everyone already in the
+	// room gets an updated snapshot (member_count went up). Exclude the joiner
+	// from the update so they don't get both events for the same change.
+	h.publishRoomToUser(userID, roomID, "room_added")
+	h.publishRoomUpdated(roomID, userID)
 	c.JSON(http.StatusOK, gin.H{"room": detail})
 }
 
@@ -146,13 +151,22 @@ func (h *Handler) leaveRoom(c *gin.Context) {
 		h.jsonError(c, http.StatusInternalServerError, "internal_error", "failed to leave room")
 		return
 	}
-	if _, err := h.pruneOrRepairRoomTx(tx, roomID); err != nil {
+	pruned, err := h.pruneOrRepairRoomTx(tx, roomID)
+	if err != nil {
 		h.jsonError(c, http.StatusInternalServerError, "internal_error", "failed to repair room admins")
 		return
 	}
 	if err := tx.Commit(); err != nil {
 		h.jsonError(c, http.StatusInternalServerError, "internal_error", "failed to save room state")
 		return
+	}
+	// The leaver always drops the room from their list. If the room still
+	// exists, surviving members get a fresh snapshot (member_count down, and
+	// possibly a repaired admin). If it was pruned to empty there's no one left
+	// to notify.
+	h.publishRoomDeleted(roomID, userID)
+	if !pruned {
+		h.publishRoomUpdated(roomID)
 	}
 	c.JSON(http.StatusOK, gin.H{"ok": true})
 }

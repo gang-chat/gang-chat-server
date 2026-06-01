@@ -159,6 +159,10 @@ func (h *Handler) sendMessage(c *gin.Context) {
 		h.jsonError(c, http.StatusInternalServerError, "internal_error", "failed to read message")
 		return
 	}
+	// last_message lives in the room-list snapshot, so a new message refreshes
+	// every member's list entry. Clients use the new last_message to bump their
+	// own unread counter; the count itself is never on the wire (it's personal).
+	h.publishRoomUpdated(roomID)
 	h.idempotentJSON(c, http.StatusCreated, rawBody, gin.H{"message": msg})
 }
 
