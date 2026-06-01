@@ -200,6 +200,35 @@ func (b *Bus) PublishRoom(roomID string, ev Event) {
 	}
 }
 
+// AddUserRoomInterest adds roomID to the interest set of every connection
+// currently owned by userID, so they start receiving that room's PublishRoom
+// fan-out without reconnecting. This is for the case where interest is gained
+// mid-session rather than at connect time — e.g. a superuser ghost who opened
+// their SSE stream long ago and only now joins a room's voice channel. A plain
+// PublishUser event reaches them regardless of interest, but the ongoing live
+// snapshots flow through PublishRoom, which is interest-gated; without this
+// they'd hear nothing until the next reconnect re-seeds interest from the DB.
+// No-op if the user has no live connections.
+func (b *Bus) AddUserRoomInterest(userID, roomID string) {
+	if roomID == "" {
+		return
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	for _, sub := range b.byUser[userID] {
+		if _, had := sub.rooms[roomID]; had {
+			continue
+		}
+		sub.rooms[roomID] = struct{}{}
+		subs, ok := b.byRoom[roomID]
+		if !ok {
+			subs = make(map[uint64]*Subscription)
+			b.byRoom[roomID] = subs
+		}
+		subs[sub.id] = sub
+	}
+}
+
 // PublishUser delivers ev to every connection owned by userID, regardless
 // of room interest. This is the delivery path for account-scoped events:
 // membership changes ("you were added to / removed from a room"), "you were

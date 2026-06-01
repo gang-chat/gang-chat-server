@@ -90,10 +90,20 @@ func writeSSE(w gin.ResponseWriter, eventName string, payload any) error {
 	return nil
 }
 
-// userRoomIDs returns every room the user is a member of, which is the SSE
-// subscription's interest set at connect time.
+// userRoomIDs returns the SSE subscription's interest set at connect time:
+// every room the user is a member of, plus any room where they're currently a
+// live participant. The latter matters for a superuser ghost, who joins a
+// room's voice channel without a membership row — without it they'd receive no
+// live snapshots (those fan out via PublishRoom, gated by this set). On
+// reconnect the set is rebuilt, and live join itself publishes a fresh
+// snapshot, so transient gaps self-heal.
 func (h *Handler) userRoomIDs(userID string) ([]string, error) {
-	rows, err := h.DB.Query(`SELECT room_id FROM room_memberships WHERE user_id = ?`, userID)
+	rows, err := h.DB.Query(
+		`SELECT room_id FROM room_memberships WHERE user_id = ?
+		 UNION
+		 SELECT room_id FROM live_participants WHERE user_id = ?`,
+		userID, userID,
+	)
 	if err != nil {
 		return nil, err
 	}

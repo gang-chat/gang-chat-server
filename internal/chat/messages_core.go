@@ -93,7 +93,10 @@ func (h *Handler) listMessages(c *gin.Context) {
 func (h *Handler) sendMessage(c *gin.Context) {
 	roomID := c.Param("room_id")
 	userID := currentUserID(c)
-	if !h.requireMember(c, roomID) {
+	// requireRoomAccess lets a superuser ghost (no membership row) post for
+	// announcements/moderation; their message carries their normal sender
+	// identity. Normal non-members still get 404.
+	if !h.requireRoomAccess(c, roomID) {
 		return
 	}
 

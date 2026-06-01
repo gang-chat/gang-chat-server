@@ -25,7 +25,11 @@ func (h *Handler) getLiveState(c *gin.Context) {
 func (h *Handler) joinLive(c *gin.Context) {
 	roomID := c.Param("room_id")
 	userID := currentUserID(c)
-	if !h.requireMember(c, roomID) {
+	// requireRoomAccess, not requireMember: a superuser is never a room member
+	// (joining would expose them in the member list), but must still be able to
+	// drop into any room's voice channel. The live_participants row created
+	// below is what makes them visible — only inside live, never in the roster.
+	if !h.requireRoomAccess(c, roomID) {
 		return
 	}
 
@@ -89,6 +93,14 @@ func (h *Handler) joinLive(c *gin.Context) {
 		return
 	}
 
+	// Make sure this user's live connections receive the room's live fan-out
+	// from here on. For a member it's already in their interest set; for a
+	// superuser ghost (no membership row) it isn't, and the snapshot below plus
+	// every later live delta would otherwise be filtered out until reconnect.
+	if h.Bus != nil {
+		h.Bus.AddUserRoomInterest(userID, roomID)
+	}
+
 	h.PublishLiveSnapshot(roomID, "live_participant_joined", map[string]any{
 		"user_id": userID,
 	})
@@ -108,7 +120,9 @@ func (h *Handler) joinLive(c *gin.Context) {
 func (h *Handler) updateMyLiveState(c *gin.Context) {
 	roomID := c.Param("room_id")
 	userID := currentUserID(c)
-	if !h.requireMember(c, roomID) {
+	// See joinLive: a superuser ghost has no membership row but is a live
+	// participant, so gate on room access rather than membership.
+	if !h.requireRoomAccess(c, roomID) {
 		return
 	}
 

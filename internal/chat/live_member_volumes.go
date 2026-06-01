@@ -10,7 +10,8 @@ import (
 func (h *Handler) listMyLiveMemberVolumes(c *gin.Context) {
 	roomID := c.Param("room_id")
 	listenerID := currentUserID(c)
-	if !h.requireMember(c, roomID) {
+	// A superuser ghost (in live, not a member) still sets per-listener volumes.
+	if !h.requireRoomAccess(c, roomID) {
 		return
 	}
 
@@ -44,7 +45,8 @@ func (h *Handler) listMyLiveMemberVolumes(c *gin.Context) {
 func (h *Handler) updateMyLiveMemberVolume(c *gin.Context) {
 	roomID := c.Param("room_id")
 	listenerID := currentUserID(c)
-	if !h.requireMember(c, roomID) {
+	// A superuser ghost (in live, not a member) still sets per-listener volumes.
+	if !h.requireRoomAccess(c, roomID) {
 		return
 	}
 
@@ -53,7 +55,10 @@ func (h *Handler) updateMyLiveMemberVolume(c *gin.Context) {
 		h.jsonError(c, http.StatusBadRequest, "validation_failed", "valid target_user_id is required")
 		return
 	}
-	if !h.isRoomMember(roomID, targetID) {
+	// The target is someone you hear in live, so accept any room member or
+	// current live participant. The latter covers a superuser ghost, who is in
+	// live but holds no membership row.
+	if !h.isRoomMember(roomID, targetID) && !h.isLiveParticipant(roomID, targetID) {
 		h.jsonError(c, http.StatusNotFound, "not_found", "target member not found")
 		return
 	}
