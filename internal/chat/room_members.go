@@ -166,6 +166,9 @@ func (h *Handler) updateRoomSettings(c *gin.Context) {
 		h.jsonError(c, http.StatusInternalServerError, "internal_error", "update room settings failed")
 		return
 	}
+	// Name / avatar / visibility / join_policy etc. all live in the room-list
+	// snapshot, so every member's list entry needs to be refreshed.
+	h.publishRoomUpdated(roomID)
 	c.JSON(http.StatusOK, gin.H{"settings": h.roomSettingsPayload(roomID)})
 }
 
@@ -181,7 +184,7 @@ func (h *Handler) inviteMember(c *gin.Context) {
 		return
 	}
 	now := nowMillis()
-	_, err := h.DB.Exec(
+	res, err := h.DB.Exec(
 		`INSERT INTO room_memberships (room_id, user_id, role, joined_at)
 		 VALUES (?, ?, 'member', ?)
 		 ON CONFLICT(room_id, user_id) DO NOTHING`,
@@ -192,6 +195,12 @@ func (h *Handler) inviteMember(c *gin.Context) {
 		return
 	}
 	member := h.memberPayload(roomID, req.UserID)
+	// Only fan out when a membership was actually created — re-inviting an
+	// existing member is a no-op and shouldn't spam the room.
+	if n, _ := res.RowsAffected(); n > 0 {
+		h.publishRoomToUser(req.UserID, roomID, "room_added")
+		h.publishRoomUpdated(roomID, req.UserID)
+	}
 	c.JSON(http.StatusCreated, gin.H{"member": member})
 }
 
@@ -232,13 +241,20 @@ func (h *Handler) removeMember(c *gin.Context) {
 		h.jsonError(c, http.StatusNotFound, "not_found", "member not found")
 		return
 	}
-	if _, err := h.pruneOrRepairRoomTx(tx, roomID); err != nil {
+	pruned, err := h.pruneOrRepairRoomTx(tx, roomID)
+	if err != nil {
 		h.jsonError(c, http.StatusInternalServerError, "internal_error", "repair room admins failed")
 		return
 	}
 	if err := tx.Commit(); err != nil {
 		h.jsonError(c, http.StatusInternalServerError, "internal_error", "save membership failed")
 		return
+	}
+	// Removed user drops the room; survivors get the bumped-down snapshot
+	// (unless the room was pruned to empty, leaving no one to notify).
+	h.publishRoomDeleted(roomID, targetID)
+	if !pruned {
+		h.publishRoomUpdated(roomID)
 	}
 	c.JSON(http.StatusOK, gin.H{"ok": true})
 }
@@ -289,6 +305,10 @@ func (h *Handler) updateMemberRole(c *gin.Context) {
 		h.jsonError(c, http.StatusInternalServerError, "internal_error", "save membership failed")
 		return
 	}
+	// Role is a personal field (my_role), not part of the shared snapshot, so a
+	// room_updated wouldn't carry it. Tell the affected user directly so their
+	// permissions UI reflects the change without a manual refetch.
+	h.publishRoomRole(roomID, targetID)
 	c.JSON(http.StatusOK, gin.H{"member": h.memberPayload(roomID, targetID)})
 }
 
@@ -403,6 +423,13 @@ func (h *Handler) reviewJoinRequest(c *gin.Context) {
 		)
 	}
 	_, _ = h.DB.Exec(`UPDATE join_requests SET status = ?, updated_at = ? WHERE id = ?`, newStatus, nowMillis(), c.Param("request_id"))
+	if newStatus == "approved" {
+		// The applicant's existing SSE connection isn't subscribed to this room
+		// (they weren't a member when it connected), so room_added reaches them
+		// by userID. Existing members get the bumped member_count.
+		h.publishRoomToUser(userID, roomID, "room_added")
+		h.publishRoomUpdated(roomID, userID)
+	}
 	c.JSON(http.StatusOK, gin.H{"ok": true})
 }
 
@@ -428,7 +455,11 @@ func (h *Handler) deleteRoom(c *gin.Context) {
 		h.jsonError(c, http.StatusBadRequest, "validation_failed", "confirm_rid mismatch")
 		return
 	}
+	// Capture the audience before the row is gone — afterwards there's no
+	// membership left to enumerate.
+	members, _ := h.roomMemberIDs(roomID)
 	_, _ = h.DB.Exec(`DELETE FROM rooms WHERE id = ?`, roomID)
+	h.publishRoomDeleted(roomID, members...)
 	c.JSON(http.StatusOK, gin.H{"ok": true})
 }
 

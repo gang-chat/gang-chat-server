@@ -14,6 +14,7 @@ import (
 	"github.com/zhuangkaiyi/gang-chat/server/internal/auth"
 	"github.com/zhuangkaiyi/gang-chat/server/internal/config"
 	"github.com/zhuangkaiyi/gang-chat/server/internal/db"
+	"github.com/zhuangkaiyi/gang-chat/server/internal/eventbus"
 	"github.com/zhuangkaiyi/gang-chat/server/internal/idgen"
 )
 
@@ -22,6 +23,7 @@ type apiHarness struct {
 	router *gin.Engine
 	db     *sql.DB
 	live   *fakeLiveController
+	bus    *eventbus.Bus
 }
 
 // fakeLiveController records the LiveKit media-control calls moderation makes,
@@ -76,9 +78,10 @@ func newAPIHarness(t *testing.T) *apiHarness {
 	chatGroup := api.Group("")
 	chatGroup.Use(authMW.Handle)
 	live := &fakeLiveController{}
-	RegisterRoutes(chatGroup, pool, cfg, nil, live)
+	bus := eventbus.New()
+	RegisterRoutes(chatGroup, pool, cfg, bus, live)
 
-	return &apiHarness{t: t, router: router, db: pool, live: live}
+	return &apiHarness{t: t, router: router, db: pool, live: live, bus: bus}
 }
 
 func (h *apiHarness) request(method, path, token string, body any) (int, map[string]any) {

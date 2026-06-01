@@ -144,6 +144,9 @@ func (h *Handler) createRoom(c *gin.Context) {
 		h.jsonError(c, http.StatusInternalServerError, "internal_error", "failed to read room")
 		return
 	}
+	// The creator is the only member, so a single room_added (covering all of
+	// their other devices) is the whole fan-out.
+	h.publishRoomToUser(userID, roomID, "room_added")
 	h.idempotentJSON(c, http.StatusCreated, rawBody, gin.H{"room": detail})
 }
 

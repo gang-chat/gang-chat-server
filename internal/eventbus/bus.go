@@ -108,6 +108,12 @@ func (s *Subscription) Close() {
 			}
 		}
 	}
+	if conns, ok := s.bus.byUser[s.userID]; ok {
+		delete(conns, s.id)
+		if len(conns) == 0 {
+			delete(s.bus.byUser, s.userID)
+		}
+	}
 	delete(s.bus.byID, s.id)
 	s.bus.mu.Unlock()
 	close(s.events)
@@ -123,6 +129,13 @@ type Bus struct {
 	// Maintained in lockstep with Subscription.rooms so PublishRoom is O(N)
 	// in subscribers-of-that-room rather than O(total-subscribers).
 	byRoom map[string]map[uint64]*Subscription
+	// byUser maps userID -> set of that user's live connections. Unlike
+	// byRoom this never depends on room membership: a connection's userID is
+	// fixed for its whole lifetime, so this index is the stable way to reach
+	// "every device this account has online right now" — which is exactly the
+	// audience for account-scoped events (PublishUser). Maintained in lockstep
+	// with Subscribe/Close.
+	byUser map[string]map[uint64]*Subscription
 }
 
 // New creates an empty Bus.
@@ -130,6 +143,7 @@ func New() *Bus {
 	return &Bus{
 		byID:   make(map[uint64]*Subscription),
 		byRoom: make(map[string]map[uint64]*Subscription),
+		byUser: make(map[string]map[uint64]*Subscription),
 	}
 }
 
@@ -152,6 +166,12 @@ func (b *Bus) Subscribe(userID string) *Subscription {
 	}
 	b.mu.Lock()
 	b.byID[id] = sub
+	conns, ok := b.byUser[userID]
+	if !ok {
+		conns = make(map[uint64]*Subscription)
+		b.byUser[userID] = conns
+	}
+	conns[id] = sub
 	b.mu.Unlock()
 	return sub
 }
@@ -181,15 +201,21 @@ func (b *Bus) PublishRoom(roomID string, ev Event) {
 }
 
 // PublishUser delivers ev to every connection owned by userID, regardless
-// of room interest. Useful for account-level events ("you were kicked",
-// "your password changed elsewhere", ...).
+// of room interest. This is the delivery path for account-scoped events:
+// membership changes ("you were added to / removed from a room"), "you were
+// kicked", "your password changed elsewhere", and so on. It reaches a user's
+// connections even for rooms they don't (yet) subscribe to, which is what
+// makes it the right tool for telling someone they've just joined a room.
 func (b *Bus) PublishUser(userID string, ev Event) {
 	b.mu.RLock()
-	subs := make([]*Subscription, 0)
-	for _, sub := range b.byID {
-		if sub.userID == userID {
-			subs = append(subs, sub)
-		}
+	conns := b.byUser[userID]
+	if len(conns) == 0 {
+		b.mu.RUnlock()
+		return
+	}
+	subs := make([]*Subscription, 0, len(conns))
+	for _, sub := range conns {
+		subs = append(subs, sub)
 	}
 	b.mu.RUnlock()
 	for _, sub := range subs {
