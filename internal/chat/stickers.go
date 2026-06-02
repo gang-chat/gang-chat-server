@@ -125,7 +125,14 @@ func (h *Handler) addSticker(c *gin.Context) {
 		return
 	}
 	var req stickerRequest
-	if err := c.ShouldBindJSON(&req); err != nil || req.AssetID == "" {
+	rawBody, ok := h.bindJSON(c, &req)
+	if !ok {
+		return
+	}
+	if h.replayIdempotency(c, rawBody) {
+		return
+	}
+	if req.AssetID == "" {
 		h.jsonError(c, http.StatusBadRequest, "validation_failed", "asset_id is required")
 		return
 	}
@@ -146,7 +153,7 @@ func (h *Handler) addSticker(c *gin.Context) {
 		h.jsonError(c, http.StatusInternalServerError, "internal_error", "add sticker failed")
 		return
 	}
-	c.JSON(http.StatusCreated, gin.H{"sticker": gin.H{"id": id, "asset_id": req.AssetID, "name": name, "sort_order": sortOrder}})
+	h.idempotentJSON(c, http.StatusCreated, rawBody, gin.H{"sticker": gin.H{"id": id, "asset_id": req.AssetID, "name": name, "sort_order": sortOrder}})
 }
 
 func (h *Handler) deleteSticker(c *gin.Context) {
