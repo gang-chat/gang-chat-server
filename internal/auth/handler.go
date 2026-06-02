@@ -16,16 +16,22 @@ import (
 )
 
 type Handler struct {
-	DB    *sql.DB
-	Cfg   *config.Config
-	Limit *RateLimiter
+	DB               *sql.DB
+	Cfg              *config.Config
+	Limit            *RateLimiter
+	LocationResolver *SessionLocationResolver
 }
 
 func NewHandler(db *sql.DB, cfg *config.Config) *Handler {
+	locationResolver, err := NewSessionLocationResolver(cfg.GeoIPDatabasePath)
+	if err != nil {
+		panic(err)
+	}
 	return &Handler{
-		DB:    db,
-		Cfg:   cfg,
-		Limit: NewRateLimiter(cfg.LoginMaxAttempts, cfg.LoginWindowSeconds),
+		DB:               db,
+		Cfg:              cfg,
+		Limit:            NewRateLimiter(cfg.LoginMaxAttempts, cfg.LoginWindowSeconds),
+		LocationResolver: locationResolver,
 	}
 }
 
@@ -295,7 +301,7 @@ func (h *Handler) listSessions(c *gin.Context) {
 			ID:         s.ID,
 			UserAgent:  s.UserAgent,
 			IPAddress:  s.IPAddress,
-			Location:   sessionLocation(s.IPAddress),
+			Location:   h.sessionLocation(s.IPAddress),
 			CreatedAt:  s.CreatedAt,
 			LastUsedAt: s.LastUsedAt,
 			ExpiresAt:  s.ExpiresAt,
@@ -432,14 +438,9 @@ func rfc3339(t time.Time) string {
 	return t.UTC().Format(time.RFC3339Nano)
 }
 
-func sessionLocation(ip *string) string {
-	if ip == nil || *ip == "" {
-		return "未知地点"
+func (h *Handler) sessionLocation(ip *string) string {
+	if h == nil || h.LocationResolver == nil {
+		return (&SessionLocationResolver{}).Location(ip)
 	}
-	switch *ip {
-	case "127.0.0.1", "::1", "localhost":
-		return "本机"
-	default:
-		return "未知地点"
-	}
+	return h.LocationResolver.Location(ip)
 }
