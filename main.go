@@ -44,6 +44,7 @@ func main() {
 
 	r.GET("/health", func(c *gin.Context) { c.String(200, "ok") })
 	r.GET("/healthz", func(c *gin.Context) { c.JSON(200, gin.H{"ok": true}) })
+	r.Static("/assets", cfg.AssetDir)
 
 	api := r.Group("/api/v1")
 	auth.RegisterRoutes(api, pool, cfg)

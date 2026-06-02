@@ -4,8 +4,10 @@ import (
 	"bytes"
 	"database/sql"
 	"encoding/json"
+	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strconv"
 	"testing"
@@ -24,6 +26,7 @@ type apiHarness struct {
 	db     *sql.DB
 	live   *fakeLiveController
 	bus    *eventbus.Bus
+	assets string
 }
 
 // fakeLiveController records the LiveKit media-control calls moderation makes,
@@ -59,15 +62,17 @@ func newAPIHarness(t *testing.T) *apiHarness {
 	t.Helper()
 	gin.SetMode(gin.TestMode)
 
+	root := t.TempDir()
 	cfg := &config.Config{
 		JWTSecret:              "test-secret",
 		AccessTokenTTLSeconds:  900,
 		RefreshTokenTTLSeconds: 2592000,
 		LoginMaxAttempts:       5,
 		LoginWindowSeconds:     900,
+		AssetDir:               filepath.Join(root, "assets"),
 		LiveKitHost:            "http://localhost:7880",
 	}
-	pool := db.Connect(filepath.Join(t.TempDir(), "gang-chat-test.db"))
+	pool := db.Connect(filepath.Join(root, "gang-chat-test.db"))
 	t.Cleanup(func() { _ = pool.Close() })
 
 	router := gin.New()
@@ -81,7 +86,14 @@ func newAPIHarness(t *testing.T) *apiHarness {
 	bus := eventbus.New()
 	RegisterRoutes(chatGroup, pool, cfg, bus, live)
 
-	return &apiHarness{t: t, router: router, db: pool, live: live, bus: bus}
+	return &apiHarness{
+		t:      t,
+		router: router,
+		db:     pool,
+		live:   live,
+		bus:    bus,
+		assets: cfg.AssetDir,
+	}
 }
 
 func (h *apiHarness) request(method, path, token string, body any) (int, map[string]any) {
@@ -727,6 +739,56 @@ func TestSaveStickerToPersonalAndRoomPacks(t *testing.T) {
 	roomPack := response["pack"].(map[string]any)
 	if roomPack["scope"] != "room" || roomPack["room_id"] != roomID {
 		t.Fatalf("admin should save to room pack: %v", response)
+	}
+}
+
+func TestUploadImageStoresAssetFile(t *testing.T) {
+	api := newAPIHarness(t)
+	owner := api.register("asset_owner")
+
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+	if err := writer.WriteField("purpose", "avatar"); err != nil {
+		t.Fatalf("write purpose: %v", err)
+	}
+	part, err := writer.CreateFormFile("file", "avatar.png")
+	if err != nil {
+		t.Fatalf("create form file: %v", err)
+	}
+	pngBytes := []byte{0x89, 'P', 'N', 'G', '\r', '\n', 0x1a, '\n', 0, 0, 0, 0}
+	if _, err := part.Write(pngBytes); err != nil {
+		t.Fatalf("write form file: %v", err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatalf("close multipart writer: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/uploads/images", &body)
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+	req.Header.Set("Authorization", "Bearer "+owner.Token)
+	rec := httptest.NewRecorder()
+	api.router.ServeHTTP(rec, req)
+
+	var response map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &response); err != nil {
+		t.Fatalf("decode response: %v body=%q", err, rec.Body.String())
+	}
+	api.requireStatus(rec.Code, http.StatusCreated, response)
+	asset := response["asset"].(map[string]any)
+	if asset["mime_type"] != "image/png" {
+		t.Fatalf("expected sniffed image/png mime: %v", asset)
+	}
+	assetID := asset["id"].(string)
+	var filename string
+	if err := api.db.QueryRow(`SELECT filename FROM assets WHERE id = ?`, assetID).Scan(&filename); err != nil {
+		t.Fatalf("read asset row: %v", err)
+	}
+	saved, err := os.ReadFile(filepath.Join(api.assets, assetID, filename))
+	if err != nil {
+		t.Fatalf("read saved asset: %v", err)
+	}
+	if !bytes.Equal(saved, pngBytes) {
+		t.Fatalf("saved asset bytes changed: %v", saved)
 	}
 }
 

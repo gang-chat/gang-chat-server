@@ -14,6 +14,7 @@ type Config struct {
 	RefreshTokenTTLSeconds int64
 	LoginMaxAttempts       int
 	LoginWindowSeconds     int64
+	AssetDir               string
 	LiveKitHost            string
 	LiveKitAPIKey          string
 	LiveKitAPISecret       string
@@ -44,6 +45,7 @@ func Load() *Config {
 		RefreshTokenTTLSeconds: envIntOr("GANG_REFRESH_TOKEN_TTL", 2592000),
 		LoginMaxAttempts:       int(envIntOr("GANG_LOGIN_MAX_ATTEMPTS", 5)),
 		LoginWindowSeconds:     envIntOr("GANG_LOGIN_WINDOW_SECONDS", 900),
+		AssetDir:               envOr("GANG_ASSET_DIR", "assets"),
 		LiveKitHost:            envOr("LIVEKIT_HOST", "http://localhost:7880"),
 		LiveKitAPIKey:          envOr("LIVEKIT_API_KEY", ""),
 		LiveKitAPISecret:       envOr("LIVEKIT_API_SECRET", ""),
@@ -52,6 +54,7 @@ func Load() *Config {
 	flag.StringVar(&cfg.Bind, "bind", cfg.Bind, "listen address")
 	flag.StringVar(&cfg.JWTSecret, "jwt-secret", cfg.JWTSecret, "JWT signing secret")
 	flag.StringVar(&cfg.DatabaseURL, "database-url", cfg.DatabaseURL, "SQLite database path")
+	flag.StringVar(&cfg.AssetDir, "asset-dir", cfg.AssetDir, "uploaded asset directory")
 	flag.Parse()
 
 	if cfg.JWTSecret == "" {
