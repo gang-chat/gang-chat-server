@@ -1,8 +1,13 @@
 package chat
 
 import (
+	"archive/zip"
+	"bytes"
 	"database/sql"
+	"fmt"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/gin-gonic/gin"
@@ -140,6 +145,7 @@ func (h *Handler) addSticker(c *gin.Context) {
 	if name == "" {
 		name = "sticker"
 	}
+	name = h.uniqueStickerName(c.Param("pack_id"), name, "")
 	sortOrder := 10
 	if req.SortOrder != nil {
 		sortOrder = *req.SortOrder
@@ -153,7 +159,95 @@ func (h *Handler) addSticker(c *gin.Context) {
 		h.jsonError(c, http.StatusInternalServerError, "internal_error", "add sticker failed")
 		return
 	}
-	h.idempotentJSON(c, http.StatusCreated, rawBody, gin.H{"sticker": gin.H{"id": id, "asset_id": req.AssetID, "name": name, "sort_order": sortOrder}})
+	h.touchStickerPack(c.Param("pack_id"))
+	h.idempotentJSON(c, http.StatusCreated, rawBody, gin.H{"sticker": h.stickerPayload(id)})
+}
+
+func (h *Handler) updateSticker(c *gin.Context) {
+	packID := c.Param("pack_id")
+	stickerID := c.Param("sticker_id")
+	if !h.canManageStickerPack(packID, currentUserID(c)) {
+		h.jsonError(c, http.StatusForbidden, "forbidden", "cannot manage sticker pack")
+		return
+	}
+	var req stickerRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		h.jsonError(c, http.StatusBadRequest, "bad_request", "invalid JSON body")
+		return
+	}
+
+	var exists int
+	if err := h.DB.QueryRow(`SELECT COUNT(*) FROM stickers WHERE id = ? AND pack_id = ?`, stickerID, packID).Scan(&exists); err != nil || exists == 0 {
+		h.jsonError(c, http.StatusNotFound, "not_found", "sticker not found")
+		return
+	}
+
+	name := strings.TrimSpace(req.Name)
+	if name != "" {
+		name = h.uniqueStickerName(packID, name, stickerID)
+		if _, err := h.DB.Exec(`UPDATE stickers SET name = ? WHERE id = ? AND pack_id = ?`, name, stickerID, packID); err != nil {
+			h.jsonError(c, http.StatusInternalServerError, "internal_error", "update sticker failed")
+			return
+		}
+	}
+	if req.SortOrder != nil {
+		if _, err := h.DB.Exec(`UPDATE stickers SET sort_order = ? WHERE id = ? AND pack_id = ?`, *req.SortOrder, stickerID, packID); err != nil {
+			h.jsonError(c, http.StatusInternalServerError, "internal_error", "update sticker failed")
+			return
+		}
+	}
+	h.touchStickerPack(packID)
+	c.JSON(http.StatusOK, gin.H{"sticker": h.stickerPayload(stickerID)})
+}
+
+func (h *Handler) reorderStickers(c *gin.Context) {
+	packID := c.Param("pack_id")
+	if !h.canManageStickerPack(packID, currentUserID(c)) {
+		h.jsonError(c, http.StatusForbidden, "forbidden", "cannot manage sticker pack")
+		return
+	}
+	var req stickerReorderRequest
+	if err := c.ShouldBindJSON(&req); err != nil || len(req.StickerIDs) == 0 {
+		h.jsonError(c, http.StatusBadRequest, "validation_failed", "sticker_ids are required")
+		return
+	}
+	seen := make(map[string]bool, len(req.StickerIDs))
+	tx, err := h.DB.Begin()
+	if err != nil {
+		h.jsonError(c, http.StatusInternalServerError, "internal_error", "reorder stickers failed")
+		return
+	}
+	for index, rawID := range req.StickerIDs {
+		stickerID := strings.TrimSpace(rawID)
+		if stickerID == "" || seen[stickerID] {
+			_ = tx.Rollback()
+			h.jsonError(c, http.StatusBadRequest, "validation_failed", "sticker_ids must be unique")
+			return
+		}
+		seen[stickerID] = true
+		result, err := tx.Exec(`UPDATE stickers SET sort_order = ? WHERE id = ? AND pack_id = ?`, (index+1)*10, stickerID, packID)
+		if err != nil {
+			_ = tx.Rollback()
+			h.jsonError(c, http.StatusInternalServerError, "internal_error", "reorder stickers failed")
+			return
+		}
+		changed, _ := result.RowsAffected()
+		if changed == 0 {
+			_ = tx.Rollback()
+			h.jsonError(c, http.StatusNotFound, "not_found", "sticker not found")
+			return
+		}
+	}
+	if _, err := tx.Exec(`UPDATE sticker_packs SET updated_at = ? WHERE id = ?`, nowMillis(), packID); err != nil {
+		_ = tx.Rollback()
+		h.jsonError(c, http.StatusInternalServerError, "internal_error", "reorder stickers failed")
+		return
+	}
+	if err := tx.Commit(); err != nil {
+		h.jsonError(c, http.StatusInternalServerError, "internal_error", "reorder stickers failed")
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"pack": h.stickerPackByID(packID)})
 }
 
 func (h *Handler) deleteSticker(c *gin.Context) {
@@ -162,7 +256,67 @@ func (h *Handler) deleteSticker(c *gin.Context) {
 		return
 	}
 	_, _ = h.DB.Exec(`DELETE FROM stickers WHERE id = ? AND pack_id = ?`, c.Param("sticker_id"), c.Param("pack_id"))
+	h.touchStickerPack(c.Param("pack_id"))
 	c.JSON(http.StatusOK, gin.H{"ok": true})
+}
+
+func (h *Handler) downloadStickers(c *gin.Context) {
+	ids := parseStickerIDList(c.Query("ids"))
+	if len(ids) == 0 {
+		h.jsonError(c, http.StatusBadRequest, "validation_failed", "ids are required")
+		return
+	}
+	items := make([]downloadableSticker, 0, len(ids))
+	for _, id := range ids {
+		item, ok := h.downloadableSticker(id, currentUserID(c))
+		if !ok {
+			h.jsonError(c, http.StatusNotFound, "not_found", "sticker not found")
+			return
+		}
+		items = append(items, item)
+	}
+	if len(items) == 1 {
+		item := items[0]
+		data, err := os.ReadFile(h.assetDiskPath(item.AssetID, item.Filename))
+		if err != nil {
+			h.jsonError(c, http.StatusNotFound, "not_found", "sticker file not found")
+			return
+		}
+		filename := safeDownloadFilename(item.Name, item.Filename)
+		c.Header("Content-Disposition", `attachment; filename="`+escapeDispositionFilename(filename)+`"`)
+		c.Data(http.StatusOK, item.MimeType, data)
+		return
+	}
+
+	var buffer bytes.Buffer
+	archive := zip.NewWriter(&buffer)
+	usedNames := make(map[string]int, len(items))
+	for _, item := range items {
+		data, err := os.ReadFile(h.assetDiskPath(item.AssetID, item.Filename))
+		if err != nil {
+			_ = archive.Close()
+			h.jsonError(c, http.StatusNotFound, "not_found", "sticker file not found")
+			return
+		}
+		entryName := uniqueDownloadFilename(usedNames, safeDownloadFilename(item.Name, item.Filename))
+		entry, err := archive.Create(entryName)
+		if err != nil {
+			_ = archive.Close()
+			h.jsonError(c, http.StatusInternalServerError, "internal_error", "create sticker archive failed")
+			return
+		}
+		if _, err := entry.Write(data); err != nil {
+			_ = archive.Close()
+			h.jsonError(c, http.StatusInternalServerError, "internal_error", "create sticker archive failed")
+			return
+		}
+	}
+	if err := archive.Close(); err != nil {
+		h.jsonError(c, http.StatusInternalServerError, "internal_error", "create sticker archive failed")
+		return
+	}
+	c.Header("Content-Disposition", `attachment; filename="stickers.zip"`)
+	c.Data(http.StatusOK, "application/zip", buffer.Bytes())
 }
 
 func (h *Handler) saveSticker(c *gin.Context) {
@@ -230,6 +384,7 @@ func (h *Handler) saveSticker(c *gin.Context) {
 	if name == "" {
 		name = "sticker"
 	}
+	name = h.uniqueStickerName(packID, name, "")
 	sortOrder := 10
 	if req.SortOrder != nil {
 		sortOrder = *req.SortOrder
@@ -243,9 +398,10 @@ func (h *Handler) saveSticker(c *gin.Context) {
 		h.jsonError(c, http.StatusInternalServerError, "internal_error", "save sticker failed")
 		return
 	}
+	h.touchStickerPack(packID)
 	c.JSON(http.StatusCreated, gin.H{
 		"pack":    h.stickerPackByID(packID),
-		"sticker": gin.H{"id": stickerID, "asset_id": assetID, "name": name, "sort_order": sortOrder},
+		"sticker": h.stickerPayload(stickerID),
 	})
 }
 
@@ -269,19 +425,41 @@ func (h *Handler) stickerPackPayload(id, scope string, roomID *string, name stri
 	if rows != nil {
 		defer rows.Close()
 		for rows.Next() {
-			var stickerID, stickerName, assetID, url, thumb, mimeType string
+			var stickerID, stickerName, assetID, url, mimeType string
+			var thumb sql.NullString
 			var stickerSort int
 			var width, height sql.NullInt64
 			var createdAt int64
 			if err := rows.Scan(&stickerID, &stickerName, &stickerSort, &assetID, &url, &thumb, &mimeType, &width, &height, &createdAt); err == nil {
 				stickers = append(stickers, gin.H{
 					"id": stickerID, "name": stickerName, "sort_order": stickerSort,
-					"asset": gin.H{"id": assetID, "url": url, "thumbnail_url": thumb, "mime_type": mimeType, "width": nullableInt64(width), "height": nullableInt64(height), "created_at": formatMillis(createdAt)},
+					"asset": gin.H{"id": assetID, "url": url, "thumbnail_url": nullableString(thumb), "mime_type": mimeType, "width": nullableInt64(width), "height": nullableInt64(height), "created_at": formatMillis(createdAt)},
 				})
 			}
 		}
 	}
 	return gin.H{"id": id, "scope": scope, "room_id": roomID, "name": name, "stickers": stickers, "sort_order": sortOrder, "updated_at": formatMillis(updatedAt)}
+}
+
+func (h *Handler) stickerPayload(id string) gin.H {
+	var stickerID, stickerName, assetID, url, mimeType string
+	var thumb sql.NullString
+	var stickerSort int
+	var width, height sql.NullInt64
+	var createdAt int64
+	err := h.DB.QueryRow(
+		`SELECT s.id, s.name, s.sort_order, a.id, a.url, a.thumbnail_url, a.mime_type, a.width, a.height, a.created_at
+		 FROM stickers s JOIN assets a ON a.id = s.asset_id
+		 WHERE s.id = ?`,
+		id,
+	).Scan(&stickerID, &stickerName, &stickerSort, &assetID, &url, &thumb, &mimeType, &width, &height, &createdAt)
+	if err != nil {
+		return gin.H{"id": id}
+	}
+	return gin.H{
+		"id": stickerID, "name": stickerName, "sort_order": stickerSort,
+		"asset": gin.H{"id": assetID, "url": url, "thumbnail_url": nullableString(thumb), "mime_type": mimeType, "width": nullableInt64(width), "height": nullableInt64(height), "created_at": formatMillis(createdAt)},
+	}
 }
 
 func (h *Handler) canManageStickerPack(packID, userID string) bool {
@@ -362,4 +540,118 @@ func (h *Handler) packHasScope(packID, scope, roomID string) bool {
 	}
 	_ = h.DB.QueryRow(`SELECT COUNT(*) FROM sticker_packs WHERE id = ? AND scope = ?`, packID, scope).Scan(&count)
 	return count > 0
+}
+
+func (h *Handler) uniqueStickerName(packID, desired, excludeStickerID string) string {
+	base := strings.TrimSpace(desired)
+	if base == "" {
+		base = "sticker"
+	}
+	rows, err := h.DB.Query(`SELECT name FROM stickers WHERE pack_id = ? AND id <> ?`, packID, excludeStickerID)
+	if err != nil {
+		return base
+	}
+	defer rows.Close()
+	existing := map[string]bool{}
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err == nil {
+			existing[name] = true
+		}
+	}
+	if !existing[base] {
+		return base
+	}
+	for index := 2; ; index++ {
+		candidate := fmt.Sprintf("%s (%d)", base, index)
+		if !existing[candidate] {
+			return candidate
+		}
+	}
+}
+
+func (h *Handler) touchStickerPack(packID string) {
+	_, _ = h.DB.Exec(`UPDATE sticker_packs SET updated_at = ? WHERE id = ?`, nowMillis(), packID)
+}
+
+type downloadableSticker struct {
+	ID       string
+	Name     string
+	AssetID  string
+	Filename string
+	MimeType string
+}
+
+func (h *Handler) downloadableSticker(stickerID, userID string) (downloadableSticker, bool) {
+	var item downloadableSticker
+	err := h.DB.QueryRow(
+		`SELECT s.id, s.name, a.id, a.filename, a.mime_type
+		 FROM stickers s
+		 JOIN sticker_packs p ON p.id = s.pack_id
+		 JOIN assets a ON a.id = s.asset_id
+		 WHERE s.id = ? AND p.scope = 'personal' AND p.owner_user_id = ?`,
+		stickerID, userID,
+	).Scan(&item.ID, &item.Name, &item.AssetID, &item.Filename, &item.MimeType)
+	return item, err == nil
+}
+
+func parseStickerIDList(raw string) []string {
+	seen := map[string]bool{}
+	ids := make([]string, 0)
+	for _, value := range strings.Split(raw, ",") {
+		id := strings.TrimSpace(value)
+		if id == "" || seen[id] {
+			continue
+		}
+		seen[id] = true
+		ids = append(ids, id)
+	}
+	return ids
+}
+
+func (h *Handler) assetDiskPath(assetID, filename string) string {
+	assetDir := "assets"
+	if h.Cfg != nil && h.Cfg.AssetDir != "" {
+		assetDir = h.Cfg.AssetDir
+	}
+	return filepath.Join(assetDir, assetID, filename)
+}
+
+func safeDownloadFilename(name, fallback string) string {
+	ext := filepath.Ext(fallback)
+	base := strings.TrimSpace(name)
+	if base == "" {
+		base = strings.TrimSuffix(filepath.Base(fallback), filepath.Ext(fallback))
+	}
+	var cleaned strings.Builder
+	for _, r := range base {
+		if r < 32 || strings.ContainsRune(`\/:*?"<>|`, r) {
+			cleaned.WriteByte('-')
+			continue
+		}
+		cleaned.WriteRune(r)
+	}
+	value := strings.Trim(cleaned.String(), " .-_")
+	if value == "" {
+		value = "sticker"
+	}
+	if ext == "" {
+		ext = ".png"
+	}
+	return value + strings.ToLower(ext)
+}
+
+func uniqueDownloadFilename(used map[string]int, filename string) string {
+	if used[filename] == 0 {
+		used[filename] = 1
+		return filename
+	}
+	used[filename]++
+	ext := filepath.Ext(filename)
+	stem := strings.TrimSuffix(filename, ext)
+	return fmt.Sprintf("%s (%d)%s", stem, used[filename], ext)
+}
+
+func escapeDispositionFilename(filename string) string {
+	return strings.ReplaceAll(filename, `"`, `'`)
 }

@@ -54,7 +54,10 @@ func RegisterRoutes(g *gin.RouterGroup, db *sql.DB, cfg *config.Config, bus *eve
 	g.PATCH("/sticker-packs/:pack_id", h.updateStickerPack)
 	g.DELETE("/sticker-packs/:pack_id", h.deleteStickerPack)
 	g.POST("/sticker-packs/:pack_id/stickers", h.addSticker)
+	g.POST("/sticker-packs/:pack_id/stickers/reorder", h.reorderStickers)
+	g.PATCH("/sticker-packs/:pack_id/stickers/:sticker_id", h.updateSticker)
 	g.DELETE("/sticker-packs/:pack_id/stickers/:sticker_id", h.deleteSticker)
+	g.GET("/stickers/download", h.downloadStickers)
 	g.POST("/rooms/:room_id/stickers/save", h.saveSticker)
 
 	g.GET("/rooms", h.listRooms)

@@ -1,6 +1,7 @@
 package chat
 
 import (
+	"archive/zip"
 	"bytes"
 	"database/sql"
 	"encoding/json"
@@ -102,6 +103,19 @@ func (h *apiHarness) request(method, path, token string, body any) (int, map[str
 
 func (h *apiHarness) requestWithHeaders(method, path, token string, body any, headers map[string]string) (int, map[string]any) {
 	h.t.Helper()
+	rec := h.rawRequest(method, path, token, body, headers)
+
+	var decoded map[string]any
+	if rec.Body.Len() > 0 {
+		if err := json.Unmarshal(rec.Body.Bytes(), &decoded); err != nil {
+			h.t.Fatalf("%s %s returned invalid JSON: %v; body=%q", method, path, err, rec.Body.String())
+		}
+	}
+	return rec.Code, decoded
+}
+
+func (h *apiHarness) rawRequest(method, path, token string, body any, headers map[string]string) *httptest.ResponseRecorder {
+	h.t.Helper()
 	var payload []byte
 	if body != nil {
 		var err error
@@ -122,14 +136,7 @@ func (h *apiHarness) requestWithHeaders(method, path, token string, body any, he
 	}
 	rec := httptest.NewRecorder()
 	h.router.ServeHTTP(rec, req)
-
-	var decoded map[string]any
-	if rec.Body.Len() > 0 {
-		if err := json.Unmarshal(rec.Body.Bytes(), &decoded); err != nil {
-			h.t.Fatalf("%s %s returned invalid JSON: %v; body=%q", method, path, err, rec.Body.String())
-		}
-	}
-	return rec.Code, decoded
+	return rec
 }
 
 func (h *apiHarness) requireStatus(status, want int, response map[string]any) {
@@ -793,6 +800,119 @@ func TestAddStickerIsIdempotent(t *testing.T) {
 	}
 	if count != 1 {
 		t.Fatalf("expected one sticker row, got %d", count)
+	}
+}
+
+func TestManageStickersRenameReorderAndDownload(t *testing.T) {
+	api := newAPIHarness(t)
+	owner := api.register("sticker_manage_owner")
+	other := api.register("sticker_manage_other")
+
+	assets := []struct {
+		id       string
+		filename string
+		mimeType string
+		body     []byte
+	}{
+		{id: "asset_manage_one", filename: "one.webp", mimeType: "image/webp", body: []byte("one-image")},
+		{id: "asset_manage_two", filename: "two.png", mimeType: "image/png", body: []byte("two-image")},
+	}
+	for _, asset := range assets {
+		if err := os.MkdirAll(filepath.Join(api.assets, asset.id), 0o755); err != nil {
+			t.Fatalf("create asset dir: %v", err)
+		}
+		if err := os.WriteFile(filepath.Join(api.assets, asset.id, asset.filename), asset.body, 0o644); err != nil {
+			t.Fatalf("write asset: %v", err)
+		}
+		_, err := api.db.Exec(
+			`INSERT INTO assets (id, owner_user_id, purpose, filename, mime_type, size_bytes, url, created_at)
+			 VALUES (?, ?, 'sticker', ?, ?, ?, ?, ?)`,
+			asset.id, owner.User["id"].(string), asset.filename, asset.mimeType, len(asset.body), "/assets/"+asset.id+"/"+asset.filename, nowMillis(),
+		)
+		if err != nil {
+			t.Fatalf("insert asset: %v", err)
+		}
+	}
+
+	status, response := api.request(http.MethodPost, "/sticker-packs", owner.Token, map[string]any{
+		"scope": "personal",
+		"name":  "Managed Stickers",
+	})
+	api.requireStatus(status, http.StatusCreated, response)
+	packID := response["pack"].(map[string]any)["id"].(string)
+
+	status, response = api.request(http.MethodPost, "/sticker-packs/"+packID+"/stickers", owner.Token, map[string]any{
+		"asset_id": assets[0].id,
+		"name":     "smile",
+	})
+	api.requireStatus(status, http.StatusCreated, response)
+	first := response["sticker"].(map[string]any)
+	firstID := first["id"].(string)
+	if first["name"] != "smile" {
+		t.Fatalf("first sticker name mismatch: %v", first)
+	}
+
+	status, response = api.request(http.MethodPost, "/sticker-packs/"+packID+"/stickers", owner.Token, map[string]any{
+		"asset_id": assets[1].id,
+		"name":     "smile",
+	})
+	api.requireStatus(status, http.StatusCreated, response)
+	second := response["sticker"].(map[string]any)
+	secondID := second["id"].(string)
+	if second["name"] != "smile (2)" {
+		t.Fatalf("duplicate sticker name should be suffixed: %v", second)
+	}
+
+	status, response = api.request(http.MethodPatch, "/sticker-packs/"+packID+"/stickers/"+secondID, owner.Token, map[string]any{
+		"name": "smile",
+	})
+	api.requireStatus(status, http.StatusOK, response)
+	renamed := response["sticker"].(map[string]any)
+	if renamed["name"] != "smile (2)" {
+		t.Fatalf("rename should preserve unique name: %v", renamed)
+	}
+
+	status, response = api.request(http.MethodPost, "/sticker-packs/"+packID+"/stickers/reorder", owner.Token, map[string]any{
+		"sticker_ids": []string{secondID, firstID},
+	})
+	api.requireStatus(status, http.StatusOK, response)
+	reordered := response["pack"].(map[string]any)["stickers"].([]any)
+	if reordered[0].(map[string]any)["id"] != secondID || reordered[1].(map[string]any)["id"] != firstID {
+		t.Fatalf("stickers not reordered: %v", reordered)
+	}
+
+	single := api.rawRequest(http.MethodGet, "/stickers/download?ids="+firstID, owner.Token, nil, nil)
+	if single.Code != http.StatusOK {
+		t.Fatalf("single download status=%d body=%q", single.Code, single.Body.String())
+	}
+	if single.Header().Get("Content-Type") != "image/webp" {
+		t.Fatalf("single download content type mismatch: %s", single.Header().Get("Content-Type"))
+	}
+	if !bytes.Equal(single.Body.Bytes(), assets[0].body) {
+		t.Fatalf("single download body mismatch: %q", single.Body.Bytes())
+	}
+
+	denied := api.rawRequest(http.MethodGet, "/stickers/download?ids="+firstID, other.Token, nil, nil)
+	if denied.Code != http.StatusNotFound {
+		t.Fatalf("other user should not download personal sticker: status=%d body=%q", denied.Code, denied.Body.String())
+	}
+
+	batch := api.rawRequest(http.MethodGet, "/stickers/download?ids="+secondID+","+firstID, owner.Token, nil, nil)
+	if batch.Code != http.StatusOK {
+		t.Fatalf("batch download status=%d body=%q", batch.Code, batch.Body.String())
+	}
+	if batch.Header().Get("Content-Type") != "application/zip" {
+		t.Fatalf("batch download content type mismatch: %s", batch.Header().Get("Content-Type"))
+	}
+	archive, err := zip.NewReader(bytes.NewReader(batch.Body.Bytes()), int64(batch.Body.Len()))
+	if err != nil {
+		t.Fatalf("read zip: %v", err)
+	}
+	if len(archive.File) != 2 {
+		t.Fatalf("zip should contain two files: %v", archive.File)
+	}
+	if archive.File[0].Name != "smile (2).png" || archive.File[1].Name != "smile.webp" {
+		t.Fatalf("zip entry names should follow selected order and sticker names: %v, %v", archive.File[0].Name, archive.File[1].Name)
 	}
 }
 
