@@ -61,6 +61,10 @@ type stickerRequest struct {
 	SortOrder *int   `json:"sort_order"`
 }
 
+type stickerReorderRequest struct {
+	StickerIDs []string `json:"sticker_ids"`
+}
+
 type musicPlaybackRequest struct {
 	Action        string `json:"action"`
 	Mode          string `json:"mode"`
