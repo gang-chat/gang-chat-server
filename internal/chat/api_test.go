@@ -97,6 +97,10 @@ func newAPIHarness(t *testing.T) *apiHarness {
 }
 
 func (h *apiHarness) request(method, path, token string, body any) (int, map[string]any) {
+	return h.requestWithHeaders(method, path, token, body, nil)
+}
+
+func (h *apiHarness) requestWithHeaders(method, path, token string, body any, headers map[string]string) (int, map[string]any) {
 	h.t.Helper()
 	var payload []byte
 	if body != nil {
@@ -112,6 +116,9 @@ func (h *apiHarness) request(method, path, token string, body any) (int, map[str
 	}
 	if token != "" {
 		req.Header.Set("Authorization", "Bearer "+token)
+	}
+	for key, value := range headers {
+		req.Header.Set(key, value)
 	}
 	rec := httptest.NewRecorder()
 	h.router.ServeHTTP(rec, req)
@@ -739,6 +746,53 @@ func TestSaveStickerToPersonalAndRoomPacks(t *testing.T) {
 	roomPack := response["pack"].(map[string]any)
 	if roomPack["scope"] != "room" || roomPack["room_id"] != roomID {
 		t.Fatalf("admin should save to room pack: %v", response)
+	}
+}
+
+func TestAddStickerIsIdempotent(t *testing.T) {
+	api := newAPIHarness(t)
+	owner := api.register("sticker_idempotent_owner")
+
+	assetID := "asset_idempotent_sticker"
+	_, err := api.db.Exec(
+		`INSERT INTO assets (id, owner_user_id, purpose, filename, mime_type, size_bytes, url, created_at)
+		 VALUES (?, ?, 'sticker', 'hi.webp', 'image/webp', 12, 'https://example.com/hi.webp', ?)`,
+		assetID, owner.User["id"].(string), nowMillis(),
+	)
+	if err != nil {
+		t.Fatalf("insert asset: %v", err)
+	}
+
+	status, response := api.request(http.MethodPost, "/sticker-packs", owner.Token, map[string]any{
+		"scope": "personal",
+		"name":  "Idempotent Stickers",
+	})
+	api.requireStatus(status, http.StatusCreated, response)
+	pack := response["pack"].(map[string]any)
+	packID := pack["id"].(string)
+
+	body := map[string]any{
+		"asset_id": assetID,
+		"name":     "hi",
+	}
+	headers := map[string]string{"Idempotency-Key": "test-add-sticker-key"}
+	status, response = api.requestWithHeaders(http.MethodPost, "/sticker-packs/"+packID+"/stickers", owner.Token, body, headers)
+	api.requireStatus(status, http.StatusCreated, response)
+	firstSticker := response["sticker"].(map[string]any)
+
+	status, response = api.requestWithHeaders(http.MethodPost, "/sticker-packs/"+packID+"/stickers", owner.Token, body, headers)
+	api.requireStatus(status, http.StatusCreated, response)
+	secondSticker := response["sticker"].(map[string]any)
+	if secondSticker["id"] != firstSticker["id"] {
+		t.Fatalf("expected idempotent replay to return same sticker: first=%v second=%v", firstSticker, secondSticker)
+	}
+
+	var count int
+	if err := api.db.QueryRow(`SELECT COUNT(*) FROM stickers WHERE pack_id = ? AND asset_id = ?`, packID, assetID).Scan(&count); err != nil {
+		t.Fatalf("count stickers: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("expected one sticker row, got %d", count)
 	}
 }
 
