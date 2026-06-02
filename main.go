@@ -39,6 +39,9 @@ func main() {
 	bus := eventbus.New()
 
 	r := gin.Default()
+	if err := r.SetTrustedProxies(cfg.TrustedProxies); err != nil {
+		log.Fatalf("configure trusted proxies: %v", err)
+	}
 	r.Use(middleware.RequestID())
 	r.Use(middleware.CORS())
 
