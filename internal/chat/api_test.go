@@ -8,6 +8,7 @@ import (
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
+	"net/textproto"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -29,6 +30,7 @@ type apiHarness struct {
 	live   *fakeLiveController
 	bus    *eventbus.Bus
 	assets string
+	cfg    *config.Config
 }
 
 // fakeLiveController records the LiveKit media-control calls moderation makes,
@@ -95,6 +97,7 @@ func newAPIHarness(t *testing.T) *apiHarness {
 		live:   live,
 		bus:    bus,
 		assets: cfg.AssetDir,
+		cfg:    cfg,
 	}
 }
 
@@ -193,6 +196,46 @@ func (h *apiHarness) createRoom(token string, body map[string]any) map[string]an
 		h.t.Fatalf("create room response missing room: %v", response)
 	}
 	return room
+}
+
+func (h *apiHarness) uploadMultipart(path, token, filename, contentType, purpose string, data []byte) (int, map[string]any) {
+	h.t.Helper()
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+	if purpose != "" {
+		if err := writer.WriteField("purpose", purpose); err != nil {
+			h.t.Fatalf("write purpose: %v", err)
+		}
+	}
+	headers := make(textproto.MIMEHeader)
+	headers.Set("Content-Disposition", `form-data; name="file"; filename="`+strings.ReplaceAll(filename, `"`, `\"`)+`"`)
+	if contentType != "" {
+		headers.Set("Content-Type", contentType)
+	}
+	part, err := writer.CreatePart(headers)
+	if err != nil {
+		h.t.Fatalf("create form file: %v", err)
+	}
+	if _, err := part.Write(data); err != nil {
+		h.t.Fatalf("write form file: %v", err)
+	}
+	if err := writer.Close(); err != nil {
+		h.t.Fatalf("close multipart writer: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1"+path, &body)
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+	req.Header.Set("Authorization", "Bearer "+token)
+	rec := httptest.NewRecorder()
+	h.router.ServeHTTP(rec, req)
+
+	var decoded map[string]any
+	if rec.Body.Len() > 0 {
+		if err := json.Unmarshal(rec.Body.Bytes(), &decoded); err != nil {
+			h.t.Fatalf("%s returned invalid JSON: %v; body=%q", path, err, rec.Body.String())
+		}
+	}
+	return rec.Code, decoded
 }
 
 func memberByUserID(t *testing.T, response map[string]any, userID string) map[string]any {
@@ -1022,6 +1065,81 @@ func TestUploadImageStoresAssetFile(t *testing.T) {
 	}
 	if !bytes.Equal(saved, pngBytes) {
 		t.Fatalf("saved asset bytes changed: %v", saved)
+	}
+}
+
+func TestUploadFileStoresAssetFile(t *testing.T) {
+	api := newAPIHarness(t)
+	owner := api.register("file_asset_owner")
+
+	fileBytes := []byte("%PDF-1.7\nhello")
+	status, response := api.uploadMultipart("/uploads/files", owner.Token, "../report 2026?.pdf", "application/pdf", "", fileBytes)
+	api.requireStatus(status, http.StatusCreated, response)
+
+	asset := response["asset"].(map[string]any)
+	assetID := asset["id"].(string)
+	if asset["filename"] != "report-2026.pdf" {
+		t.Fatalf("filename should be sanitized: %v", asset)
+	}
+	if asset["mime_type"] != "application/pdf" {
+		t.Fatalf("expected sniffed application/pdf mime: %v", asset)
+	}
+	if int64(asset["size_bytes"].(float64)) != int64(len(fileBytes)) {
+		t.Fatalf("size_bytes mismatch: %v", asset)
+	}
+	if asset["thumbnail_url"] != nil {
+		t.Fatalf("non-image upload should not expose thumbnail_url: %v", asset)
+	}
+
+	var purpose, filename, storageKey string
+	if err := api.db.QueryRow(`SELECT purpose, filename, storage_key FROM assets WHERE id = ?`, assetID).Scan(&purpose, &filename, &storageKey); err != nil {
+		t.Fatalf("read asset row: %v", err)
+	}
+	if purpose != "message_file" {
+		t.Fatalf("default file purpose mismatch: %q", purpose)
+	}
+	if storageKey != "assets/"+assetID+"/"+filename {
+		t.Fatalf("storage key mismatch: %q", storageKey)
+	}
+	saved, err := os.ReadFile(filepath.Join(api.assets, assetID, filename))
+	if err != nil {
+		t.Fatalf("read saved asset: %v", err)
+	}
+	if !bytes.Equal(saved, fileBytes) {
+		t.Fatalf("saved asset bytes changed: %v", saved)
+	}
+}
+
+func TestUploadImageRejectsNonImage(t *testing.T) {
+	api := newAPIHarness(t)
+	owner := api.register("non_image_owner")
+
+	status, response := api.uploadMultipart("/uploads/images", owner.Token, "notes.txt", "text/plain", "", []byte("not an image"))
+	api.requireStatus(status, http.StatusBadRequest, response)
+
+	var count int
+	if err := api.db.QueryRow(`SELECT COUNT(*) FROM assets`).Scan(&count); err != nil {
+		t.Fatalf("count assets: %v", err)
+	}
+	if count != 0 {
+		t.Fatalf("non-image upload should not create asset rows, got %d", count)
+	}
+}
+
+func TestUploadFileRejectsOverLimit(t *testing.T) {
+	api := newAPIHarness(t)
+	api.cfg.AssetUploadMaxBytes = 4
+	owner := api.register("file_limit_owner")
+
+	status, response := api.uploadMultipart("/uploads/files", owner.Token, "tiny.bin", "application/octet-stream", "", []byte("12345"))
+	api.requireStatus(status, http.StatusRequestEntityTooLarge, response)
+
+	var count int
+	if err := api.db.QueryRow(`SELECT COUNT(*) FROM assets`).Scan(&count); err != nil {
+		t.Fatalf("count assets: %v", err)
+	}
+	if count != 0 {
+		t.Fatalf("over-limit upload should not create asset rows, got %d", count)
 	}
 }
 

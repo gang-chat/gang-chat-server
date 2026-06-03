@@ -7,6 +7,11 @@ import (
 	"strings"
 )
 
+const (
+	DefaultAssetUploadMaxBytes int64 = 50 * 1024 * 1024
+	DefaultImageUploadMaxBytes int64 = 10 * 1024 * 1024
+)
+
 type Config struct {
 	Bind                   string
 	DatabaseURL            string
@@ -20,6 +25,8 @@ type Config struct {
 	AssetPublicBaseURL     string
 	AssetObjectPrefix      string
 	AssetCacheControl      string
+	AssetUploadMaxBytes    int64
+	ImageUploadMaxBytes    int64
 	COSBucket              string
 	COSRegion              string
 	COSBucketURL           string
@@ -82,6 +89,8 @@ func Load() *Config {
 		AssetPublicBaseURL:     envOr("GANG_ASSET_PUBLIC_BASE_URL", ""),
 		AssetObjectPrefix:      envOr("GANG_ASSET_OBJECT_PREFIX", "assets"),
 		AssetCacheControl:      envOr("GANG_ASSET_CACHE_CONTROL", "public, max-age=31536000, immutable"),
+		AssetUploadMaxBytes:    envIntOr("GANG_ASSET_UPLOAD_MAX_BYTES", DefaultAssetUploadMaxBytes),
+		ImageUploadMaxBytes:    envIntOr("GANG_IMAGE_UPLOAD_MAX_BYTES", DefaultImageUploadMaxBytes),
 		COSBucket:              envOr("GANG_COS_BUCKET", ""),
 		COSRegion:              envOr("GANG_COS_REGION", ""),
 		COSBucketURL:           envOr("GANG_COS_BUCKET_URL", ""),
@@ -103,6 +112,8 @@ func Load() *Config {
 	flag.StringVar(&cfg.StorageBackend, "storage-backend", cfg.StorageBackend, "asset storage backend: local or cos")
 	flag.StringVar(&cfg.AssetPublicBaseURL, "asset-public-base-url", cfg.AssetPublicBaseURL, "optional CDN/COS public base URL for asset URLs")
 	flag.StringVar(&cfg.AssetObjectPrefix, "asset-object-prefix", cfg.AssetObjectPrefix, "object storage prefix for uploaded assets")
+	flag.Int64Var(&cfg.AssetUploadMaxBytes, "asset-upload-max-bytes", cfg.AssetUploadMaxBytes, "maximum uploaded file size in bytes")
+	flag.Int64Var(&cfg.ImageUploadMaxBytes, "image-upload-max-bytes", cfg.ImageUploadMaxBytes, "maximum uploaded image size in bytes")
 	flag.StringVar(&cfg.GeoIPDatabasePath, "geoip-db", cfg.GeoIPDatabasePath, "MaxMind GeoIP database path")
 	flag.StringVar(&trustedProxies, "trusted-proxies", trustedProxies, "comma-separated trusted proxy IPs/CIDRs")
 	flag.Parse()
