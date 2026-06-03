@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"testing"
 
 	"github.com/gin-gonic/gin"
@@ -292,6 +293,52 @@ func TestPublicUIDAndRIDRanges(t *testing.T) {
 	rid := parseNumericID(t, room["rid"])
 	if rid < idgen.RoomRIDStart {
 		t.Fatalf("rid below configured range: %d", rid)
+	}
+}
+
+func TestUTF8JSONRoundTripAndHeaders(t *testing.T) {
+	api := newAPIHarness(t)
+	owner := api.register("utf8_owner")
+
+	room := api.createRoom(owner.Token, map[string]any{
+		"name":        "中文房间",
+		"join_policy": "open",
+	})
+	if room["name"] != "中文房间" {
+		t.Fatalf("room name should preserve UTF-8 Chinese: %v", room)
+	}
+
+	rec := api.rawRequest(http.MethodPost, "/rooms/"+room["id"].(string)+"/messages", owner.Token, map[string]any{
+		"client_message_id": "utf8_msg_1",
+		"body":              "你好，世界",
+	}, nil)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("send message status=%d body=%q", rec.Code, rec.Body.String())
+	}
+	if contentType := strings.ToLower(rec.Header().Get("Content-Type")); !strings.Contains(contentType, "charset=utf-8") {
+		t.Fatalf("JSON response should declare UTF-8 charset, got %q", rec.Header().Get("Content-Type"))
+	}
+
+	var response map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &response); err != nil {
+		t.Fatalf("decode message response: %v body=%q", err, rec.Body.String())
+	}
+	message := response["message"].(map[string]any)
+	if message["body"] != "你好，世界" {
+		t.Fatalf("message body should preserve UTF-8 Chinese: %v", message)
+	}
+}
+
+func TestAttachmentDispositionUsesUTF8FilenameStar(t *testing.T) {
+	header := attachmentDisposition("表情 包.webp")
+	if strings.Contains(header, "表情") {
+		t.Fatalf("ASCII fallback filename should not contain raw Chinese: %q", header)
+	}
+	if !strings.Contains(header, `filename="__ _.webp"`) {
+		t.Fatalf("header should include ASCII fallback filename: %q", header)
+	}
+	if !strings.Contains(header, `filename*=UTF-8''%E8%A1%A8%E6%83%85%20%E5%8C%85.webp`) {
+		t.Fatalf("header should include RFC 5987 UTF-8 filename: %q", header)
 	}
 }
 

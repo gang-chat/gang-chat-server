@@ -1,5 +1,13 @@
 # Scripts and configs that run on Linux must keep LF endings,
 # regardless of the committer's OS (otherwise bash sees `\r`).
+*       text=auto eol=lf
 *.sh    text eol=lf
 *.yml   text eol=lf
 *.yaml  text eol=lf
+
+*.exe   binary
+*.png   binary
+*.jpg   binary
+*.jpeg  binary
+*.gif   binary
+*.webp  binary

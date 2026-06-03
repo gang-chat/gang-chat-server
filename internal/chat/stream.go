@@ -27,7 +27,7 @@ func (h *Handler) liveStream(c *gin.Context) {
 	}
 
 	w := c.Writer
-	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
 	w.Header().Set("X-Accel-Buffering", "no") // tell nginx not to buffer

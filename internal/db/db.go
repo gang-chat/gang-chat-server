@@ -26,6 +26,9 @@ func Connect(dsn string) *sql.DB {
 	if err != nil {
 		log.Fatalf("open db: %v", err)
 	}
+	if _, err := db.Exec(`PRAGMA encoding = "UTF-8"`); err != nil {
+		log.Fatalf("configure db encoding: %v", err)
+	}
 
 	if err := migrate(db); err != nil {
 		log.Fatalf("migrate: %v", err)

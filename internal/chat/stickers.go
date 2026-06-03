@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"fmt"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -286,7 +287,7 @@ func (h *Handler) downloadStickers(c *gin.Context) {
 			return
 		}
 		filename := safeDownloadFilename(item.Name, item.Filename)
-		c.Header("Content-Disposition", `attachment; filename="`+escapeDispositionFilename(filename)+`"`)
+		c.Header("Content-Disposition", attachmentDisposition(filename))
 		c.Data(http.StatusOK, item.MimeType, data)
 		return
 	}
@@ -318,7 +319,7 @@ func (h *Handler) downloadStickers(c *gin.Context) {
 		h.jsonError(c, http.StatusInternalServerError, "internal_error", "create sticker archive failed")
 		return
 	}
-	c.Header("Content-Disposition", `attachment; filename="stickers.zip"`)
+	c.Header("Content-Disposition", attachmentDisposition("stickers.zip"))
 	c.Data(http.StatusOK, "application/zip", buffer.Bytes())
 }
 
@@ -655,6 +656,22 @@ func uniqueDownloadFilename(used map[string]int, filename string) string {
 	return fmt.Sprintf("%s (%d)%s", stem, used[filename], ext)
 }
 
-func escapeDispositionFilename(filename string) string {
-	return strings.ReplaceAll(filename, `"`, `'`)
+func attachmentDisposition(filename string) string {
+	return `attachment; filename="` + dispositionFallback(filename) + `"; filename*=UTF-8''` + url.PathEscape(filename)
+}
+
+func dispositionFallback(filename string) string {
+	var out strings.Builder
+	for _, r := range filename {
+		if r < 32 || r > 126 || strings.ContainsRune(`\";`, r) {
+			out.WriteByte('_')
+			continue
+		}
+		out.WriteRune(r)
+	}
+	value := strings.TrimSpace(out.String())
+	if value == "" {
+		return "download"
+	}
+	return value
 }

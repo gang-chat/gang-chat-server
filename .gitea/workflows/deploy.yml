@@ -46,6 +46,9 @@ jobs:
           echo "/usr/local/go/bin" >> "$GITHUB_PATH"
           /usr/local/go/bin/go version
 
+      - name: UTF-8 encoding check
+        run: go run ./tools/check_utf8.go
+
       - name: Build gang-server (linux/amd64, CGO)
         run: |
           go version
