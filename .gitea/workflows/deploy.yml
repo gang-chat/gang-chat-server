@@ -65,7 +65,7 @@ jobs:
           mkdir -p ~/.ssh && chmod 700 ~/.ssh
           printf '%s\n' "$DEPLOY_SSH_KEY" > ~/.ssh/id_deploy
           chmod 600 ~/.ssh/id_deploy
-          ssh-keyscan -p "${DEPLOY_PORT:-22}" -H "$DEPLOY_HOST" >> ~/.ssh/known_hosts 2>/dev/null || true
+          timeout 30s ssh-keyscan -p "${DEPLOY_PORT:-22}" -H "$DEPLOY_HOST" >> ~/.ssh/known_hosts
 
       - name: Upload binary, config and scripts
         env:
@@ -75,17 +75,22 @@ jobs:
           DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
         run: |
           PORT="${DEPLOY_PORT:-22}"
-          SSH="ssh -i ~/.ssh/id_deploy -p $PORT"
-          SCP="scp -i ~/.ssh/id_deploy -P $PORT"
+          SSH_OPTS=(
+            -i ~/.ssh/id_deploy
+            -o BatchMode=yes
+            -o ConnectTimeout=20
+            -o ServerAliveInterval=15
+            -o ServerAliveCountMax=4
+          )
           TARGET="$DEPLOY_USER@$DEPLOY_HOST"
 
-          $SSH "$TARGET" "mkdir -p '$DEPLOY_PATH'"
+          timeout 2m ssh "${SSH_OPTS[@]}" -p "$PORT" "$TARGET" "mkdir -p '$DEPLOY_PATH'"
           # Scripts + livekit config (overwrites in place).
-          $SCP deploy/lib.sh deploy/start.sh deploy/stop.sh deploy/restart.sh \
+          timeout 2m scp "${SSH_OPTS[@]}" -P "$PORT" deploy/lib.sh deploy/start.sh deploy/stop.sh deploy/restart.sh \
                "$TARGET:$DEPLOY_PATH/"
-          $SCP livekit-server/livekit.yaml "$TARGET:$DEPLOY_PATH/"
+          timeout 2m scp "${SSH_OPTS[@]}" -P "$PORT" livekit-server/livekit.yaml "$TARGET:$DEPLOY_PATH/"
           # New binary lands as .new, swapped in atomically in the next step.
-          $SCP dist/gang-server "$TARGET:$DEPLOY_PATH/gang-server.new"
+          timeout 10m scp "${SSH_OPTS[@]}" -P "$PORT" dist/gang-server "$TARGET:$DEPLOY_PATH/gang-server.new"
 
       - name: Swap binary and restart gang-server
         env:
@@ -95,7 +100,14 @@ jobs:
           DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
         run: |
           PORT="${DEPLOY_PORT:-22}"
-          ssh -i ~/.ssh/id_deploy -p "$PORT" "$DEPLOY_USER@$DEPLOY_HOST" \
+          timeout 3m ssh \
+            -i ~/.ssh/id_deploy \
+            -o BatchMode=yes \
+            -o ConnectTimeout=20 \
+            -o ServerAliveInterval=15 \
+            -o ServerAliveCountMax=4 \
+            -p "$PORT" \
+            "$DEPLOY_USER@$DEPLOY_HOST" \
             "cd '$DEPLOY_PATH' \
              && chmod +x lib.sh start.sh stop.sh restart.sh gang-server.new \
              && mv -f gang-server.new gang-server \

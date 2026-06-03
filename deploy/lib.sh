@@ -49,7 +49,7 @@ start_service() {
   # Run from APP_DIR so the app's relative paths (.env, sqlite db) resolve there.
   (
     cd "$APP_DIR"
-    nohup "$bin" "$@" >>"$(logfile "$name")" 2>&1 &
+    nohup "$bin" "$@" </dev/null >>"$(logfile "$name")" 2>&1 &
     echo $! >"$(pidfile "$name")"
   )
   sleep 1
