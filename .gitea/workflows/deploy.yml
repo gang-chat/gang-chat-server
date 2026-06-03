@@ -65,7 +65,7 @@ jobs:
           mkdir -p ~/.ssh && chmod 700 ~/.ssh
           printf '%s\n' "$DEPLOY_SSH_KEY" > ~/.ssh/id_deploy
           chmod 600 ~/.ssh/id_deploy
-          timeout 30s ssh-keyscan -p "${DEPLOY_PORT:-22}" -H "$DEPLOY_HOST" >> ~/.ssh/known_hosts
+          ssh-keyscan -p "${DEPLOY_PORT:-22}" -H "$DEPLOY_HOST" >> ~/.ssh/known_hosts
 
       - name: Upload binary, config and scripts
         env:
@@ -78,19 +78,17 @@ jobs:
           SSH_OPTS=(
             -i ~/.ssh/id_deploy
             -o BatchMode=yes
-            -o ConnectTimeout=20
-            -o ServerAliveInterval=15
-            -o ServerAliveCountMax=4
           )
+          RSYNC_SSH="ssh -i ~/.ssh/id_deploy -p $PORT -o BatchMode=yes"
           TARGET="$DEPLOY_USER@$DEPLOY_HOST"
 
-          timeout 2m ssh "${SSH_OPTS[@]}" -p "$PORT" "$TARGET" "mkdir -p '$DEPLOY_PATH'"
+          ssh "${SSH_OPTS[@]}" -p "$PORT" "$TARGET" "mkdir -p '$DEPLOY_PATH'"
           # Scripts + livekit config (overwrites in place).
-          timeout 2m scp "${SSH_OPTS[@]}" -P "$PORT" deploy/lib.sh deploy/start.sh deploy/stop.sh deploy/restart.sh \
+          rsync -az --partial -e "$RSYNC_SSH" deploy/lib.sh deploy/start.sh deploy/stop.sh deploy/restart.sh \
                "$TARGET:$DEPLOY_PATH/"
-          timeout 2m scp "${SSH_OPTS[@]}" -P "$PORT" livekit-server/livekit.yaml "$TARGET:$DEPLOY_PATH/"
+          rsync -az --partial -e "$RSYNC_SSH" livekit-server/livekit.yaml "$TARGET:$DEPLOY_PATH/"
           # New binary lands as .new, swapped in atomically in the next step.
-          timeout 10m scp "${SSH_OPTS[@]}" -P "$PORT" dist/gang-server "$TARGET:$DEPLOY_PATH/gang-server.new"
+          rsync -az --partial -e "$RSYNC_SSH" dist/gang-server "$TARGET:$DEPLOY_PATH/gang-server.new"
 
       - name: Swap binary and restart gang-server
         env:
@@ -100,12 +98,9 @@ jobs:
           DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
         run: |
           PORT="${DEPLOY_PORT:-22}"
-          timeout 3m ssh \
+          ssh \
             -i ~/.ssh/id_deploy \
             -o BatchMode=yes \
-            -o ConnectTimeout=20 \
-            -o ServerAliveInterval=15 \
-            -o ServerAliveCountMax=4 \
             -p "$PORT" \
             "$DEPLOY_USER@$DEPLOY_HOST" \
             "cd '$DEPLOY_PATH' \
