@@ -22,16 +22,15 @@ jobs:
       - name: Checkout
         uses: https://gitea.com/actions/checkout@v4
 
-      - name: Ensure C toolchain (go-sqlite3 needs CGO)
+      - name: Ensure build and deploy tools
         run: |
-          if ! command -v gcc >/dev/null 2>&1; then
-            if command -v sudo >/dev/null 2>&1; then
-              sudo apt-get update && sudo apt-get install -y --no-install-recommends build-essential
-            else
-              apt-get update && apt-get install -y --no-install-recommends build-essential
-            fi
+          if ! command -v gcc >/dev/null 2>&1 || ! command -v rsync >/dev/null 2>&1; then
+            SUDO=""; command -v sudo >/dev/null 2>&1 && SUDO="sudo"
+            $SUDO apt-get update
+            $SUDO apt-get install -y --no-install-recommends build-essential rsync
           fi
           gcc --version
+          rsync --version | head -n 1
 
       # 镜像不自带 Go，从国内镜像 golang.google.cn 装。版本直接读 go.mod，
       # 以后升级 Go 不用再改这里。
@@ -45,6 +44,25 @@ jobs:
           $SUDO tar -C /usr/local -xzf /tmp/go.tgz
           echo "/usr/local/go/bin" >> "$GITHUB_PATH"
           /usr/local/go/bin/go version
+
+      - name: Compute Go cache key
+        id: go-cache-key
+        run: |
+          GO_VERSION="$(awk '/^go [0-9]/{print $2; exit}' go.mod)"
+          MOD_HASH="$(sha256sum go.mod go.sum | sha256sum | awk '{print $1}')"
+          echo "version=$GO_VERSION" >> "$GITHUB_OUTPUT"
+          echo "sum=$MOD_HASH" >> "$GITHUB_OUTPUT"
+
+      - name: Cache Go
+        uses: https://gitea.com/actions/cache@v4
+        with:
+          path: |
+            ~/.cache/go-build
+            ~/go/pkg/mod
+          key: go-linux-amd64-${{ steps.go-cache-key.outputs.version }}-${{ steps.go-cache-key.outputs.sum }}
+          restore-keys: |
+            go-linux-amd64-${{ steps.go-cache-key.outputs.version }}-
+            go-linux-amd64-
 
       - name: UTF-8 encoding check
         run: go run ./tools/check_utf8.go
