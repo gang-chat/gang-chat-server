@@ -30,7 +30,7 @@ jobs:
             $SUDO apt-get install -y --no-install-recommends build-essential rsync
           fi
           gcc --version
-          rsync --version | head -n 1
+          rsync --version | sed -n '1p'
 
       # 镜像不自带 Go，从国内镜像 golang.google.cn 装。版本直接读 go.mod，
       # 以后升级 Go 不用再改这里。
