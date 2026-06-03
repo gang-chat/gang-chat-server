@@ -6,6 +6,7 @@ assets/
 assets-cache/
 
 # Build output (reproducible via `go build`)
+/.cache/
 /gang-server.exe
 /gang-server
 /dist/

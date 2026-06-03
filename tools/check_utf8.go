@@ -11,6 +11,7 @@ import (
 
 var skippedDirectories = map[string]bool{
 	".git":         true,
+	".cache":       true,
 	".idea":        true,
 	".vscode":      true,
 	"dist":         true,
