@@ -914,6 +914,18 @@ func TestManageStickersRenameReorderAndDownload(t *testing.T) {
 	if archive.File[0].Name != "smile (2).png" || archive.File[1].Name != "smile.webp" {
 		t.Fatalf("zip entry names should follow selected order and sticker names: %v, %v", archive.File[0].Name, archive.File[1].Name)
 	}
+
+	status, response = api.request(http.MethodDelete, "/sticker-packs/"+packID+"/stickers/"+firstID, owner.Token, nil)
+	api.requireStatus(status, http.StatusOK, response)
+	status, response = api.request(http.MethodDelete, "/sticker-packs/"+packID+"/stickers/"+firstID, owner.Token, nil)
+	api.requireStatus(status, http.StatusOK, response)
+	var remaining int
+	if err := api.db.QueryRow(`SELECT COUNT(*) FROM stickers WHERE id = ?`, firstID).Scan(&remaining); err != nil {
+		t.Fatalf("count deleted sticker: %v", err)
+	}
+	if remaining != 0 {
+		t.Fatalf("deleted sticker still exists")
+	}
 }
 
 func TestUploadImageStoresAssetFile(t *testing.T) {

@@ -255,7 +255,10 @@ func (h *Handler) deleteSticker(c *gin.Context) {
 		h.jsonError(c, http.StatusForbidden, "forbidden", "cannot manage sticker pack")
 		return
 	}
-	_, _ = h.DB.Exec(`DELETE FROM stickers WHERE id = ? AND pack_id = ?`, c.Param("sticker_id"), c.Param("pack_id"))
+	if _, err := h.DB.Exec(`DELETE FROM stickers WHERE id = ? AND pack_id = ?`, c.Param("sticker_id"), c.Param("pack_id")); err != nil {
+		h.jsonError(c, http.StatusInternalServerError, "internal_error", "delete sticker failed")
+		return
+	}
 	h.touchStickerPack(c.Param("pack_id"))
 	c.JSON(http.StatusOK, gin.H{"ok": true})
 }
