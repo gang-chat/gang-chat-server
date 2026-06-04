@@ -34,7 +34,7 @@ type remoteStore interface {
 
 func NewAssetStorage(cfg *config.Config) (*AssetStorage, error) {
 	cacheDir := "assets"
-	backend := "local"
+	backend := ""
 	objectPrefix := "assets"
 	publicBase := ""
 	cacheControl := defaultAssetCacheControl
@@ -44,6 +44,9 @@ func NewAssetStorage(cfg *config.Config) (*AssetStorage, error) {
 		}
 		if cfg.StorageBackend != "" {
 			backend = strings.ToLower(strings.TrimSpace(cfg.StorageBackend))
+		}
+		if backend == "" && hasCOSConfig(cfg) {
+			backend = "cos"
 		}
 		if cfg.AssetObjectPrefix != "" {
 			objectPrefix = cfg.AssetObjectPrefix
@@ -222,6 +225,18 @@ func cosBucketURL(cfg *config.Config) (string, error) {
 		bucketURL = fmt.Sprintf("https://%s.cos.%s.myqcloud.com", cfg.COSBucket, cfg.COSRegion)
 	}
 	return strings.TrimRight(bucketURL, "/"), nil
+}
+
+func hasCOSConfig(cfg *config.Config) bool {
+	if cfg == nil {
+		return false
+	}
+	return strings.TrimSpace(cfg.COSBucketURL) != "" ||
+		strings.TrimSpace(cfg.COSBucket) != "" ||
+		strings.TrimSpace(cfg.COSRegion) != "" ||
+		strings.TrimSpace(cfg.COSSecretID) != "" ||
+		strings.TrimSpace(cfg.COSSecretKey) != "" ||
+		strings.TrimSpace(cfg.COSSessionToken) != ""
 }
 
 func cleanObjectKey(value string) string {

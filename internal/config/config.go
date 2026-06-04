@@ -86,7 +86,7 @@ func Load() *Config {
 		LoginMaxAttempts:       int(envIntOr("GANG_LOGIN_MAX_ATTEMPTS", 5)),
 		LoginWindowSeconds:     envIntOr("GANG_LOGIN_WINDOW_SECONDS", 900),
 		AssetDir:               envOr("GANG_ASSET_DIR", "assets"),
-		StorageBackend:         envOr("GANG_STORAGE_BACKEND", "local"),
+		StorageBackend:         envOr("GANG_STORAGE_BACKEND", ""),
 		AssetPublicBaseURL:     envOr("GANG_ASSET_PUBLIC_BASE_URL", ""),
 		AssetObjectPrefix:      envOr("GANG_ASSET_OBJECT_PREFIX", "assets"),
 		AssetCacheControl:      envOr("GANG_ASSET_CACHE_CONTROL", "public, max-age=31536000, immutable"),
@@ -114,8 +114,15 @@ func Load() *Config {
 	flag.StringVar(&cfg.StorageBackend, "storage-backend", cfg.StorageBackend, "asset storage backend: local or cos")
 	flag.StringVar(&cfg.AssetPublicBaseURL, "asset-public-base-url", cfg.AssetPublicBaseURL, "optional CDN/COS public base URL for asset URLs")
 	flag.StringVar(&cfg.AssetObjectPrefix, "asset-object-prefix", cfg.AssetObjectPrefix, "object storage prefix for uploaded assets")
+	flag.StringVar(&cfg.AssetCacheControl, "asset-cache-control", cfg.AssetCacheControl, "Cache-Control header for uploaded assets")
 	flag.Int64Var(&cfg.AssetUploadMaxBytes, "asset-upload-max-bytes", cfg.AssetUploadMaxBytes, "maximum uploaded file size in bytes")
 	flag.Int64Var(&cfg.ImageUploadMaxBytes, "image-upload-max-bytes", cfg.ImageUploadMaxBytes, "maximum uploaded image size in bytes")
+	flag.StringVar(&cfg.COSBucket, "cos-bucket", cfg.COSBucket, "Tencent COS bucket name, including appid")
+	flag.StringVar(&cfg.COSRegion, "cos-region", cfg.COSRegion, "Tencent COS bucket region")
+	flag.StringVar(&cfg.COSBucketURL, "cos-bucket-url", cfg.COSBucketURL, "Tencent COS bucket URL; overrides bucket and region")
+	flag.StringVar(&cfg.COSSecretID, "cos-secret-id", cfg.COSSecretID, "Tencent COS secret id")
+	flag.StringVar(&cfg.COSSecretKey, "cos-secret-key", cfg.COSSecretKey, "Tencent COS secret key")
+	flag.StringVar(&cfg.COSSessionToken, "cos-session-token", cfg.COSSessionToken, "Tencent COS session token for temporary credentials")
 	flag.StringVar(&cfg.COSObjectACL, "cos-object-acl", cfg.COSObjectACL, "COS object ACL for uploaded assets; empty keeps bucket default")
 	flag.StringVar(&cfg.GeoIPDatabasePath, "geoip-db", cfg.GeoIPDatabasePath, "MaxMind GeoIP database path")
 	flag.StringVar(&trustedProxies, "trusted-proxies", trustedProxies, "comma-separated trusted proxy IPs/CIDRs")

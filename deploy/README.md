@@ -38,7 +38,9 @@ Run them on the **server**, from the deploy directory:
 4. For production asset storage on Tencent COS, keep the real credentials only
    in this server-side `.env`:
    ```
-   GANG_STORAGE_BACKEND=cos
+   # Optional: COS is selected automatically when the COS bucket/credentials
+   # below are present. Set GANG_STORAGE_BACKEND=local only to force local disk.
+   GANG_STORAGE_BACKEND=
    GANG_ASSET_OBJECT_PREFIX=assets
    GANG_ASSET_PUBLIC_BASE_URL=https://<bucket-name-with-appid>.cos.<region>.myqcloud.com
    GANG_COS_BUCKET=<bucket-name-with-appid>

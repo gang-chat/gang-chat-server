@@ -127,7 +127,7 @@ func (h *Handler) uploadFile(c *gin.Context) {
 	storageKey := assetStore.ObjectKey(id, filename)
 	if err := assetStore.PutFile(c.Request.Context(), storageKey, assetPath, mimeType); err != nil {
 		_ = os.Remove(assetPath)
-		h.jsonError(c, http.StatusInternalServerError, "internal_error", "upload asset object failed")
+		h.jsonError(c, http.StatusServiceUnavailable, "storage_unavailable", "asset storage is temporarily unavailable")
 		return
 	}
 	now := nowMillis()
