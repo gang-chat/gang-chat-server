@@ -1176,6 +1176,69 @@ func TestApprovalRequiredJoinFlow(t *testing.T) {
 	}
 }
 
+func TestRoomInviteFlow(t *testing.T) {
+	api := newAPIHarness(t)
+	owner := api.register("invite_owner")
+	joiner := api.register("invite_joiner")
+	rejecter := api.register("invite_rejecter")
+	room := api.createRoom(owner.Token, map[string]any{"name": "Invite Room", "join_policy": "closed"})
+	roomID := room["id"].(string)
+
+	status, response := api.request(http.MethodPost, "/rooms/"+roomID+"/invites", owner.Token, map[string]any{
+		"user_id": joiner.User["id"].(string),
+	})
+	api.requireStatus(status, http.StatusCreated, response)
+	invite := response["invite"].(map[string]any)
+	if invite["status"] != "pending" {
+		t.Fatalf("invite should be pending: %v", invite)
+	}
+	if invite["room"].(map[string]any)["name"] != "Invite Room" {
+		t.Fatalf("invite should include room summary: %v", invite)
+	}
+	if invite["inviter"].(map[string]any)["id"] != owner.User["id"] {
+		t.Fatalf("invite should include inviter summary: %v", invite)
+	}
+
+	status, response = api.request(http.MethodGet, "/rooms/"+roomID+"/members?limit=50", owner.Token, nil)
+	api.requireStatus(status, http.StatusOK, response)
+	if got := len(response["members"].([]any)); got != 1 {
+		t.Fatalf("inviting should not add a membership yet, got %d: %v", got, response)
+	}
+
+	status, response = api.request(http.MethodGet, "/room-invites?status=pending", joiner.Token, nil)
+	api.requireStatus(status, http.StatusOK, response)
+	invites := response["invites"].([]any)
+	if len(invites) != 1 || invites[0].(map[string]any)["id"] != invite["id"] {
+		t.Fatalf("pending invite not listed for target: %v", response)
+	}
+
+	status, response = api.request(http.MethodPatch, "/room-invites/"+invite["id"].(string), joiner.Token, map[string]any{
+		"decision": "accept",
+	})
+	api.requireStatus(status, http.StatusOK, response)
+	acceptedRoom := response["room"].(map[string]any)
+	membership := acceptedRoom["my_membership"].(map[string]any)
+	if membership["role"] != "member" {
+		t.Fatalf("accepted invite should add member role: %v", response)
+	}
+
+	status, response = api.request(http.MethodPost, "/rooms/"+roomID+"/invites", owner.Token, map[string]any{
+		"user_id": rejecter.User["id"].(string),
+	})
+	api.requireStatus(status, http.StatusCreated, response)
+	rejectedInviteID := response["invite"].(map[string]any)["id"].(string)
+	status, response = api.request(http.MethodPatch, "/room-invites/"+rejectedInviteID, rejecter.Token, map[string]any{
+		"decision": "reject",
+	})
+	api.requireStatus(status, http.StatusOK, response)
+
+	status, response = api.request(http.MethodGet, "/rooms/"+roomID+"/members?limit=50", owner.Token, nil)
+	api.requireStatus(status, http.StatusOK, response)
+	if got := len(response["members"].([]any)); got != 2 {
+		t.Fatalf("rejected invite should not add a membership, got %d: %v", got, response)
+	}
+}
+
 func TestMessageRecallPolicies(t *testing.T) {
 	api := newAPIHarness(t)
 	owner := api.register("recall_owner")

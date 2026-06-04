@@ -197,10 +197,22 @@ func (h *Handler) searchUsers(c *gin.Context) {
 		`SELECT id, uid, username, display_name, avatar_url, default_avatar_key
 		 FROM users
 		 WHERE status = 'active'
-		   AND (uid = ? OR username_normalized = ? OR instr(lower(COALESCE(display_name, username)), lower(?)) > 0)
-		 ORDER BY username ASC
+		   AND (
+		     uid = ?
+		     OR username_normalized = ?
+		     OR instr(username_normalized, lower(?)) > 0
+		     OR instr(lower(COALESCE(display_name, username)), lower(?)) > 0
+		   )
+		 ORDER BY
+		   CASE
+		     WHEN uid = ? THEN 0
+		     WHEN username_normalized = ? THEN 1
+		     WHEN instr(username_normalized, lower(?)) > 0 THEN 2
+		     ELSE 3
+		   END,
+		   username ASC
 		 LIMIT ?`,
-		q, strings.ToLower(q), q, limit,
+		q, strings.ToLower(q), q, q, q, strings.ToLower(q), q, limit,
 	)
 	if err != nil {
 		errorJSON(c, http.StatusInternalServerError, "internal_error", "user search failed")
