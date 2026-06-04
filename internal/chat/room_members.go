@@ -174,7 +174,8 @@ func (h *Handler) updateRoomSettings(c *gin.Context) {
 
 func (h *Handler) inviteMember(c *gin.Context) {
 	roomID := c.Param("room_id")
-	if !h.isAdmin(roomID, currentUserID(c)) {
+	inviterID := currentUserID(c)
+	if !h.isAdmin(roomID, inviterID) {
 		h.jsonError(c, http.StatusForbidden, "forbidden", "admin required")
 		return
 	}
@@ -183,25 +184,133 @@ func (h *Handler) inviteMember(c *gin.Context) {
 		h.jsonError(c, http.StatusBadRequest, "validation_failed", "user_id is required")
 		return
 	}
+	if req.UserID == inviterID {
+		h.jsonError(c, http.StatusBadRequest, "validation_failed", "cannot invite yourself")
+		return
+	}
+	var targetExists int
+	if err := h.DB.QueryRow(`SELECT COUNT(*) FROM users WHERE id = ? AND status = 'active'`, req.UserID).Scan(&targetExists); err != nil || targetExists == 0 {
+		h.jsonError(c, http.StatusNotFound, "not_found", "user not found")
+		return
+	}
+	var alreadyMember int
+	_ = h.DB.QueryRow(`SELECT COUNT(*) FROM room_memberships WHERE room_id = ? AND user_id = ?`, roomID, req.UserID).Scan(&alreadyMember)
+	if alreadyMember > 0 {
+		h.jsonError(c, http.StatusConflict, "already_member", "user is already a room member")
+		return
+	}
 	now := nowMillis()
-	res, err := h.DB.Exec(
-		`INSERT INTO room_memberships (room_id, user_id, role, joined_at)
-		 VALUES (?, ?, 'member', ?)
-		 ON CONFLICT(room_id, user_id) DO NOTHING`,
-		roomID, req.UserID, now,
+	id := newID("rinv")
+	_, err := h.DB.Exec(
+		`INSERT INTO room_invites (id, room_id, inviter_user_id, target_user_id, status, created_at, updated_at)
+		 VALUES (?, ?, ?, ?, 'pending', ?, ?)
+		 ON CONFLICT(room_id, target_user_id) DO UPDATE SET
+		   inviter_user_id = excluded.inviter_user_id,
+		   status = 'pending',
+		   created_at = excluded.created_at,
+		   updated_at = excluded.updated_at`,
+		id, roomID, inviterID, req.UserID, now, now,
 	)
 	if err != nil {
 		h.jsonError(c, http.StatusInternalServerError, "internal_error", "invite member failed")
 		return
 	}
-	member := h.memberPayload(roomID, req.UserID)
-	// Only fan out when a membership was actually created — re-inviting an
-	// existing member is a no-op and shouldn't spam the room.
-	if n, _ := res.RowsAffected(); n > 0 {
-		h.publishRoomToUser(req.UserID, roomID, "room_added")
-		h.publishRoomUpdated(roomID, req.UserID)
+	var inviteID string
+	if err := h.DB.QueryRow(`SELECT id FROM room_invites WHERE room_id = ? AND target_user_id = ?`, roomID, req.UserID).Scan(&inviteID); err != nil {
+		h.jsonError(c, http.StatusInternalServerError, "internal_error", "read room invite failed")
+		return
 	}
-	c.JSON(http.StatusCreated, gin.H{"member": member})
+	c.JSON(http.StatusCreated, gin.H{"invite": h.roomInvitePayload(inviteID, req.UserID)})
+}
+
+func (h *Handler) listRoomInvites(c *gin.Context) {
+	userID := currentUserID(c)
+	status := c.Query("status")
+	if status == "" {
+		status = "pending"
+	}
+	rows, err := h.DB.Query(
+		`SELECT id
+		 FROM room_invites
+		 WHERE target_user_id = ? AND status = ?
+		 ORDER BY created_at DESC`,
+		userID, status,
+	)
+	if err != nil {
+		h.jsonError(c, http.StatusInternalServerError, "internal_error", "list room invites failed")
+		return
+	}
+	defer rows.Close()
+
+	invites := make([]gin.H, 0)
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			h.jsonError(c, http.StatusInternalServerError, "internal_error", "read room invite failed")
+			return
+		}
+		invites = append(invites, h.roomInvitePayload(id, userID))
+	}
+	c.JSON(http.StatusOK, gin.H{"invites": invites, "next_cursor": nil})
+}
+
+func (h *Handler) reviewRoomInvite(c *gin.Context) {
+	var req decisionRequest
+	if err := c.ShouldBindJSON(&req); err != nil || !allowed(req.Decision, "accept", "approve", "reject", "decline") {
+		h.jsonError(c, http.StatusBadRequest, "validation_failed", "decision must be accept or reject")
+		return
+	}
+	userID := currentUserID(c)
+	inviteID := c.Param("invite_id")
+	var roomID, status string
+	err := h.DB.QueryRow(`SELECT room_id, status FROM room_invites WHERE id = ? AND target_user_id = ?`, inviteID, userID).Scan(&roomID, &status)
+	if err != nil {
+		h.jsonError(c, http.StatusNotFound, "not_found", "room invite not found")
+		return
+	}
+	if status != "pending" {
+		h.jsonError(c, http.StatusConflict, "not_pending", "room invite is not pending")
+		return
+	}
+
+	accept := req.Decision == "accept" || req.Decision == "approve"
+	if !accept {
+		_, _ = h.DB.Exec(`UPDATE room_invites SET status = 'rejected', updated_at = ? WHERE id = ?`, nowMillis(), inviteID)
+		c.JSON(http.StatusOK, gin.H{"ok": true, "invite": h.roomInvitePayload(inviteID, userID)})
+		return
+	}
+
+	tx, err := h.DB.Begin()
+	if err != nil {
+		h.jsonError(c, http.StatusInternalServerError, "internal_error", "accept room invite failed")
+		return
+	}
+	defer tx.Rollback()
+	now := nowMillis()
+	if _, err := tx.Exec(
+		`INSERT INTO room_memberships (room_id, user_id, role, joined_at)
+		 VALUES (?, ?, 'member', ?)
+		 ON CONFLICT(room_id, user_id) DO NOTHING`,
+		roomID, userID, now,
+	); err != nil {
+		h.jsonError(c, http.StatusInternalServerError, "internal_error", "accept room invite failed")
+		return
+	}
+	_, _ = tx.Exec(`UPDATE room_invites SET status = 'accepted', updated_at = ? WHERE id = ?`, now, inviteID)
+	_, _ = tx.Exec(`UPDATE join_requests SET status = 'approved', updated_at = ? WHERE room_id = ? AND user_id = ? AND status = 'pending'`, now, roomID, userID)
+	if err := tx.Commit(); err != nil {
+		h.jsonError(c, http.StatusInternalServerError, "internal_error", "save room invite decision failed")
+		return
+	}
+
+	detail, err := h.buildRoomDetail(roomID, userID)
+	if err != nil {
+		h.jsonError(c, http.StatusInternalServerError, "internal_error", "failed to read room")
+		return
+	}
+	h.publishRoomToUser(userID, roomID, "room_added")
+	h.publishRoomUpdated(roomID, userID)
+	c.JSON(http.StatusOK, gin.H{"ok": true, "room": detail, "invite": h.roomInvitePayload(inviteID, userID)})
 }
 
 func (h *Handler) removeMember(c *gin.Context) {
@@ -524,6 +633,54 @@ func scanJoinRequest(rows *sql.Rows) (gin.H, error) {
 		"id": requestID, "status": status, "created_at": formatMillis(createdAt),
 		"user": summaryFromUserFields(id, uid, username, displayName, avatarURL, defaultAvatar),
 	}, nil
+}
+
+func (h *Handler) roomInvitePayload(inviteID, viewerID string) gin.H {
+	var id, roomID, status, inviterID, inviterUID, inviterUsername string
+	var inviterDisplayName, inviterAvatarURL, inviterDefaultAvatar sql.NullString
+	var rid, name, defaultAvatar, visibility, joinPolicy string
+	var avatarURL sql.NullString
+	var createdAt, updatedAt int64
+	err := h.DB.QueryRow(
+		`SELECT ri.id, ri.room_id, ri.status, ri.created_at, ri.updated_at,
+		        u.id, u.uid, u.username, u.display_name, u.avatar_url, u.default_avatar_key,
+		        r.rid, r.name, r.avatar_url, r.default_avatar_key, r.visibility, r.join_policy
+		 FROM room_invites ri
+		 JOIN users u ON u.id = ri.inviter_user_id
+		 JOIN rooms r ON r.id = ri.room_id
+		 WHERE ri.id = ?`,
+		inviteID,
+	).Scan(
+		&id, &roomID, &status, &createdAt, &updatedAt,
+		&inviterID, &inviterUID, &inviterUsername, &inviterDisplayName, &inviterAvatarURL, &inviterDefaultAvatar,
+		&rid, &name, &avatarURL, &defaultAvatar, &visibility, &joinPolicy,
+	)
+	if err != nil {
+		return gin.H{"id": inviteID}
+	}
+	memberCount, _ := h.memberCount(roomID)
+	_, liveCount, _ := h.livePreview(roomID)
+	var joinedCount int
+	_ = h.DB.QueryRow(`SELECT COUNT(*) FROM room_memberships WHERE room_id = ? AND user_id = ?`, roomID, viewerID).Scan(&joinedCount)
+	joined := joinedCount > 0
+	return gin.H{
+		"id": id, "status": status, "created_at": formatMillis(createdAt), "updated_at": formatMillis(updatedAt),
+		"room": gin.H{
+			"id": roomID, "rid": rid, "name": name,
+			"avatar_url": nullableString(avatarURL), "default_avatar_key": defaultAvatar,
+			"visibility": visibility, "join_policy": joinPolicy,
+			"member_count": memberCount, "live_participant_count": liveCount,
+			"joined": joined, "join_state": h.joinState(roomID, viewerID, joined),
+		},
+		"inviter": summaryFromUserFields(
+			inviterID,
+			inviterUID,
+			inviterUsername,
+			inviterDisplayName,
+			inviterAvatarURL,
+			inviterDefaultAvatar,
+		),
+	}
 }
 
 func (h *Handler) textMutedUntil(roomID, userID string) *string {
