@@ -140,22 +140,15 @@ func (h *Handler) joinRoom(c *gin.Context) {
 func (h *Handler) leaveRoom(c *gin.Context) {
 	roomID := c.Param("room_id")
 	userID := currentUserID(c)
-	if !h.isRoomMember(roomID, userID) {
-		if h.isSuperuser(userID) && h.roomIDExists(roomID) {
-			if !h.bindOptionalJSON(c, nil) {
-				return
-			}
-			res, err := h.DB.Exec(`DELETE FROM live_participants WHERE room_id = ? AND user_id = ?`, roomID, userID)
-			if err != nil {
-				h.jsonError(c, http.StatusInternalServerError, "internal_error", "failed to leave room")
-				return
-			}
-			if n, _ := res.RowsAffected(); n > 0 {
-				h.PublishLiveSnapshot(roomID, "live_participant_left", map[string]any{"user_id": userID})
-			}
-			c.JSON(http.StatusOK, gin.H{"ok": true})
+	if h.isSuperuser(userID) {
+		if !h.roomIDExists(roomID) {
+			h.jsonError(c, http.StatusNotFound, "not_found", "room not found")
 			return
 		}
+		h.jsonError(c, http.StatusForbidden, "forbidden", "super user cannot leave rooms")
+		return
+	}
+	if !h.isRoomMember(roomID, userID) {
 		h.jsonError(c, http.StatusNotFound, "not_found", "room not found")
 		return
 	}

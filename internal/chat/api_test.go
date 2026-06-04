@@ -442,6 +442,11 @@ func TestSuperuserCanSeeAndJoinPrivateRooms(t *testing.T) {
 		t.Fatalf("superuser should not be persisted as a room member, got %d rows", superMemberships)
 	}
 
+	status, response = api.request(http.MethodDelete, "/rooms/"+roomID+"/members/me", super.Token, nil)
+	api.requireStatus(status, http.StatusForbidden, response)
+	status, response = api.request(http.MethodPost, "/rooms/"+roomID+"/leave", super.Token, nil)
+	api.requireStatus(status, http.StatusForbidden, response)
+
 	status, response = api.request(http.MethodDelete, "/rooms/"+roomID+"/members/"+super.User["id"].(string), owner.Token, nil)
 	api.requireStatus(status, http.StatusForbidden, response)
 }
@@ -591,6 +596,46 @@ func TestRoomInfoManagementEndpoints(t *testing.T) {
 	}
 	if exists != 0 {
 		t.Fatalf("room should be deleted after confirmed creator deletion")
+	}
+}
+
+func TestSuperuserTransferCreatorDemotesPreviousOwner(t *testing.T) {
+	api := newAPIHarness(t)
+	super := api.login("GANG", "64n9-Ch47")
+	owner := api.register("super_transfer_owner")
+	member := api.register("super_transfer_member")
+
+	room := api.createRoom(owner.Token, map[string]any{"name": "Super Transfer", "join_policy": "open"})
+	roomID := room["id"].(string)
+	status, response := api.request(http.MethodPost, "/rooms/"+roomID+"/join", member.Token, nil)
+	api.requireStatus(status, http.StatusOK, response)
+
+	status, response = api.request(http.MethodPatch, "/rooms/"+roomID+"/creator", super.Token, map[string]any{
+		"user_id": member.User["id"].(string),
+	})
+	api.requireStatus(status, http.StatusOK, response)
+	transferred := response["room"].(map[string]any)
+	if transferred["created_by"].(map[string]any)["id"] != member.User["id"] {
+		t.Fatalf("superuser creator transfer should update room creator: %v", transferred)
+	}
+	if transferred["my_membership"].(map[string]any)["role"] != "superuser" {
+		t.Fatalf("superuser should remain a temporary superuser role: %v", transferred)
+	}
+
+	status, response = api.request(http.MethodGet, "/rooms/"+roomID+"/members?limit=50", super.Token, nil)
+	api.requireStatus(status, http.StatusOK, response)
+	if memberByUserID(t, response, member.User["id"].(string))["role"] != "owner" {
+		t.Fatalf("target member should become owner: %v", response)
+	}
+	if memberByUserID(t, response, owner.User["id"].(string))["role"] != "admin" {
+		t.Fatalf("previous owner should become admin: %v", response)
+	}
+	var superMemberships int
+	if err := api.db.QueryRow(`SELECT COUNT(*) FROM room_memberships WHERE room_id = ? AND user_id = ?`, roomID, super.User["id"].(string)).Scan(&superMemberships); err != nil {
+		t.Fatalf("count superuser memberships: %v", err)
+	}
+	if superMemberships != 0 {
+		t.Fatalf("superuser should not become a room member during creator transfer")
 	}
 }
 

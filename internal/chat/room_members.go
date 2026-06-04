@@ -596,6 +596,30 @@ func (h *Handler) transferRoomCreator(c *gin.Context) {
 		h.jsonError(c, http.StatusNotFound, "not_found", "member not found")
 		return
 	}
+	rows, err := h.DB.Query(`SELECT user_id FROM room_memberships WHERE room_id = ? AND role = 'owner'`, roomID)
+	if err != nil {
+		h.jsonError(c, http.StatusInternalServerError, "internal_error", "transfer creator failed")
+		return
+	}
+	previousOwnerIDs := make([]string, 0, 1)
+	for rows.Next() {
+		var ownerID string
+		if err := rows.Scan(&ownerID); err != nil {
+			rows.Close()
+			h.jsonError(c, http.StatusInternalServerError, "internal_error", "transfer creator failed")
+			return
+		}
+		previousOwnerIDs = append(previousOwnerIDs, ownerID)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		h.jsonError(c, http.StatusInternalServerError, "internal_error", "transfer creator failed")
+		return
+	}
+	if err := rows.Close(); err != nil {
+		h.jsonError(c, http.StatusInternalServerError, "internal_error", "transfer creator failed")
+		return
+	}
 	tx, err := h.DB.Begin()
 	if err != nil {
 		h.jsonError(c, http.StatusInternalServerError, "internal_error", "transfer creator failed")
@@ -615,9 +639,17 @@ func (h *Handler) transferRoomCreator(c *gin.Context) {
 		h.jsonError(c, http.StatusInternalServerError, "internal_error", "save creator transfer failed")
 		return
 	}
-	h.publishRoomRole(roomID, targetID)
-	if actorID != targetID {
-		h.publishRoomRole(roomID, actorID)
+	notified := map[string]bool{}
+	publishRoleOnce := func(userID string) {
+		if userID == "" || notified[userID] {
+			return
+		}
+		notified[userID] = true
+		h.publishRoomRole(roomID, userID)
+	}
+	publishRoleOnce(targetID)
+	for _, ownerID := range previousOwnerIDs {
+		publishRoleOnce(ownerID)
 	}
 	h.publishRoomUpdated(roomID)
 	detail, err := h.buildRoomDetail(roomID, actorID)
