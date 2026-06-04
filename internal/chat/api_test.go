@@ -1180,6 +1180,7 @@ func TestRoomInviteFlow(t *testing.T) {
 	api := newAPIHarness(t)
 	owner := api.register("invite_owner")
 	joiner := api.register("invite_joiner")
+	pendingUser := api.register("invite_pending")
 	rejecter := api.register("invite_rejecter")
 	room := api.createRoom(owner.Token, map[string]any{"name": "Invite Room", "join_policy": "closed"})
 	roomID := room["id"].(string)
@@ -1222,7 +1223,36 @@ func TestRoomInviteFlow(t *testing.T) {
 		t.Fatalf("accepted invite should add member role: %v", response)
 	}
 
-	status, response = api.request(http.MethodPost, "/rooms/"+roomID+"/invites", owner.Token, map[string]any{
+	status, response = api.request(http.MethodPost, "/rooms/"+roomID+"/invites", joiner.Token, map[string]any{
+		"user_id": pendingUser.User["id"].(string),
+	})
+	api.requireStatus(status, http.StatusCreated, response)
+	if response["invite"].(map[string]any)["inviter"].(map[string]any)["id"] != joiner.User["id"] {
+		t.Fatalf("normal member should be able to invite users: %v", response)
+	}
+	pendingInviteID := response["invite"].(map[string]any)["id"].(string)
+	status, response = api.request(http.MethodPatch, "/room-invites/"+pendingInviteID, pendingUser.Token, map[string]any{
+		"decision": "accept",
+	})
+	api.requireStatus(status, http.StatusAccepted, response)
+	joinRequest := response["join_request"].(map[string]any)
+	if joinRequest["status"] != "pending" {
+		t.Fatalf("normal member invite should create pending join request: %v", response)
+	}
+
+	status, response = api.request(http.MethodGet, "/rooms/"+roomID+"/members?limit=50", owner.Token, nil)
+	api.requireStatus(status, http.StatusOK, response)
+	if got := len(response["members"].([]any)); got != 2 {
+		t.Fatalf("pending invite acceptance should not add a membership, got %d: %v", got, response)
+	}
+	status, response = api.request(http.MethodGet, "/rooms/"+roomID+"/join-requests?status=pending", owner.Token, nil)
+	api.requireStatus(status, http.StatusOK, response)
+	requests := response["requests"].([]any)
+	if len(requests) != 1 || requests[0].(map[string]any)["id"] != joinRequest["id"] {
+		t.Fatalf("pending invite acceptance should be visible to admins: %v", response)
+	}
+
+	status, response = api.request(http.MethodPost, "/rooms/"+roomID+"/invites", joiner.Token, map[string]any{
 		"user_id": rejecter.User["id"].(string),
 	})
 	api.requireStatus(status, http.StatusCreated, response)

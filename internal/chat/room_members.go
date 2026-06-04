@@ -175,8 +175,7 @@ func (h *Handler) updateRoomSettings(c *gin.Context) {
 func (h *Handler) inviteMember(c *gin.Context) {
 	roomID := c.Param("room_id")
 	inviterID := currentUserID(c)
-	if !h.isAdmin(roomID, inviterID) {
-		h.jsonError(c, http.StatusForbidden, "forbidden", "admin required")
+	if !h.requireMember(c, roomID) {
 		return
 	}
 	var req userIDRequest
@@ -220,6 +219,7 @@ func (h *Handler) inviteMember(c *gin.Context) {
 		h.jsonError(c, http.StatusInternalServerError, "internal_error", "read room invite failed")
 		return
 	}
+	h.publishRoomInvitesUpdated(req.UserID)
 	c.JSON(http.StatusCreated, gin.H{"invite": h.roomInvitePayload(inviteID, req.UserID)})
 }
 
@@ -262,8 +262,8 @@ func (h *Handler) reviewRoomInvite(c *gin.Context) {
 	}
 	userID := currentUserID(c)
 	inviteID := c.Param("invite_id")
-	var roomID, status string
-	err := h.DB.QueryRow(`SELECT room_id, status FROM room_invites WHERE id = ? AND target_user_id = ?`, inviteID, userID).Scan(&roomID, &status)
+	var roomID, status, inviterID string
+	err := h.DB.QueryRow(`SELECT room_id, status, inviter_user_id FROM room_invites WHERE id = ? AND target_user_id = ?`, inviteID, userID).Scan(&roomID, &status, &inviterID)
 	if err != nil {
 		h.jsonError(c, http.StatusNotFound, "not_found", "room invite not found")
 		return
@@ -276,7 +276,63 @@ func (h *Handler) reviewRoomInvite(c *gin.Context) {
 	accept := req.Decision == "accept" || req.Decision == "approve"
 	if !accept {
 		_, _ = h.DB.Exec(`UPDATE room_invites SET status = 'rejected', updated_at = ? WHERE id = ?`, nowMillis(), inviteID)
+		h.publishRoomInvitesUpdated(userID)
 		c.JSON(http.StatusOK, gin.H{"ok": true, "invite": h.roomInvitePayload(inviteID, userID)})
+		return
+	}
+
+	var alreadyMember int
+	_ = h.DB.QueryRow(`SELECT COUNT(*) FROM room_memberships WHERE room_id = ? AND user_id = ?`, roomID, userID).Scan(&alreadyMember)
+	if alreadyMember > 0 {
+		_, _ = h.DB.Exec(`UPDATE room_invites SET status = 'accepted', updated_at = ? WHERE id = ?`, nowMillis(), inviteID)
+		detail, err := h.buildRoomDetail(roomID, userID)
+		if err != nil {
+			h.jsonError(c, http.StatusInternalServerError, "internal_error", "failed to read room")
+			return
+		}
+		h.publishRoomInvitesUpdated(userID)
+		c.JSON(http.StatusOK, gin.H{"ok": true, "room": detail, "invite": h.roomInvitePayload(inviteID, userID)})
+		return
+	}
+
+	if !h.isAdmin(roomID, inviterID) {
+		tx, err := h.DB.Begin()
+		if err != nil {
+			h.jsonError(c, http.StatusInternalServerError, "internal_error", "accept room invite failed")
+			return
+		}
+		defer tx.Rollback()
+		now := nowMillis()
+		requestID := newID("jrq")
+		if _, err := tx.Exec(
+			`INSERT INTO join_requests (id, room_id, user_id, status, created_at, updated_at)
+			 VALUES (?, ?, ?, 'pending', ?, ?)
+			 ON CONFLICT(room_id, user_id) DO UPDATE SET
+			   status = 'pending',
+			   created_at = excluded.created_at,
+			   updated_at = excluded.updated_at`,
+			requestID, roomID, userID, now, now,
+		); err != nil {
+			h.jsonError(c, http.StatusInternalServerError, "internal_error", "failed to create join request")
+			return
+		}
+		_, _ = tx.Exec(`UPDATE room_invites SET status = 'accepted', updated_at = ? WHERE id = ?`, now, inviteID)
+		var status string
+		var createdAt int64
+		_ = tx.QueryRow(`SELECT id, status, created_at FROM join_requests WHERE room_id = ? AND user_id = ?`, roomID, userID).Scan(&requestID, &status, &createdAt)
+		if err := tx.Commit(); err != nil {
+			h.jsonError(c, http.StatusInternalServerError, "internal_error", "save room invite decision failed")
+			return
+		}
+		h.publishRoomInvitesUpdated(userID)
+		h.publishRoomJoinRequestsUpdated(roomID)
+		c.JSON(http.StatusAccepted, gin.H{
+			"ok": true,
+			"join_request": gin.H{
+				"id": requestID, "room_id": roomID, "status": status, "created_at": formatMillis(createdAt),
+			},
+			"invite": h.roomInvitePayload(inviteID, userID),
+		})
 		return
 	}
 
@@ -310,6 +366,7 @@ func (h *Handler) reviewRoomInvite(c *gin.Context) {
 	}
 	h.publishRoomToUser(userID, roomID, "room_added")
 	h.publishRoomUpdated(roomID, userID)
+	h.publishRoomInvitesUpdated(userID)
 	c.JSON(http.StatusOK, gin.H{"ok": true, "room": detail, "invite": h.roomInvitePayload(inviteID, userID)})
 }
 
