@@ -1154,6 +1154,54 @@ func TestSaveStickerToPersonalAndRoomPacks(t *testing.T) {
 	}
 }
 
+func TestListStickerPacksRespectsScopeAndRoom(t *testing.T) {
+	api := newAPIHarness(t)
+	owner := api.register("sticker_scope_owner")
+	roomA := api.createRoom(owner.Token, map[string]any{"name": "Room A", "join_policy": "open"})
+	roomB := api.createRoom(owner.Token, map[string]any{"name": "Room B", "join_policy": "open"})
+	roomAID := roomA["id"].(string)
+	roomBID := roomB["id"].(string)
+
+	status, response := api.request(http.MethodPost, "/sticker-packs", owner.Token, map[string]any{
+		"scope": "personal",
+		"name":  "Mine",
+	})
+	api.requireStatus(status, http.StatusCreated, response)
+
+	status, response = api.request(http.MethodPost, "/sticker-packs", owner.Token, map[string]any{
+		"scope":   "room",
+		"room_id": roomAID,
+		"name":    "Room A Pack",
+	})
+	api.requireStatus(status, http.StatusCreated, response)
+	roomAPackID := response["pack"].(map[string]any)["id"].(string)
+
+	status, response = api.request(http.MethodPost, "/sticker-packs", owner.Token, map[string]any{
+		"scope":   "room",
+		"room_id": roomBID,
+		"name":    "Room B Pack",
+	})
+	api.requireStatus(status, http.StatusCreated, response)
+
+	status, response = api.request(http.MethodGet, "/sticker-packs?scope=room&room_id="+roomAID, owner.Token, nil)
+	api.requireStatus(status, http.StatusOK, response)
+	roomPacks := response["packs"].([]any)
+	if len(roomPacks) != 1 {
+		t.Fatalf("room list should include only that room's packs: %v", response)
+	}
+	roomPack := roomPacks[0].(map[string]any)
+	if roomPack["id"] != roomAPackID || roomPack["scope"] != "room" || roomPack["room_id"] != roomAID {
+		t.Fatalf("room list returned wrong pack: %v", roomPack)
+	}
+
+	status, response = api.request(http.MethodGet, "/sticker-packs?scope=personal", owner.Token, nil)
+	api.requireStatus(status, http.StatusOK, response)
+	personalPacks := response["packs"].([]any)
+	if len(personalPacks) != 1 || personalPacks[0].(map[string]any)["scope"] != "personal" {
+		t.Fatalf("personal list should include only personal packs: %v", response)
+	}
+}
+
 func TestAddStickerIsIdempotent(t *testing.T) {
 	api := newAPIHarness(t)
 	owner := api.register("sticker_idempotent_owner")

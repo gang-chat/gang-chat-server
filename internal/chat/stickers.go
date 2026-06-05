@@ -21,15 +21,30 @@ func (h *Handler) listStickerPacks(c *gin.Context) {
 		scope = "personal"
 	}
 	roomID := c.Query("room_id")
-	if scope == "room" && !h.requireRoomAccess(c, roomID) {
+	var rows *sql.Rows
+	var err error
+	switch scope {
+	case "personal":
+		rows, err = h.DB.Query(
+			`SELECT id, scope, room_id, name, sort_order, updated_at FROM sticker_packs
+			 WHERE scope = 'personal' AND owner_user_id = ?
+			 ORDER BY sort_order ASC, updated_at DESC`,
+			currentUserID(c),
+		)
+	case "room":
+		if !h.requireRoomAccess(c, roomID) {
+			return
+		}
+		rows, err = h.DB.Query(
+			`SELECT id, scope, room_id, name, sort_order, updated_at FROM sticker_packs
+			 WHERE scope = 'room' AND room_id = ?
+			 ORDER BY sort_order ASC, updated_at DESC`,
+			roomID,
+		)
+	default:
+		h.jsonError(c, http.StatusBadRequest, "validation_failed", "invalid sticker pack scope")
 		return
 	}
-	rows, err := h.DB.Query(
-		`SELECT id, scope, room_id, name, sort_order, updated_at FROM sticker_packs
-		 WHERE (scope = 'personal' AND owner_user_id = ?) OR (scope = 'room' AND room_id = ?)
-		 ORDER BY sort_order ASC, updated_at DESC`,
-		currentUserID(c), roomID,
-	)
 	if err != nil {
 		h.jsonError(c, http.StatusInternalServerError, "internal_error", "list sticker packs failed")
 		return
