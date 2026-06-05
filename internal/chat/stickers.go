@@ -677,8 +677,17 @@ func (h *Handler) downloadableSticker(stickerID, userID string) (downloadableSti
 		 FROM stickers s
 		 JOIN sticker_packs p ON p.id = s.pack_id
 		 JOIN assets a ON a.id = s.asset_id
-		 WHERE s.id = ? AND p.scope = 'personal' AND p.owner_user_id = ?`,
-		stickerID, userID,
+		 WHERE s.id = ? AND (
+		   (p.scope = 'personal' AND p.owner_user_id = ?)
+		   OR (
+		     p.scope = 'room'
+		     AND (
+		       EXISTS (SELECT 1 FROM room_memberships rm WHERE rm.room_id = p.room_id AND rm.user_id = ?)
+		       OR ? = 1
+		     )
+		   )
+		 )`,
+		stickerID, userID, userID, boolToInt(h.isSuperuser(userID)),
 	).Scan(&item.ID, &item.Name, &item.AssetID, &item.Filename, &item.MimeType, &item.StorageKey)
 	return item, err == nil
 }

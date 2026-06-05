@@ -176,6 +176,21 @@ func (b *Bus) Subscribe(userID string) *Subscription {
 	return sub
 }
 
+// OnlineUserIDs returns the set of users that currently have at least one
+// active connection registered with the bus. The returned map is detached
+// from the bus and safe for callers to read without holding the bus lock.
+func (b *Bus) OnlineUserIDs() map[string]struct{} {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	ids := make(map[string]struct{}, len(b.byUser))
+	for userID, conns := range b.byUser {
+		if len(conns) > 0 {
+			ids[userID] = struct{}{}
+		}
+	}
+	return ids
+}
+
 // PublishRoom delivers ev to every subscription that has roomID in its
 // interest set. Best-effort: if a subscription's buffer is full, the
 // oldest queued event for that subscription is dropped to make room.

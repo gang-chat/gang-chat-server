@@ -2,6 +2,7 @@ package chat
 
 import (
 	"database/sql"
+	"errors"
 	"net/http"
 	"strings"
 
@@ -13,24 +14,48 @@ func (h *Handler) getMemberProfile(c *gin.Context) {
 	if !h.requireRoomAccess(c, roomID) {
 		return
 	}
-	var id, uid, username, role string
-	var displayName, avatarURL, defaultAvatar, roomDisplayName, roomAvatarURL, roomDefaultAvatar sql.NullString
+	viewerID := currentUserID(c)
+	targetID := c.Param("user_id")
+	var id, role string
+	var roomDisplayName, roomAvatarURL, roomDefaultAvatar sql.NullString
 	var textMutedUntil sql.NullInt64
 	var joinedAt int64
 	err := h.DB.QueryRow(
-		`SELECT u.id, u.uid, u.username, u.display_name, u.avatar_url, u.default_avatar_key,
+		`SELECT u.id,
 		        rm.room_display_name, rm.room_avatar_url, rm.room_default_avatar_key,
 		        rm.role, rm.text_muted_until, rm.joined_at
 		 FROM room_memberships rm JOIN users u ON u.id = rm.user_id
 		 WHERE rm.room_id = ? AND rm.user_id = ?`,
-		roomID, c.Param("user_id"),
-	).Scan(&id, &uid, &username, &displayName, &avatarURL, &defaultAvatar, &roomDisplayName, &roomAvatarURL, &roomDefaultAvatar, &role, &textMutedUntil, &joinedAt)
+		roomID, targetID,
+	).Scan(&id, &roomDisplayName, &roomAvatarURL, &roomDefaultAvatar, &role, &textMutedUntil, &joinedAt)
 	if err != nil {
-		h.jsonError(c, http.StatusNotFound, "not_found", "member not found")
+		if !errors.Is(err, sql.ErrNoRows) {
+			h.jsonError(c, http.StatusInternalServerError, "internal_error", "failed to read member profile")
+			return
+		}
+		user, userErr := h.profileUserSummary(targetID, viewerID)
+		if userErr != nil || !user.IsSuperuser || !h.roomIDExists(roomID) {
+			h.jsonError(c, http.StatusNotFound, "not_found", "member not found")
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"profile": gin.H{
+			"user":                    user,
+			"room_display_name":       nil,
+			"room_avatar_url":         nil,
+			"room_default_avatar_key": nil,
+			"role":                    "superuser",
+			"text_muted_until":        nil,
+			"joined_at":               formatMillis(nowMillis()),
+		}})
+		return
+	}
+	user, err := h.profileUserSummary(id, viewerID)
+	if err != nil {
+		h.jsonError(c, http.StatusInternalServerError, "internal_error", "failed to read member profile")
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"profile": gin.H{
-		"user":                    summaryFromUserFields(id, uid, username, displayName, avatarURL, defaultAvatar),
+		"user":                    user,
 		"room_display_name":       nullableString(roomDisplayName),
 		"room_avatar_url":         nullableString(roomAvatarURL),
 		"room_default_avatar_key": nullableString(roomDefaultAvatar),

@@ -215,6 +215,11 @@ func (h *Handler) searchRooms(c *gin.Context) {
 			h.jsonError(c, http.StatusInternalServerError, "internal_error", "failed to read room members")
 			return
 		}
+		onlineMemberCount, err := h.onlineMemberCount(rec.ID)
+		if err != nil {
+			h.jsonError(c, http.StatusInternalServerError, "internal_error", "failed to read online members")
+			return
+		}
 		_, liveCount, err := h.livePreview(rec.ID)
 		if err != nil {
 			h.jsonError(c, http.StatusInternalServerError, "internal_error", "failed to read live state")
@@ -229,6 +234,7 @@ func (h *Handler) searchRooms(c *gin.Context) {
 			Visibility:           rec.Visibility,
 			JoinPolicy:           rec.JoinPolicy,
 			MemberCount:          memberCount,
+			OnlineMemberCount:    onlineMemberCount,
 			LiveParticipantCount: liveCount,
 			Joined:               joined,
 			JoinState:            h.joinState(rec.ID, userID, joined),
@@ -254,6 +260,10 @@ func (h *Handler) getRoom(c *gin.Context) {
 
 func (h *Handler) buildRoomCard(rec roomRecord, userID string) (roomCard, error) {
 	memberCount, err := h.memberCount(rec.ID)
+	if err != nil {
+		return roomCard{}, err
+	}
+	onlineMemberCount, err := h.onlineMemberCount(rec.ID)
 	if err != nil {
 		return roomCard{}, err
 	}
@@ -289,6 +299,7 @@ func (h *Handler) buildRoomCard(rec roomRecord, userID string) (roomCard, error)
 		MyRole:               role,
 		NotificationLevel:    notificationLevel,
 		NotificationPolicy:   notificationLevel,
+		OnlineMemberCount:    onlineMemberCount,
 		LiveParticipantCount: liveCount,
 		LiveAvatarPreview:    livePreview,
 		LastMessage:          lastMessage,
@@ -356,6 +367,10 @@ func (h *Handler) buildRoomDetail(roomID, userID string) (roomDetail, error) {
 	if err != nil {
 		return roomDetail{}, err
 	}
+	onlineMemberCount, err := h.onlineMemberCount(roomID)
+	if err != nil {
+		return roomDetail{}, err
+	}
 	live, err := h.buildLiveState(roomID, rec.UpdatedAt)
 	if err != nil {
 		return roomDetail{}, err
@@ -375,6 +390,7 @@ func (h *Handler) buildRoomDetail(roomID, userID string) (roomDetail, error) {
 		MessageRecallPolicy:         rec.MessageRecallPolicy,
 		MessageRecallWindowSeconds:  nullableInt64(rec.MessageRecallWindowSeconds),
 		MemberCount:                 memberCount,
+		OnlineMemberCount:           onlineMemberCount,
 		CreatedBy:                   createdBy,
 		RemarkName:                  nullableString(remarkName),
 		NotificationPolicy:          notificationLevel,
@@ -419,6 +435,33 @@ func (h *Handler) memberCount(roomID string) (int, error) {
 	var count int
 	err := h.DB.QueryRow(`SELECT COUNT(*) FROM room_memberships WHERE room_id = ?`, roomID).Scan(&count)
 	return count, err
+}
+
+func (h *Handler) onlineMemberCount(roomID string) (int, error) {
+	if h.Bus == nil {
+		return 0, nil
+	}
+	online := h.Bus.OnlineUserIDs()
+	if len(online) == 0 {
+		return 0, nil
+	}
+	rows, err := h.DB.Query(`SELECT user_id FROM room_memberships WHERE room_id = ?`, roomID)
+	if err != nil {
+		return 0, err
+	}
+	defer rows.Close()
+
+	count := 0
+	for rows.Next() {
+		var userID string
+		if err := rows.Scan(&userID); err != nil {
+			return 0, err
+		}
+		if _, ok := online[userID]; ok {
+			count++
+		}
+	}
+	return count, rows.Err()
 }
 
 func (h *Handler) livePreview(roomID string) ([]userSummary, int, error) {

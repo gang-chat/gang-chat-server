@@ -451,6 +451,99 @@ func TestSuperuserCanSeeAndJoinPrivateRooms(t *testing.T) {
 	api.requireStatus(status, http.StatusForbidden, response)
 }
 
+func TestMemberProfileIncludesBioAndRoomLinks(t *testing.T) {
+	api := newAPIHarness(t)
+	super := api.login("GANG", "64n9-Ch47")
+	owner := api.register("profile_owner")
+	alice := api.register("profile_alice")
+	viewer := api.register("profile_viewer")
+
+	room1 := api.createRoom(owner.Token, map[string]any{"name": "Shared", "join_policy": "open"})
+	room1ID := room1["id"].(string)
+	room2 := api.createRoom(owner.Token, map[string]any{"name": "Alice Only", "join_policy": "open"})
+	room2ID := room2["id"].(string)
+	status, response := api.request(http.MethodPost, "/rooms/"+room1ID+"/join", alice.Token, nil)
+	api.requireStatus(status, http.StatusOK, response)
+	status, response = api.request(http.MethodPost, "/rooms/"+room1ID+"/join", viewer.Token, nil)
+	api.requireStatus(status, http.StatusOK, response)
+	status, response = api.request(http.MethodPost, "/rooms/"+room2ID+"/join", alice.Token, nil)
+	api.requireStatus(status, http.StatusOK, response)
+
+	if _, err := api.db.Exec(`UPDATE users SET bio = ? WHERE id = ?`, "Ships quietly", alice.User["id"].(string)); err != nil {
+		t.Fatalf("update alice bio: %v", err)
+	}
+	if _, err := api.db.Exec(`UPDATE room_memberships SET remark_name = ? WHERE room_id = ? AND user_id = ?`, "Shared Remark", room1ID, alice.User["id"].(string)); err != nil {
+		t.Fatalf("update room remark: %v", err)
+	}
+
+	status, response = api.request(http.MethodGet, "/rooms/"+room1ID+"/members/"+alice.User["id"].(string)+"/profile", viewer.Token, nil)
+	api.requireStatus(status, http.StatusOK, response)
+	profile := response["profile"].(map[string]any)
+	user := profile["user"].(map[string]any)
+	if user["bio"] != "Ships quietly" {
+		t.Fatalf("profile should include signature: %v", profile)
+	}
+	commonRooms := user["common_rooms"].([]any)
+	if len(commonRooms) != 1 {
+		t.Fatalf("viewer should see only common rooms: %v", commonRooms)
+	}
+	commonRoom := commonRooms[0].(map[string]any)
+	if commonRoom["id"] != room1ID || commonRoom["remark_name"] != "Shared Remark" || commonRoom["rid"] == "" {
+		t.Fatalf("common room should include id rid and remark: %v", commonRoom)
+	}
+
+	status, response = api.request(http.MethodGet, "/rooms/"+room1ID+"/members/"+alice.User["id"].(string)+"/profile", super.Token, nil)
+	api.requireStatus(status, http.StatusOK, response)
+	user = response["profile"].(map[string]any)["user"].(map[string]any)
+	if got := len(user["common_rooms"].([]any)); got != 2 {
+		t.Fatalf("superuser should see all target rooms, got %d: %v", got, user["common_rooms"])
+	}
+
+	status, response = api.request(http.MethodGet, "/rooms/"+room1ID+"/members/"+super.User["id"].(string)+"/profile", owner.Token, nil)
+	api.requireStatus(status, http.StatusOK, response)
+	superProfile := response["profile"].(map[string]any)
+	superUser := superProfile["user"].(map[string]any)
+	if superProfile["role"] != "superuser" || superUser["is_superuser"] != true {
+		t.Fatalf("superuser ghost profile should be visible with role: %v", superProfile)
+	}
+	if _, ok := superUser["common_rooms"]; ok {
+		t.Fatalf("superuser profile should omit common_rooms: %v", superUser)
+	}
+}
+
+func TestRoomOnlineMemberCountUsesActiveConnections(t *testing.T) {
+	api := newAPIHarness(t)
+	owner := api.register("online_owner")
+	alice := api.register("online_alice")
+	room := api.createRoom(owner.Token, map[string]any{"name": "Presence", "join_policy": "open"})
+	roomID := room["id"].(string)
+	status, response := api.request(http.MethodPost, "/rooms/"+roomID+"/join", alice.Token, nil)
+	api.requireStatus(status, http.StatusOK, response)
+
+	ownerA := api.bus.Subscribe(owner.User["id"].(string))
+	defer ownerA.Close()
+	ownerB := api.bus.Subscribe(owner.User["id"].(string))
+	defer ownerB.Close()
+	aliceSub := api.bus.Subscribe(alice.User["id"].(string))
+	defer aliceSub.Close()
+	outsiderSub := api.bus.Subscribe("not_a_member")
+	defer outsiderSub.Close()
+
+	status, response = api.request(http.MethodGet, "/rooms/"+roomID, owner.Token, nil)
+	api.requireStatus(status, http.StatusOK, response)
+	detail := response["room"].(map[string]any)
+	if detail["member_count"] != float64(2) || detail["online_member_count"] != float64(2) {
+		t.Fatalf("room detail should count unique online members only: %v", detail)
+	}
+
+	status, response = api.request(http.MethodGet, "/rooms", owner.Token, nil)
+	api.requireStatus(status, http.StatusOK, response)
+	card := response["rooms"].([]any)[0].(map[string]any)
+	if card["online_member_count"] != float64(2) {
+		t.Fatalf("room card should include online member count: %v", card)
+	}
+}
+
 func TestRoomLeaveDeletesAndPromotesAdmin(t *testing.T) {
 	api := newAPIHarness(t)
 	owner := api.register("leave_owner")

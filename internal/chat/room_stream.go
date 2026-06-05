@@ -47,6 +47,7 @@ type roomSnapshot struct {
 	MessageRecallPolicy         string              `json:"message_recall_policy,omitempty"`
 	MessageRecallWindowSeconds  *int64              `json:"message_recall_window_seconds"`
 	MemberCount                 int                 `json:"member_count"`
+	OnlineMemberCount           int                 `json:"online_member_count"`
 	LiveParticipantCount        int                 `json:"live_participant_count"`
 	LiveAvatarPreview           []userSummary       `json:"live_avatar_preview"`
 	LastMessage                 *lastMessagePreview `json:"last_message"`
@@ -77,6 +78,10 @@ func (h *Handler) buildRoomSnapshot(roomID string) (roomSnapshot, error) {
 	if err != nil {
 		return roomSnapshot{}, err
 	}
+	onlineMemberCount, err := h.onlineMemberCount(roomID)
+	if err != nil {
+		return roomSnapshot{}, err
+	}
 	livePreview, liveCount, err := h.livePreview(roomID)
 	if err != nil {
 		return roomSnapshot{}, err
@@ -100,6 +105,7 @@ func (h *Handler) buildRoomSnapshot(roomID string) (roomSnapshot, error) {
 		MessageRecallPolicy:         rec.MessageRecallPolicy,
 		MessageRecallWindowSeconds:  nullableInt64(rec.MessageRecallWindowSeconds),
 		MemberCount:                 memberCount,
+		OnlineMemberCount:           onlineMemberCount,
 		LiveParticipantCount:        liveCount,
 		LiveAvatarPreview:           livePreview,
 		LastMessage:                 lastMessage,

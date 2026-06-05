@@ -28,12 +28,27 @@ type errorBody struct {
 }
 
 type userSummary struct {
+	ID               string           `json:"id"`
+	UID              string           `json:"uid,omitempty"`
+	Username         string           `json:"username"`
+	DisplayName      string           `json:"display_name"`
+	AvatarURL        *string          `json:"avatar_url"`
+	DefaultAvatarKey string           `json:"default_avatar_key"`
+	Bio              *string          `json:"bio,omitempty"`
+	IsSuperuser      bool             `json:"is_superuser,omitempty"`
+	CommonRooms      []userCommonRoom `json:"common_rooms,omitempty"`
+}
+
+type userCommonRoom struct {
 	ID               string  `json:"id"`
-	UID              string  `json:"uid,omitempty"`
-	Username         string  `json:"username"`
-	DisplayName      string  `json:"display_name"`
+	RID              string  `json:"rid,omitempty"`
+	Name             string  `json:"name"`
+	RemarkName       *string `json:"remark_name"`
 	AvatarURL        *string `json:"avatar_url"`
 	DefaultAvatarKey string  `json:"default_avatar_key"`
+	Visibility       string  `json:"visibility,omitempty"`
+	RoomDisplayName  *string `json:"room_display_name,omitempty"`
+	RoomRole         string  `json:"room_role,omitempty"`
 }
 
 type currentMember struct {
@@ -64,6 +79,7 @@ type roomCard struct {
 	MyRole               string              `json:"my_role,omitempty"`
 	NotificationLevel    string              `json:"notification_level,omitempty"`
 	NotificationPolicy   string              `json:"notification_policy,omitempty"`
+	OnlineMemberCount    int                 `json:"online_member_count"`
 	LiveParticipantCount int                 `json:"live_participant_count"`
 	LiveAvatarPreview    []userSummary       `json:"live_avatar_preview"`
 	LastMessage          *lastMessagePreview `json:"last_message"`
@@ -80,6 +96,7 @@ type publicRoom struct {
 	Visibility           string  `json:"visibility,omitempty"`
 	JoinPolicy           string  `json:"join_policy,omitempty"`
 	MemberCount          int     `json:"member_count"`
+	OnlineMemberCount    int     `json:"online_member_count"`
 	LiveParticipantCount int     `json:"live_participant_count"`
 	Joined               bool    `json:"joined"`
 	JoinState            string  `json:"join_state,omitempty"`
@@ -116,6 +133,7 @@ type roomDetail struct {
 	MessageRecallPolicy         string              `json:"message_recall_policy,omitempty"`
 	MessageRecallWindowSeconds  *int64              `json:"message_recall_window_seconds"`
 	MemberCount                 int                 `json:"member_count"`
+	OnlineMemberCount           int                 `json:"online_member_count"`
 	CreatedBy                   *userSummary        `json:"created_by"`
 	RemarkName                  *string             `json:"remark_name"`
 	NotificationPolicy          string              `json:"notification_policy,omitempty"`
@@ -254,6 +272,76 @@ func (h *Handler) userSummary(userID string) (userSummary, error) {
 		return userSummary{}, err
 	}
 	return summaryFromUserFields(id, uid, username, displayName, avatarURL, defaultAvatar), nil
+}
+
+func (h *Handler) profileUserSummary(userID, viewerID string) (userSummary, error) {
+	var id, uid, username string
+	var displayName, avatarURL, defaultAvatar, bio sql.NullString
+	var isSuperuser int
+	err := h.DB.QueryRow(
+		`SELECT id, uid, username, display_name, avatar_url, default_avatar_key, bio, is_superuser
+		 FROM users WHERE id = ? AND status = 'active'`,
+		userID,
+	).Scan(&id, &uid, &username, &displayName, &avatarURL, &defaultAvatar, &bio, &isSuperuser)
+	if err != nil {
+		return userSummary{}, err
+	}
+	summary := summaryFromUserFields(id, uid, username, displayName, avatarURL, defaultAvatar)
+	summary.Bio = nullableString(bio)
+	summary.IsSuperuser = isSuperuser != 0
+	if !summary.IsSuperuser {
+		rooms, err := h.userProfileRooms(id, viewerID, viewerID == id || h.isSuperuser(viewerID))
+		if err != nil {
+			return userSummary{}, err
+		}
+		summary.CommonRooms = rooms
+	}
+	return summary, nil
+}
+
+func (h *Handler) userProfileRooms(targetID, viewerID string, allRooms bool) ([]userCommonRoom, error) {
+	query := `SELECT r.id, r.rid, r.name, r.avatar_url, r.default_avatar_key, r.visibility,
+	                 target_rm.remark_name, target_rm.room_display_name, target_rm.role
+	          FROM room_memberships target_rm
+	          JOIN rooms r ON r.id = target_rm.room_id`
+	args := []any{targetID}
+	where := ` WHERE target_rm.user_id = ?`
+	if !allRooms {
+		query += ` JOIN room_memberships viewer_rm ON viewer_rm.room_id = target_rm.room_id`
+		where += ` AND viewer_rm.user_id = ?`
+		args = append(args, viewerID)
+	}
+	query += where + ` ORDER BY target_rm.joined_at DESC`
+
+	rows, err := h.DB.Query(query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	rooms := make([]userCommonRoom, 0)
+	for rows.Next() {
+		var room userCommonRoom
+		var rid, avatarURL, remarkName, roomDisplayName sql.NullString
+		if err := rows.Scan(
+			&room.ID,
+			&rid,
+			&room.Name,
+			&avatarURL,
+			&room.DefaultAvatarKey,
+			&room.Visibility,
+			&remarkName,
+			&roomDisplayName,
+			&room.RoomRole,
+		); err != nil {
+			return nil, err
+		}
+		room.RID = rid.String
+		room.AvatarURL = nullableString(avatarURL)
+		room.RemarkName = nullableString(remarkName)
+		room.RoomDisplayName = nullableString(roomDisplayName)
+		rooms = append(rooms, room)
+	}
+	return rooms, rows.Err()
 }
 
 func (h *Handler) jsonError(c *gin.Context, status int, code, message string) {
