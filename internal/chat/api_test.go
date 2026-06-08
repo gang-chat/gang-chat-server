@@ -1003,6 +1003,34 @@ func TestUserAudioSettings(t *testing.T) {
 	api.requireStatus(status, http.StatusBadRequest, response)
 }
 
+func TestAccountLanguagePreference(t *testing.T) {
+	api := newAPIHarness(t)
+	user := api.register("language_user")
+	if user.User["language"] != "zh-Hans" {
+		t.Fatalf("new users should default to Simplified Chinese: %v", user.User)
+	}
+
+	status, response := api.request(http.MethodPatch, "/users/me/account", user.Token, map[string]any{
+		"language": "zh-Hant",
+	})
+	api.requireStatus(status, http.StatusOK, response)
+	updated := response["user"].(map[string]any)
+	if updated["language"] != "zh-Hant" {
+		t.Fatalf("language preference should update in account response: %v", updated)
+	}
+
+	status, response = api.request(http.MethodGet, "/me", user.Token, nil)
+	api.requireStatus(status, http.StatusOK, response)
+	if response["language"] != "zh-Hant" {
+		t.Fatalf("language preference should persist on /me: %v", response)
+	}
+
+	status, response = api.request(http.MethodPatch, "/users/me/account", user.Token, map[string]any{
+		"language": "fr",
+	})
+	api.requireStatus(status, http.StatusBadRequest, response)
+}
+
 func TestLiveMemberVolumes(t *testing.T) {
 	api := newAPIHarness(t)
 	owner := api.register("volume_owner")

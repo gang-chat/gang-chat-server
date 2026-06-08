@@ -397,6 +397,10 @@ func userResponse(user *model.User) UserResponse {
 	if gender == "" {
 		gender = "secret"
 	}
+	language := user.Language
+	if language == "" {
+		language = "zh-Hans"
+	}
 	var avatarURL *string
 	if user.AvatarURL.Valid {
 		avatarURL = &user.AvatarURL.String
@@ -424,6 +428,7 @@ func userResponse(user *model.User) UserResponse {
 		EmailPublic:         user.EmailPublic,
 		PhoneNumber:         user.PhoneNumber.String,
 		PhoneNumberPublic:   user.PhoneNumberPublic,
+		Language:            language,
 		AvatarURL:           avatarURL,
 		DefaultAvatarKey:    defaultAvatar,
 		IsSuperuser:         user.IsSuperuser,

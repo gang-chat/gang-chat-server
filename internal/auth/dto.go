@@ -31,6 +31,7 @@ type UpdateAccountRequest struct {
 	EmailPublic       *bool   `json:"email_public"`
 	PhoneNumber       *string `json:"phone_number"`
 	PhoneNumberPublic *bool   `json:"phone_number_public"`
+	Language          *string `json:"language"`
 }
 
 type UpdateProfileRequest struct {
@@ -70,6 +71,7 @@ type UserResponse struct {
 	EmailPublic         bool    `json:"email_public"`
 	PhoneNumber         string  `json:"phone_number,omitempty"`
 	PhoneNumberPublic   bool    `json:"phone_number_public"`
+	Language            string  `json:"language"`
 	AvatarURL           *string `json:"avatar_url"`
 	DefaultAvatarKey    string  `json:"default_avatar_key"`
 	IsSuperuser         bool    `json:"is_superuser,omitempty"`

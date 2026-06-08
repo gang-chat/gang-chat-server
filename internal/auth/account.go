@@ -18,7 +18,8 @@ func (h *Handler) updateAccount(c *gin.Context) {
 		return
 	}
 	if req.Username == nil && req.Email == nil && req.EmailPublic == nil &&
-		req.PhoneNumber == nil && req.PhoneNumberPublic == nil {
+		req.PhoneNumber == nil && req.PhoneNumberPublic == nil &&
+		req.Language == nil {
 		errorJSON(c, http.StatusBadRequest, "validation_failed", "at least one account field is required")
 		return
 	}
@@ -81,6 +82,16 @@ func (h *Handler) updateAccount(c *gin.Context) {
 	if req.PhoneNumberPublic != nil {
 		sets = append(sets, "phone_number_public = ?")
 		args = append(args, *req.PhoneNumberPublic)
+	}
+
+	if req.Language != nil {
+		language := strings.TrimSpace(*req.Language)
+		if !isValidLanguage(language) {
+			errorJSON(c, http.StatusBadRequest, "validation_failed", "language must be zh-Hans, zh-Hant or en")
+			return
+		}
+		sets = append(sets, "language = ?")
+		args = append(args, language)
 	}
 
 	args = append(args, user.ID)
@@ -276,6 +287,7 @@ type forceUserSettingsRequest struct {
 	Gender            *string `json:"gender"`
 	AvatarAssetID     *string `json:"avatar_asset_id"`
 	DefaultAvatarKey  *string `json:"default_avatar_key"`
+	Language          *string `json:"language"`
 	Status            *string `json:"status"`
 }
 
@@ -292,7 +304,8 @@ func (h *Handler) forceUpdateUserSettings(c *gin.Context) {
 	if req.Username == nil && req.Email == nil && req.EmailPublic == nil &&
 		req.PhoneNumber == nil && req.PhoneNumberPublic == nil &&
 		req.DisplayName == nil && req.Bio == nil && req.Gender == nil &&
-		req.AvatarAssetID == nil && req.DefaultAvatarKey == nil && req.Status == nil {
+		req.AvatarAssetID == nil && req.DefaultAvatarKey == nil &&
+		req.Language == nil && req.Status == nil {
 		errorJSON(c, http.StatusBadRequest, "validation_failed", "at least one user setting is required")
 		return
 	}
@@ -387,6 +400,15 @@ func (h *Handler) forceUpdateUserSettings(c *gin.Context) {
 		sets = append(sets, "default_avatar_key = ?")
 		args = append(args, key)
 	}
+	if req.Language != nil {
+		language := strings.TrimSpace(*req.Language)
+		if !isValidLanguage(language) {
+			errorJSON(c, http.StatusBadRequest, "validation_failed", "language must be zh-Hans, zh-Hant or en")
+			return
+		}
+		sets = append(sets, "language = ?")
+		args = append(args, language)
+	}
 	if req.Status != nil {
 		status := strings.TrimSpace(*req.Status)
 		if status != "active" && status != "deleted" && status != "suspended" {
@@ -429,6 +451,10 @@ func (h *Handler) forceUpdateUserSettings(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"user": userResponse(user)})
+}
+
+func isValidLanguage(value string) bool {
+	return value == "zh-Hans" || value == "zh-Hant" || value == "en"
 }
 
 func normalizePhoneNumber(value string) (string, bool) {
