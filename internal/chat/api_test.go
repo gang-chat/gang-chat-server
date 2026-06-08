@@ -654,10 +654,15 @@ func TestRoomInfoManagementEndpoints(t *testing.T) {
 	member := api.register("manage_member")
 
 	room := api.createRoom(owner.Token, map[string]any{
-		"name":        "Manage Me",
-		"description": "old intro",
-		"join_policy": "open",
+		"name":                           "Manage Me",
+		"description":                    "old intro",
+		"join_policy":                    "open",
+		"ai_voice_announcements_enabled": false,
+		"default_avatar_key":             "green-2",
 	})
+	if room["description"] != "old intro" || room["ai_voice_announcements_enabled"] != false || room["default_avatar_key"] != "green-2" {
+		t.Fatalf("create room response missing management fields: %v", room)
+	}
 	roomID := room["id"].(string)
 	status, response := api.request(http.MethodPost, "/rooms/"+roomID+"/join", member.Token, nil)
 	api.requireStatus(status, http.StatusOK, response)

@@ -111,6 +111,13 @@ func (h *Handler) createRoom(c *gin.Context) {
 		h.jsonError(c, http.StatusBadRequest, "validation_failed", "description must be at most 500 characters")
 		return
 	}
+	aiVoiceAnnounceEnabled := true
+	if req.AIVoiceAnnounceEnabled != nil {
+		aiVoiceAnnounceEnabled = *req.AIVoiceAnnounceEnabled
+	}
+	if req.AIVoiceAnnouncementsEnabled != nil {
+		aiVoiceAnnounceEnabled = *req.AIVoiceAnnouncementsEnabled
+	}
 	defaultAvatarKey := defaultRoomAvatar(roomID)
 	if req.DefaultAvatarKey != nil && strings.TrimSpace(*req.DefaultAvatarKey) != "" {
 		defaultAvatarKey = strings.TrimSpace(*req.DefaultAvatarKey)
@@ -139,8 +146,8 @@ func (h *Handler) createRoom(c *gin.Context) {
 		   id, rid, name, avatar_asset_id, avatar_url, default_avatar_key, created_by_user_id,
 		   visibility, join_policy, ai_voice_announce_enabled, message_recall_policy,
 		   message_recall_window_seconds, description, created_at, updated_at
-		 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 'time_limited', 120, ?, ?, ?)`,
-		roomID, rid, name, avatarAssetID, avatarURL, defaultAvatarKey, userID, visibility, joinPolicy, description, now, now,
+		 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'time_limited', 120, ?, ?, ?)`,
+		roomID, rid, name, avatarAssetID, avatarURL, defaultAvatarKey, userID, visibility, joinPolicy, boolToInt(aiVoiceAnnounceEnabled), description, now, now,
 	)
 	if err != nil {
 		h.jsonError(c, http.StatusInternalServerError, "internal_error", "failed to create room")
