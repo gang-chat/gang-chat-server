@@ -195,12 +195,14 @@ type liveState struct {
 }
 
 type createRoomRequest struct {
-	Name             string  `json:"name"`
-	Description      string  `json:"description"`
-	AvatarAssetID    *string `json:"avatar_asset_id"`
-	DefaultAvatarKey *string `json:"default_avatar_key"`
-	Visibility       string  `json:"visibility"`
-	JoinPolicy       string  `json:"join_policy"`
+	Name                        string  `json:"name"`
+	Description                 string  `json:"description"`
+	AvatarAssetID               *string `json:"avatar_asset_id"`
+	DefaultAvatarKey            *string `json:"default_avatar_key"`
+	Visibility                  string  `json:"visibility"`
+	JoinPolicy                  string  `json:"join_policy"`
+	AIVoiceAnnounceEnabled      *bool   `json:"ai_voice_announce_enabled"`
+	AIVoiceAnnouncementsEnabled *bool   `json:"ai_voice_announcements_enabled"`
 }
 
 type sendMessageRequest struct {
