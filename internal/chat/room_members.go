@@ -337,13 +337,20 @@ func (h *Handler) listRoomInvites(c *gin.Context) {
 	if status == "" {
 		status = "pending"
 	}
-	rows, err := h.DB.Query(
-		`SELECT id
+	if status != "all" && !allowed(status, "pending", "accepted", "rejected") {
+		h.jsonError(c, http.StatusBadRequest, "validation_failed", "status must be pending, accepted, rejected, or all")
+		return
+	}
+	query := `SELECT id
 		 FROM room_invites
-		 WHERE target_user_id = ? AND status = ?
-		 ORDER BY created_at DESC`,
-		userID, status,
-	)
+		 WHERE target_user_id = ?`
+	args := []any{userID}
+	if status != "all" {
+		query += ` AND status = ?`
+		args = append(args, status)
+	}
+	query += ` ORDER BY CASE WHEN status = 'pending' THEN 0 ELSE 1 END, created_at DESC`
+	rows, err := h.DB.Query(query, args...)
 	if err != nil {
 		h.jsonError(c, http.StatusInternalServerError, "internal_error", "list room invites failed")
 		return
@@ -933,22 +940,25 @@ func scanJoinRequest(rows *sql.Rows) (gin.H, error) {
 
 func (h *Handler) roomInvitePayload(inviteID, viewerID string) gin.H {
 	var id, roomID, status, inviterID, inviterUID, inviterUsername string
-	var inviterDisplayName, inviterAvatarURL, inviterDefaultAvatar sql.NullString
+	var inviterDisplayName, inviterAvatarURL, inviterDefaultAvatar, inviterRoomDisplayName, inviterRoomRole sql.NullString
 	var rid, name, defaultAvatar, visibility, joinPolicy string
 	var avatarURL sql.NullString
 	var createdAt, updatedAt int64
 	err := h.DB.QueryRow(
 		`SELECT ri.id, ri.room_id, ri.status, ri.created_at, ri.updated_at,
 		        u.id, u.uid, u.username, u.display_name, u.avatar_url, u.default_avatar_key,
+		        irm.room_display_name, irm.role,
 		        r.rid, r.name, r.avatar_url, r.default_avatar_key, r.visibility, r.join_policy
 		 FROM room_invites ri
 		 JOIN users u ON u.id = ri.inviter_user_id
 		 JOIN rooms r ON r.id = ri.room_id
+		 LEFT JOIN room_memberships irm ON irm.room_id = ri.room_id AND irm.user_id = ri.inviter_user_id
 		 WHERE ri.id = ?`,
 		inviteID,
 	).Scan(
 		&id, &roomID, &status, &createdAt, &updatedAt,
 		&inviterID, &inviterUID, &inviterUsername, &inviterDisplayName, &inviterAvatarURL, &inviterDefaultAvatar,
+		&inviterRoomDisplayName, &inviterRoomRole,
 		&rid, &name, &avatarURL, &defaultAvatar, &visibility, &joinPolicy,
 	)
 	if err != nil {
@@ -959,6 +969,20 @@ func (h *Handler) roomInvitePayload(inviteID, viewerID string) gin.H {
 	var joinedCount int
 	_ = h.DB.QueryRow(`SELECT COUNT(*) FROM room_memberships WHERE room_id = ? AND user_id = ?`, roomID, viewerID).Scan(&joinedCount)
 	joined := joinedCount > 0
+	inviter := summaryFromUserFields(
+		inviterID,
+		inviterUID,
+		inviterUsername,
+		inviterDisplayName,
+		inviterAvatarURL,
+		inviterDefaultAvatar,
+	)
+	inviter.RoomDisplayName = nullableString(inviterRoomDisplayName)
+	if inviterRoomRole.Valid && inviterRoomRole.String != "" {
+		inviter.RoomRole = inviterRoomRole.String
+	} else if h.isSuperuser(inviterID) {
+		inviter.RoomRole = "superuser"
+	}
 	return gin.H{
 		"id": id, "status": status, "created_at": formatMillis(createdAt), "updated_at": formatMillis(updatedAt),
 		"room": gin.H{
@@ -968,14 +992,7 @@ func (h *Handler) roomInvitePayload(inviteID, viewerID string) gin.H {
 			"member_count": memberCount, "live_participant_count": liveCount,
 			"joined": joined, "join_state": h.joinState(roomID, viewerID, joined),
 		},
-		"inviter": summaryFromUserFields(
-			inviterID,
-			inviterUID,
-			inviterUsername,
-			inviterDisplayName,
-			inviterAvatarURL,
-			inviterDefaultAvatar,
-		),
+		"inviter": inviter,
 	}
 }
 
