@@ -15,6 +15,11 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
+const (
+	defaultPersonalStickerPackName = "我的表情包"
+	defaultRoomStickerPackName     = "房间表情包"
+)
+
 func (h *Handler) listStickerPacks(c *gin.Context) {
 	scope := c.Query("scope")
 	if scope == "" {
@@ -379,7 +384,7 @@ func (h *Handler) saveSticker(c *gin.Context) {
 			}
 			packID = req.TargetPackID
 		} else {
-			packID, err = h.ensureDefaultStickerPack("personal", userID, "", "Saved Stickers")
+			packID, err = h.ensureDefaultStickerPack("personal", userID, "", defaultPersonalStickerPackName)
 		}
 	case "room":
 		if !h.isAdmin(roomID, userID) {
@@ -393,7 +398,7 @@ func (h *Handler) saveSticker(c *gin.Context) {
 			}
 			packID = req.TargetPackID
 		} else {
-			packID, err = h.ensureDefaultStickerPack("room", "", roomID, "Room Saved Stickers")
+			packID, err = h.ensureDefaultStickerPack("room", "", roomID, defaultRoomStickerPackName)
 		}
 	default:
 		h.jsonError(c, http.StatusBadRequest, "validation_failed", "invalid sticker target_scope")
