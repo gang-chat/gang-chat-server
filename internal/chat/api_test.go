@@ -328,6 +328,28 @@ func parseNumericID(t *testing.T, value any) int64 {
 	return n
 }
 
+func assertRoomInvitesKeepDeletedRooms(t *testing.T, pool *sql.DB) {
+	t.Helper()
+	rows, err := pool.Query(`PRAGMA foreign_key_list(room_invites)`)
+	if err != nil {
+		t.Fatalf("read room_invites foreign keys: %v", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id, seq int
+		var tableName, from, to, onUpdate, onDelete, match string
+		if err := rows.Scan(&id, &seq, &tableName, &from, &to, &onUpdate, &onDelete, &match); err != nil {
+			t.Fatalf("scan room_invites foreign key: %v", err)
+		}
+		if tableName == "rooms" && from == "room_id" {
+			t.Fatalf("room_invites.room_id must not cascade with rooms, on_delete=%s", onDelete)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("iterate room_invites foreign keys: %v", err)
+	}
+}
+
 func findMessage(t *testing.T, response map[string]any, messageID string) map[string]any {
 	t.Helper()
 	items, ok := response["messages"].([]any)
@@ -841,7 +863,7 @@ func TestSuperuserCreatedRoomFirstJoinerBecomesOwner(t *testing.T) {
 		t.Fatalf("approved first normal joiner should become owner: %v", reviewedRoom)
 	}
 
-	inviteRoom := api.createRoom(super.Token, map[string]any{"name": "Invite Seed", "join_policy": "closed"})
+	inviteRoom := api.createRoom(super.Token, map[string]any{"name": "Invite Seed", "join_policy": "approval_required"})
 	inviteRoomID := inviteRoom["id"].(string)
 	status, response = api.request(http.MethodPost, "/rooms/"+inviteRoomID+"/invites", super.Token, map[string]any{
 		"user_id": invited.User["id"].(string),
@@ -1706,14 +1728,28 @@ func TestRoomApplicationNotifications(t *testing.T) {
 
 func TestRoomInviteFlow(t *testing.T) {
 	api := newAPIHarness(t)
+	assertRoomInvitesKeepDeletedRooms(t, api.db)
+	super := api.login("GANG", "64n9-Ch47")
 	owner := api.register("invite_owner")
 	joiner := api.register("invite_joiner")
 	pendingUser := api.register("invite_pending")
 	rejecter := api.register("invite_rejecter")
-	room := api.createRoom(owner.Token, map[string]any{"name": "Invite Room", "join_policy": "closed"})
+	openInviter := api.register("invite_open_inviter")
+	openTarget := api.register("invite_open_target")
+	leftInviter := api.register("invite_left_inviter")
+	leftTarget := api.register("invite_left_target")
+	deletedRoomTarget := api.register("invite_deleted_room_target")
+	superTarget := api.register("invite_super_target")
+	closedRoom := api.createRoom(owner.Token, map[string]any{"name": "Closed Invite Room", "join_policy": "closed"})
+	status, response := api.request(http.MethodPost, "/rooms/"+closedRoom["id"].(string)+"/invites", owner.Token, map[string]any{
+		"user_id": joiner.User["id"].(string),
+	})
+	api.requireStatus(status, http.StatusForbidden, response)
+
+	room := api.createRoom(owner.Token, map[string]any{"name": "Invite Room", "join_policy": "approval_required"})
 	roomID := room["id"].(string)
 
-	status, response := api.request(http.MethodPost, "/rooms/"+roomID+"/invites", owner.Token, map[string]any{
+	status, response = api.request(http.MethodPost, "/rooms/"+roomID+"/invites", owner.Token, map[string]any{
 		"user_id": joiner.User["id"].(string),
 	})
 	api.requireStatus(status, http.StatusCreated, response)
@@ -1754,7 +1790,7 @@ func TestRoomInviteFlow(t *testing.T) {
 		t.Fatalf("accepted invite should add member role: %v", response)
 	}
 
-	secondRoom := api.createRoom(owner.Token, map[string]any{"name": "Invite Room 2", "join_policy": "closed"})
+	secondRoom := api.createRoom(owner.Token, map[string]any{"name": "Invite Room 2", "join_policy": "approval_required"})
 	secondRoomID := secondRoom["id"].(string)
 	status, response = api.request(http.MethodPost, "/rooms/"+secondRoomID+"/invites", owner.Token, map[string]any{
 		"user_id": joiner.User["id"].(string),
@@ -1806,6 +1842,36 @@ func TestRoomInviteFlow(t *testing.T) {
 		t.Fatalf("pending invite acceptance should be visible to admins: %v", response)
 	}
 
+	openRoom := api.createRoom(owner.Token, map[string]any{"name": "Open Invite Room", "join_policy": "open"})
+	openRoomID := openRoom["id"].(string)
+	status, response = api.request(http.MethodPost, "/rooms/"+openRoomID+"/invites", owner.Token, map[string]any{
+		"user_id": openInviter.User["id"].(string),
+	})
+	api.requireStatus(status, http.StatusCreated, response)
+	status, response = api.request(http.MethodPatch, "/room-invites/"+response["invite"].(map[string]any)["id"].(string), openInviter.Token, map[string]any{
+		"decision": "accept",
+	})
+	api.requireStatus(status, http.StatusOK, response)
+
+	status, response = api.request(http.MethodPost, "/rooms/"+openRoomID+"/invites", openInviter.Token, map[string]any{
+		"user_id": openTarget.User["id"].(string),
+	})
+	api.requireStatus(status, http.StatusCreated, response)
+	openInviteID := response["invite"].(map[string]any)["id"].(string)
+	status, response = api.request(http.MethodPatch, "/room-invites/"+openInviteID, openTarget.Token, map[string]any{
+		"decision": "accept",
+	})
+	api.requireStatus(status, http.StatusOK, response)
+	openAcceptedRoom := response["room"].(map[string]any)
+	if openAcceptedRoom["my_membership"].(map[string]any)["role"] != "member" {
+		t.Fatalf("open room invite should directly add the target as member: %v", response)
+	}
+	status, response = api.request(http.MethodGet, "/rooms/"+openRoomID+"/join-requests?status=pending", owner.Token, nil)
+	api.requireStatus(status, http.StatusOK, response)
+	if got := len(response["requests"].([]any)); got != 0 {
+		t.Fatalf("open room invite acceptance should not require approval, got %d requests: %v", got, response)
+	}
+
 	status, response = api.request(http.MethodPost, "/rooms/"+roomID+"/invites", joiner.Token, map[string]any{
 		"user_id": rejecter.User["id"].(string),
 	})
@@ -1826,6 +1892,74 @@ func TestRoomInviteFlow(t *testing.T) {
 	api.requireStatus(status, http.StatusOK, response)
 	if got := len(response["members"].([]any)); got != 2 {
 		t.Fatalf("rejected invite should not add a membership, got %d: %v", got, response)
+	}
+
+	status, response = api.request(http.MethodPost, "/rooms/"+roomID+"/invites", owner.Token, map[string]any{
+		"user_id": leftInviter.User["id"].(string),
+	})
+	api.requireStatus(status, http.StatusCreated, response)
+	leftInviterInviteID := response["invite"].(map[string]any)["id"].(string)
+	status, response = api.request(http.MethodPatch, "/room-invites/"+leftInviterInviteID, leftInviter.Token, map[string]any{
+		"decision": "accept",
+	})
+	api.requireStatus(status, http.StatusOK, response)
+
+	status, response = api.request(http.MethodPost, "/rooms/"+roomID+"/invites", leftInviter.Token, map[string]any{
+		"user_id": leftTarget.User["id"].(string),
+	})
+	api.requireStatus(status, http.StatusCreated, response)
+	leftInviteID := response["invite"].(map[string]any)["id"].(string)
+	status, response = api.request(http.MethodPost, "/rooms/"+roomID+"/leave", leftInviter.Token, nil)
+	api.requireStatus(status, http.StatusOK, response)
+
+	status, response = api.request(http.MethodGet, "/room-invites?status=pending", leftTarget.Token, nil)
+	api.requireStatus(status, http.StatusOK, response)
+	invites = response["invites"].([]any)
+	if len(invites) != 1 || invites[0].(map[string]any)["id"] != leftInviteID {
+		t.Fatalf("pending invite from left inviter should remain listed: %v", response)
+	}
+	leftInvite := invites[0].(map[string]any)
+	if leftInvite["invalid_reason"] != "inviter_left" || leftInvite["inviter"].(map[string]any)["room_role"] != "left" {
+		t.Fatalf("left inviter invite should be invalid and show left role: %v", leftInvite)
+	}
+	status, response = api.request(http.MethodPatch, "/room-invites/"+leftInviteID, leftTarget.Token, map[string]any{
+		"decision": "accept",
+	})
+	api.requireStatus(status, http.StatusConflict, response)
+
+	deletedRoom := api.createRoom(owner.Token, map[string]any{"name": "Deleted Invite Room", "join_policy": "approval_required"})
+	deletedRoomID := deletedRoom["id"].(string)
+	status, response = api.request(http.MethodPost, "/rooms/"+deletedRoomID+"/invites", owner.Token, map[string]any{
+		"user_id": deletedRoomTarget.User["id"].(string),
+	})
+	api.requireStatus(status, http.StatusCreated, response)
+	deletedInviteID := response["invite"].(map[string]any)["id"].(string)
+	status, response = api.request(http.MethodDelete, "/rooms/"+deletedRoomID, owner.Token, map[string]any{
+		"confirm_name": "Deleted Invite Room",
+	})
+	api.requireStatus(status, http.StatusOK, response)
+
+	status, response = api.request(http.MethodGet, "/room-invites?status=pending", deletedRoomTarget.Token, nil)
+	api.requireStatus(status, http.StatusOK, response)
+	invites = response["invites"].([]any)
+	if len(invites) != 1 || invites[0].(map[string]any)["id"] != deletedInviteID {
+		t.Fatalf("pending invite for deleted room should remain listed: %v", response)
+	}
+	deletedInvite := invites[0].(map[string]any)
+	if deletedInvite["room_exists"] != false || deletedInvite["invalid_reason"] != "room_missing" {
+		t.Fatalf("deleted room invite should be invalid with room snapshot: %v", deletedInvite)
+	}
+	if deletedInvite["room"].(map[string]any)["name"] != "Deleted Invite Room" {
+		t.Fatalf("deleted room invite should keep room snapshot: %v", deletedInvite)
+	}
+
+	status, response = api.request(http.MethodPost, "/rooms/"+roomID+"/invites", super.Token, map[string]any{
+		"user_id": superTarget.User["id"].(string),
+	})
+	api.requireStatus(status, http.StatusCreated, response)
+	superInvite := response["invite"].(map[string]any)
+	if superInvite["invalid_reason"] != nil || superInvite["inviter"].(map[string]any)["room_role"] != "superuser" {
+		t.Fatalf("superuser invite should stay valid without room membership: %v", superInvite)
 	}
 }
 
