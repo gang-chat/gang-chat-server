@@ -1223,6 +1223,9 @@ func TestSaveStickerToPersonalAndRoomPacks(t *testing.T) {
 	if personalPack["scope"] != "personal" {
 		t.Fatalf("member should save to a personal pack: %v", response)
 	}
+	if personalPack["name"] != defaultPersonalStickerPackName {
+		t.Fatalf("member should save to the default personal pack: %v", response)
+	}
 	status, response = api.request(http.MethodPost, "/rooms/"+roomID+"/stickers/save", member.Token, map[string]any{
 		"sticker_id":   sourceSticker["id"].(string),
 		"target_scope": "personal",
@@ -1246,6 +1249,9 @@ func TestSaveStickerToPersonalAndRoomPacks(t *testing.T) {
 	roomPack := response["pack"].(map[string]any)
 	if roomPack["scope"] != "room" || roomPack["room_id"] != roomID {
 		t.Fatalf("admin should save to room pack: %v", response)
+	}
+	if roomPack["name"] != defaultRoomStickerPackName {
+		t.Fatalf("admin should save to the default room pack: %v", response)
 	}
 	status, response = api.request(http.MethodPost, "/rooms/"+roomID+"/stickers/save", owner.Token, map[string]any{
 		"sticker_id":   sourceSticker["id"].(string),
