@@ -116,7 +116,7 @@ func TestStreamApprovalAddsRoomForApplicant(t *testing.T) {
 	}
 }
 
-func TestStreamRejectionIsSilent(t *testing.T) {
+func TestStreamRejectionNotifiesApplicantApplications(t *testing.T) {
 	api := newAPIHarness(t)
 	owner := api.register("owner_reject")
 	applicant := api.register("applicant_reject")
@@ -129,11 +129,14 @@ func TestStreamRejectionIsSilent(t *testing.T) {
 	status, resp := api.request(http.MethodPost, "/rooms/"+roomID+"/join", applicant.Token, nil)
 	api.requireStatus(status, http.StatusAccepted, resp)
 	requestID := resp["join_request"].(map[string]any)["id"].(string)
+	applicantStream.await("room_applications_updated")
 
 	status, resp = api.request(http.MethodPatch, "/rooms/"+roomID+"/join-requests/"+requestID, owner.Token, map[string]any{"decision": "reject"})
 	api.requireStatus(status, http.StatusOK, resp)
 
-	// A rejected applicant gains no membership, so nothing should reach them.
+	// A rejected applicant gains no membership, but their notification panel
+	// should refresh so it can show the rejected application.
+	applicantStream.await("room_applications_updated")
 	applicantStream.expectSilent()
 }
 

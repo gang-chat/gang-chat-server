@@ -369,6 +369,80 @@ func (h *Handler) listRoomInvites(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"invites": invites, "next_cursor": nil})
 }
 
+func (h *Handler) listRoomApplications(c *gin.Context) {
+	userID := currentUserID(c)
+	status := c.Query("status")
+	if status == "" {
+		status = "pending"
+	}
+	if status != "all" && !allowed(status, "pending", "approved", "rejected", "withdrawn") {
+		h.jsonError(c, http.StatusBadRequest, "validation_failed", "status must be pending, approved, rejected, withdrawn, or all")
+		return
+	}
+	query := `SELECT id
+		 FROM join_requests
+		 WHERE user_id = ?`
+	args := []any{userID}
+	if status != "all" {
+		query += ` AND status = ?`
+		args = append(args, status)
+	}
+	query += ` ORDER BY CASE WHEN status = 'pending' THEN 0 ELSE 1 END, created_at DESC`
+	rows, err := h.DB.Query(query, args...)
+	if err != nil {
+		h.jsonError(c, http.StatusInternalServerError, "internal_error", "list room applications failed")
+		return
+	}
+	defer rows.Close()
+
+	applications := make([]gin.H, 0)
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			h.jsonError(c, http.StatusInternalServerError, "internal_error", "read room application failed")
+			return
+		}
+		applications = append(applications, h.roomApplicationPayload(id, userID))
+	}
+	c.JSON(http.StatusOK, gin.H{"applications": applications, "next_cursor": nil})
+}
+
+func (h *Handler) withdrawRoomApplication(c *gin.Context) {
+	var req decisionRequest
+	if !h.bindOptionalJSON(c, &req) {
+		return
+	}
+	if req.Decision != "" && req.Decision != "withdraw" {
+		h.jsonError(c, http.StatusBadRequest, "validation_failed", "decision must be withdraw")
+		return
+	}
+	userID := currentUserID(c)
+	requestID := c.Param("request_id")
+	var roomID, status string
+	err := h.DB.QueryRow(`SELECT room_id, status FROM join_requests WHERE id = ? AND user_id = ?`, requestID, userID).Scan(&roomID, &status)
+	if err != nil {
+		h.jsonError(c, http.StatusNotFound, "not_found", "room application not found")
+		return
+	}
+	if status != "pending" {
+		h.jsonError(c, http.StatusConflict, "not_pending", "room application is not pending")
+		return
+	}
+	_, err = h.DB.Exec(
+		`UPDATE join_requests
+		 SET status = 'withdrawn', updated_at = ?, reviewer_user_id = NULL, reviewed_at = NULL
+		 WHERE id = ?`,
+		nowMillis(), requestID,
+	)
+	if err != nil {
+		h.jsonError(c, http.StatusInternalServerError, "internal_error", "withdraw room application failed")
+		return
+	}
+	h.publishRoomApplicationsUpdated(userID)
+	h.publishRoomJoinRequestsUpdated(roomID)
+	c.JSON(http.StatusOK, gin.H{"ok": true, "application": h.roomApplicationPayload(requestID, userID)})
+}
+
 func (h *Handler) reviewRoomInvite(c *gin.Context) {
 	var req decisionRequest
 	if err := c.ShouldBindJSON(&req); err != nil || !allowed(req.Decision, "accept", "approve", "reject", "decline") {
@@ -436,7 +510,9 @@ func (h *Handler) reviewRoomInvite(c *gin.Context) {
 			 ON CONFLICT(room_id, user_id) DO UPDATE SET
 			   status = 'pending',
 			   created_at = excluded.created_at,
-			   updated_at = excluded.updated_at`,
+			   updated_at = excluded.updated_at,
+			   reviewer_user_id = NULL,
+			   reviewed_at = NULL`,
 			requestID, roomID, userID, now, now,
 		); err != nil {
 			h.jsonError(c, http.StatusInternalServerError, "internal_error", "failed to create join request")
@@ -451,6 +527,7 @@ func (h *Handler) reviewRoomInvite(c *gin.Context) {
 			return
 		}
 		h.publishRoomInvitesUpdated(userID)
+		h.publishRoomApplicationsUpdated(userID)
 		h.publishRoomJoinRequestsUpdated(roomID)
 		c.JSON(http.StatusAccepted, gin.H{
 			"ok": true,
@@ -474,7 +551,12 @@ func (h *Handler) reviewRoomInvite(c *gin.Context) {
 		return
 	}
 	_, _ = tx.Exec(`UPDATE room_invites SET status = 'accepted', updated_at = ? WHERE id = ?`, now, inviteID)
-	_, _ = tx.Exec(`UPDATE join_requests SET status = 'approved', updated_at = ? WHERE room_id = ? AND user_id = ? AND status = 'pending'`, now, roomID, userID)
+	_, _ = tx.Exec(
+		`UPDATE join_requests
+		 SET status = 'approved', updated_at = ?, reviewer_user_id = ?, reviewed_at = ?
+		 WHERE room_id = ? AND user_id = ? AND status = 'pending'`,
+		now, inviterID, now, roomID, userID,
+	)
 	if err := tx.Commit(); err != nil {
 		h.jsonError(c, http.StatusInternalServerError, "internal_error", "save room invite decision failed")
 		return
@@ -488,6 +570,7 @@ func (h *Handler) reviewRoomInvite(c *gin.Context) {
 	h.publishRoomToUser(userID, roomID, "room_added")
 	h.publishRoomUpdated(roomID, userID)
 	h.publishRoomInvitesUpdated(userID)
+	h.publishRoomApplicationsUpdated(userID)
 	c.JSON(http.StatusOK, gin.H{"ok": true, "room": detail, "invite": h.roomInvitePayload(inviteID, userID)})
 }
 
@@ -776,7 +859,8 @@ func (h *Handler) listJoinRequests(c *gin.Context) {
 
 func (h *Handler) reviewJoinRequest(c *gin.Context) {
 	roomID := c.Param("room_id")
-	if !h.isAdmin(roomID, currentUserID(c)) {
+	reviewerID := currentUserID(c)
+	if !h.isAdmin(roomID, reviewerID) {
 		h.jsonError(c, http.StatusForbidden, "forbidden", "admin required")
 		return
 	}
@@ -807,7 +891,12 @@ func (h *Handler) reviewJoinRequest(c *gin.Context) {
 				h.jsonError(c, http.StatusInternalServerError, "internal_error", "approve join request failed")
 				return
 			}
-			if _, err := tx.Exec(`UPDATE join_requests SET status = ?, updated_at = ? WHERE id = ?`, newStatus, now, c.Param("request_id")); err != nil {
+			if _, err := tx.Exec(
+				`UPDATE join_requests
+				 SET status = ?, updated_at = ?, reviewer_user_id = ?, reviewed_at = ?
+				 WHERE id = ?`,
+				newStatus, now, reviewerID, now, c.Param("request_id"),
+			); err != nil {
 				h.jsonError(c, http.StatusInternalServerError, "internal_error", "approve join request failed")
 				return
 			}
@@ -816,10 +905,22 @@ func (h *Handler) reviewJoinRequest(c *gin.Context) {
 				return
 			}
 		} else {
-			_, _ = h.DB.Exec(`UPDATE join_requests SET status = ?, updated_at = ? WHERE id = ?`, newStatus, nowMillis(), c.Param("request_id"))
+			now := nowMillis()
+			_, _ = h.DB.Exec(
+				`UPDATE join_requests
+				 SET status = ?, updated_at = ?, reviewer_user_id = ?, reviewed_at = ?
+				 WHERE id = ?`,
+				newStatus, now, reviewerID, now, c.Param("request_id"),
+			)
 		}
 	} else {
-		_, _ = h.DB.Exec(`UPDATE join_requests SET status = ?, updated_at = ? WHERE id = ?`, newStatus, nowMillis(), c.Param("request_id"))
+		now := nowMillis()
+		_, _ = h.DB.Exec(
+			`UPDATE join_requests
+			 SET status = ?, updated_at = ?, reviewer_user_id = ?, reviewed_at = ?
+			 WHERE id = ?`,
+			newStatus, now, reviewerID, now, c.Param("request_id"),
+		)
 	}
 	if newStatus == "approved" {
 		// The applicant's existing SSE connection isn't subscribed to this room
@@ -830,6 +931,7 @@ func (h *Handler) reviewJoinRequest(c *gin.Context) {
 		}
 		h.publishRoomUpdated(roomID, userID)
 	}
+	h.publishRoomApplicationsUpdated(userID)
 	c.JSON(http.StatusOK, gin.H{"ok": true})
 }
 
@@ -993,6 +1095,77 @@ func (h *Handler) roomInvitePayload(inviteID, viewerID string) gin.H {
 			"joined": joined, "join_state": h.joinState(roomID, viewerID, joined),
 		},
 		"inviter": inviter,
+	}
+}
+
+func (h *Handler) roomApplicationPayload(requestID, viewerID string) gin.H {
+	var id, roomID, status string
+	var createdAt, updatedAt int64
+	var reviewerID, reviewerUID, reviewerUsername sql.NullString
+	var reviewerDisplayName, reviewerAvatarURL, reviewerDefaultAvatar, reviewerRoomDisplayName, reviewerRoomRole sql.NullString
+	var reviewedAt sql.NullInt64
+	var rid, name, defaultAvatar, visibility, joinPolicy string
+	var avatarURL sql.NullString
+	err := h.DB.QueryRow(
+		`SELECT jr.id, jr.room_id, jr.status, jr.created_at, jr.updated_at,
+		        jr.reviewer_user_id, jr.reviewed_at,
+		        u.id, u.uid, u.username, u.display_name, u.avatar_url, u.default_avatar_key,
+		        rrm.room_display_name, rrm.role,
+		        r.rid, r.name, r.avatar_url, r.default_avatar_key, r.visibility, r.join_policy
+		 FROM join_requests jr
+		 JOIN rooms r ON r.id = jr.room_id
+		 LEFT JOIN users u ON u.id = jr.reviewer_user_id
+		 LEFT JOIN room_memberships rrm ON rrm.room_id = jr.room_id AND rrm.user_id = jr.reviewer_user_id
+		 WHERE jr.id = ? AND jr.user_id = ?`,
+		requestID, viewerID,
+	).Scan(
+		&id, &roomID, &status, &createdAt, &updatedAt,
+		&reviewerID, &reviewedAt,
+		&reviewerID, &reviewerUID, &reviewerUsername, &reviewerDisplayName, &reviewerAvatarURL, &reviewerDefaultAvatar,
+		&reviewerRoomDisplayName, &reviewerRoomRole,
+		&rid, &name, &avatarURL, &defaultAvatar, &visibility, &joinPolicy,
+	)
+	if err != nil {
+		return gin.H{"id": requestID}
+	}
+
+	memberCount, _ := h.memberCount(roomID)
+	onlineCount, _ := h.onlineMemberCount(roomID)
+	_, liveCount, _ := h.livePreview(roomID)
+	var joinedCount int
+	_ = h.DB.QueryRow(`SELECT COUNT(*) FROM room_memberships WHERE room_id = ? AND user_id = ?`, roomID, viewerID).Scan(&joinedCount)
+	joined := joinedCount > 0
+
+	var reviewer any
+	if reviewerID.Valid && reviewerID.String != "" && reviewerUsername.Valid {
+		summary := summaryFromUserFields(
+			reviewerID.String,
+			reviewerUID.String,
+			reviewerUsername.String,
+			reviewerDisplayName,
+			reviewerAvatarURL,
+			reviewerDefaultAvatar,
+		)
+		summary.RoomDisplayName = nullableString(reviewerRoomDisplayName)
+		if reviewerRoomRole.Valid && reviewerRoomRole.String != "" {
+			summary.RoomRole = reviewerRoomRole.String
+		} else if h.isSuperuser(reviewerID.String) {
+			summary.RoomRole = "superuser"
+		}
+		reviewer = summary
+	}
+
+	return gin.H{
+		"id": id, "status": status, "created_at": formatMillis(createdAt), "updated_at": formatMillis(updatedAt),
+		"reviewed_at": nullableMillis(reviewedAt),
+		"room": gin.H{
+			"id": roomID, "rid": rid, "name": name,
+			"avatar_url": nullableString(avatarURL), "default_avatar_key": defaultAvatar,
+			"visibility": visibility, "join_policy": joinPolicy,
+			"member_count": memberCount, "online_member_count": onlineCount, "live_participant_count": liveCount,
+			"joined": joined, "join_state": h.joinState(roomID, viewerID, joined),
+		},
+		"reviewer": reviewer,
 	}
 }
 

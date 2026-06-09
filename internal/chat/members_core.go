@@ -79,7 +79,12 @@ func (h *Handler) joinRoom(c *gin.Context) {
 		_, err := h.DB.Exec(
 			`INSERT INTO join_requests (id, room_id, user_id, status, created_at, updated_at)
 			 VALUES (?, ?, ?, 'pending', ?, ?)
-			 ON CONFLICT(room_id, user_id) DO UPDATE SET updated_at = excluded.updated_at`,
+			 ON CONFLICT(room_id, user_id) DO UPDATE SET
+			   status = 'pending',
+			   created_at = excluded.created_at,
+			   updated_at = excluded.updated_at,
+			   reviewer_user_id = NULL,
+			   reviewed_at = NULL`,
 			id, roomID, userID, now, now,
 		)
 		if err != nil {
@@ -89,6 +94,7 @@ func (h *Handler) joinRoom(c *gin.Context) {
 		var requestID, status string
 		var createdAt int64
 		_ = h.DB.QueryRow(`SELECT id, status, created_at FROM join_requests WHERE room_id = ? AND user_id = ?`, roomID, userID).Scan(&requestID, &status, &createdAt)
+		h.publishRoomApplicationsUpdated(userID)
 		c.JSON(http.StatusAccepted, gin.H{"join_request": gin.H{"id": requestID, "room_id": roomID, "status": status, "created_at": formatMillis(createdAt)}})
 		return
 	}

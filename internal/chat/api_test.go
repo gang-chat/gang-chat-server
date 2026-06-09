@@ -1641,6 +1641,69 @@ func TestApprovalRequiredJoinFlow(t *testing.T) {
 	}
 }
 
+func TestRoomApplicationNotifications(t *testing.T) {
+	api := newAPIHarness(t)
+	owner := api.register("application_owner")
+	joiner := api.register("application_joiner")
+	room := api.createRoom(owner.Token, map[string]any{"name": "Application Room"})
+	roomID := room["id"].(string)
+
+	status, response := api.request(http.MethodPost, "/rooms/"+roomID+"/join", joiner.Token, nil)
+	api.requireStatus(status, http.StatusAccepted, response)
+	requestID := response["join_request"].(map[string]any)["id"].(string)
+
+	status, response = api.request(http.MethodGet, "/room-applications?status=all", joiner.Token, nil)
+	api.requireStatus(status, http.StatusOK, response)
+	applications := response["applications"].([]any)
+	if len(applications) != 1 {
+		t.Fatalf("pending application should be listed: %v", response)
+	}
+	application := applications[0].(map[string]any)
+	if application["status"] != "pending" || application["reviewer"] != nil {
+		t.Fatalf("pending application payload mismatch: %v", application)
+	}
+	if application["room"].(map[string]any)["name"] != "Application Room" {
+		t.Fatalf("application should include room payload: %v", application)
+	}
+
+	status, response = api.request(http.MethodPatch, "/room-applications/"+requestID, joiner.Token, map[string]any{"decision": "withdraw"})
+	api.requireStatus(status, http.StatusOK, response)
+	if response["application"].(map[string]any)["status"] != "withdrawn" {
+		t.Fatalf("withdraw should mark application withdrawn: %v", response)
+	}
+
+	status, response = api.request(http.MethodGet, "/rooms/"+roomID+"/join-requests?status=pending", owner.Token, nil)
+	api.requireStatus(status, http.StatusOK, response)
+	if got := len(response["requests"].([]any)); got != 0 {
+		t.Fatalf("withdrawn application should leave admin queue, got %d: %v", got, response)
+	}
+
+	status, response = api.request(http.MethodPatch, "/room-applications/"+requestID, joiner.Token, map[string]any{"decision": "withdraw"})
+	api.requireStatus(status, http.StatusConflict, response)
+
+	status, response = api.request(http.MethodPost, "/rooms/"+roomID+"/join", joiner.Token, nil)
+	api.requireStatus(status, http.StatusAccepted, response)
+	requestID = response["join_request"].(map[string]any)["id"].(string)
+
+	status, response = api.request(http.MethodPatch, "/rooms/"+roomID+"/join-requests/"+requestID, owner.Token, map[string]any{"decision": "approve"})
+	api.requireStatus(status, http.StatusOK, response)
+
+	status, response = api.request(http.MethodGet, "/room-applications?status=all", joiner.Token, nil)
+	api.requireStatus(status, http.StatusOK, response)
+	applications = response["applications"].([]any)
+	if len(applications) != 1 {
+		t.Fatalf("approved application should remain listed: %v", response)
+	}
+	application = applications[0].(map[string]any)
+	reviewer := application["reviewer"].(map[string]any)
+	if application["status"] != "approved" || application["reviewed_at"] == nil || reviewer["id"] != owner.User["id"] {
+		t.Fatalf("approved application should include reviewer and reviewed_at: %v", application)
+	}
+	if reviewer["room_role"] != "owner" {
+		t.Fatalf("reviewer should include room role: %v", reviewer)
+	}
+}
+
 func TestRoomInviteFlow(t *testing.T) {
 	api := newAPIHarness(t)
 	owner := api.register("invite_owner")
