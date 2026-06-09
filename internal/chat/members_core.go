@@ -189,11 +189,14 @@ func (h *Handler) leaveRoom(c *gin.Context) {
 	// possibly a repaired admin). If it was pruned to empty there's no one left
 	// to notify.
 	h.publishRoomDeleted(roomID, userID)
+	h.publishPendingRoomInvitesUpdatedForInviter(roomID, userID)
 	if !pruned {
 		h.publishRoomUpdated(roomID)
 		if n, _ := liveRes.RowsAffected(); n > 0 {
 			h.PublishLiveSnapshot(roomID, "live_participant_left", map[string]any{"user_id": userID})
 		}
+	} else {
+		h.publishPendingRoomInvitesUpdatedForRoom(roomID)
 	}
 	c.JSON(http.StatusOK, gin.H{"ok": true})
 }

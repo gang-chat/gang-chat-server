@@ -215,6 +215,67 @@ func (h *Handler) publishRoomInvitesUpdated(userID string) {
 	})
 }
 
+func (h *Handler) publishRoomInvitesUpdatedForUsers(userIDs ...string) {
+	seen := map[string]bool{}
+	for _, userID := range userIDs {
+		if userID == "" || seen[userID] {
+			continue
+		}
+		seen[userID] = true
+		h.publishRoomInvitesUpdated(userID)
+	}
+}
+
+func (h *Handler) pendingRoomInviteTargetIDs(roomID string) []string {
+	if h == nil || h.DB == nil || roomID == "" {
+		return nil
+	}
+	rows, err := h.DB.Query(
+		`SELECT DISTINCT target_user_id
+		 FROM room_invites
+		 WHERE room_id = ? AND status = 'pending'`,
+		roomID,
+	)
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+	userIDs := make([]string, 0)
+	for rows.Next() {
+		var userID string
+		if err := rows.Scan(&userID); err == nil {
+			userIDs = append(userIDs, userID)
+		}
+	}
+	return userIDs
+}
+
+func (h *Handler) publishPendingRoomInvitesUpdatedForInviter(roomID, inviterID string) {
+	if h == nil || h.DB == nil || roomID == "" || inviterID == "" {
+		return
+	}
+	rows, err := h.DB.Query(
+		`SELECT target_user_id
+		 FROM room_invites
+		 WHERE room_id = ? AND inviter_user_id = ? AND status = 'pending'`,
+		roomID, inviterID,
+	)
+	if err != nil {
+		return
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var userID string
+		if err := rows.Scan(&userID); err == nil {
+			h.publishRoomInvitesUpdated(userID)
+		}
+	}
+}
+
+func (h *Handler) publishPendingRoomInvitesUpdatedForRoom(roomID string) {
+	h.publishRoomInvitesUpdatedForUsers(h.pendingRoomInviteTargetIDs(roomID)...)
+}
+
 func (h *Handler) publishRoomApplicationsUpdated(userID string) {
 	if h == nil || h.Bus == nil || userID == "" {
 		return

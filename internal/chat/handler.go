@@ -636,6 +636,13 @@ func nullableString(value sql.NullString) *string {
 	return &value.String
 }
 
+func nullableStringFromText(value string) *string {
+	if value == "" {
+		return nil
+	}
+	return &value
+}
+
 func nullableInt64(value sql.NullInt64) *int64 {
 	if !value.Valid {
 		return nil
