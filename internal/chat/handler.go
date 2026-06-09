@@ -34,6 +34,8 @@ type userSummary struct {
 	DisplayName      string           `json:"display_name"`
 	AvatarURL        *string          `json:"avatar_url"`
 	DefaultAvatarKey string           `json:"default_avatar_key"`
+	RoomDisplayName  *string          `json:"room_display_name,omitempty"`
+	RoomRole         string           `json:"room_role,omitempty"`
 	Bio              *string          `json:"bio,omitempty"`
 	IsSuperuser      bool             `json:"is_superuser,omitempty"`
 	IsOnline         *bool            `json:"is_online,omitempty"`

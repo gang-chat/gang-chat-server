@@ -1664,6 +1664,9 @@ func TestRoomInviteFlow(t *testing.T) {
 	if invite["inviter"].(map[string]any)["id"] != owner.User["id"] {
 		t.Fatalf("invite should include inviter summary: %v", invite)
 	}
+	if invite["inviter"].(map[string]any)["room_role"] != "owner" {
+		t.Fatalf("invite should include inviter room role: %v", invite)
+	}
 
 	status, response = api.request(http.MethodGet, "/rooms/"+roomID+"/members?limit=50", owner.Token, nil)
 	api.requireStatus(status, http.StatusOK, response)
@@ -1688,12 +1691,35 @@ func TestRoomInviteFlow(t *testing.T) {
 		t.Fatalf("accepted invite should add member role: %v", response)
 	}
 
+	secondRoom := api.createRoom(owner.Token, map[string]any{"name": "Invite Room 2", "join_policy": "closed"})
+	secondRoomID := secondRoom["id"].(string)
+	status, response = api.request(http.MethodPost, "/rooms/"+secondRoomID+"/invites", owner.Token, map[string]any{
+		"user_id": joiner.User["id"].(string),
+	})
+	api.requireStatus(status, http.StatusCreated, response)
+	secondInviteID := response["invite"].(map[string]any)["id"].(string)
+	status, response = api.request(http.MethodGet, "/room-invites?status=all", joiner.Token, nil)
+	api.requireStatus(status, http.StatusOK, response)
+	allInvites := response["invites"].([]any)
+	if len(allInvites) != 2 {
+		t.Fatalf("all invites should include pending and processed invites: %v", response)
+	}
+	if allInvites[0].(map[string]any)["id"] != secondInviteID || allInvites[0].(map[string]any)["status"] != "pending" {
+		t.Fatalf("pending invite should sort before processed invites: %v", response)
+	}
+	if allInvites[1].(map[string]any)["id"] != invite["id"] || allInvites[1].(map[string]any)["status"] != "accepted" {
+		t.Fatalf("processed invite should remain visible after pending invites: %v", response)
+	}
+
 	status, response = api.request(http.MethodPost, "/rooms/"+roomID+"/invites", joiner.Token, map[string]any{
 		"user_id": pendingUser.User["id"].(string),
 	})
 	api.requireStatus(status, http.StatusCreated, response)
 	if response["invite"].(map[string]any)["inviter"].(map[string]any)["id"] != joiner.User["id"] {
 		t.Fatalf("normal member should be able to invite users: %v", response)
+	}
+	if response["invite"].(map[string]any)["inviter"].(map[string]any)["room_role"] != "member" {
+		t.Fatalf("normal member invite should include inviter room role: %v", response)
 	}
 	pendingInviteID := response["invite"].(map[string]any)["id"].(string)
 	status, response = api.request(http.MethodPatch, "/room-invites/"+pendingInviteID, pendingUser.Token, map[string]any{
@@ -1726,6 +1752,12 @@ func TestRoomInviteFlow(t *testing.T) {
 		"decision": "reject",
 	})
 	api.requireStatus(status, http.StatusOK, response)
+	status, response = api.request(http.MethodGet, "/room-invites?status=all", rejecter.Token, nil)
+	api.requireStatus(status, http.StatusOK, response)
+	rejecterInvites := response["invites"].([]any)
+	if len(rejecterInvites) != 1 || rejecterInvites[0].(map[string]any)["status"] != "rejected" {
+		t.Fatalf("all invites should include rejected invite: %v", response)
+	}
 
 	status, response = api.request(http.MethodGet, "/rooms/"+roomID+"/members?limit=50", owner.Token, nil)
 	api.requireStatus(status, http.StatusOK, response)
