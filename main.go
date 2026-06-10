@@ -13,6 +13,7 @@ import (
 	livekithandler "github.com/zhuangkaiyi/gang-chat/server/internal/livekit"
 	"github.com/zhuangkaiyi/gang-chat/server/internal/livekitwebhook"
 	"github.com/zhuangkaiyi/gang-chat/server/internal/middleware"
+	"github.com/zhuangkaiyi/gang-chat/server/internal/musicbox"
 	"github.com/zhuangkaiyi/gang-chat/server/internal/storage"
 
 	lksdk "github.com/livekit/server-sdk-go/v2"
@@ -43,6 +44,31 @@ func main() {
 
 	bus := eventbus.New()
 
+	// Music box: server-side download/transcode/broadcast of room music. It
+	// needs LiveKit to publish a bot track, so it's only enabled when LiveKit
+	// is configured. The token func issues a publish-only token for the bot.
+	musicBox := musicbox.NewManager(pool, musicbox.Config{
+		Dir:              cfg.MusicBoxDir,
+		MaxBytesPerRoom:  cfg.MusicBoxMaxBytesPerRoom,
+		FFmpegPath:       cfg.FFmpegPath,
+		OpusBitrate:      cfg.MusicBoxOpusBitrate,
+		TranscodeWorkers: cfg.MusicBoxTranscodeWorkers,
+		Source:           cfg.MusicBoxSource,
+		SourceBitrate:    cfg.MusicBoxSourceBitrate,
+		LiveKitHost:      cfg.LiveKitHost,
+		Enabled:          cfg.LiveKitAPIKey != "" && cfg.LiveKitAPISecret != "",
+	}, func(roomID, identity string) (string, error) {
+		return livekithandler.GenerateJoinToken(livekithandler.TokenParams{
+			APIKey:       cfg.LiveKitAPIKey,
+			APISecret:    cfg.LiveKitAPISecret,
+			Room:         roomID,
+			Identity:     identity,
+			Name:         "Music Box",
+			CanPublish:   true,
+			CanSubscribe: false,
+		})
+	}, nil)
+
 	r := gin.Default()
 	if err := r.SetTrustedProxies(cfg.TrustedProxies); err != nil {
 		log.Fatalf("configure trusted proxies: %v", err)
@@ -60,7 +86,7 @@ func main() {
 	authMW := &auth.AuthMiddleware{DB: pool, JWTSecret: cfg.JWTSecret}
 	chatGroup := api.Group("")
 	chatGroup.Use(authMW.Handle)
-	chatHandler := chat.RegisterRoutes(chatGroup, pool, cfg, bus, liveController, assetStore)
+	chatHandler := chat.RegisterRoutes(chatGroup, pool, cfg, bus, liveController, musicBox, assetStore)
 
 	lkGroup := r.Group("/livekit")
 	lkGroup.Use(authMW.Handle)

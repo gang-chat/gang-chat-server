@@ -10,6 +10,10 @@ import (
 const (
 	DefaultAssetUploadMaxBytes int64 = 50 * 1024 * 1024
 	DefaultImageUploadMaxBytes int64 = 10 * 1024 * 1024
+	// DefaultMusicBoxMaxBytesPerRoom caps the on-disk size of a single room's
+	// transcoded music queue. The queue is bounded by total bytes, not item
+	// count, so this is the real backpressure knob.
+	DefaultMusicBoxMaxBytesPerRoom int64 = 200 * 1024 * 1024
 )
 
 type Config struct {
@@ -39,6 +43,13 @@ type Config struct {
 	LiveKitHost            string
 	LiveKitAPIKey          string
 	LiveKitAPISecret       string
+	FFmpegPath               string
+	MusicBoxDir              string
+	MusicBoxMaxBytesPerRoom  int64
+	MusicBoxOpusBitrate      string
+	MusicBoxTranscodeWorkers int
+	MusicBoxSource           string
+	MusicBoxSourceBitrate    string
 }
 
 func envOr(key, fallback string) string {
@@ -104,6 +115,13 @@ func Load() *Config {
 		LiveKitHost:            envOr("LIVEKIT_HOST", "http://localhost:7880"),
 		LiveKitAPIKey:          envOr("LIVEKIT_API_KEY", ""),
 		LiveKitAPISecret:       envOr("LIVEKIT_API_SECRET", ""),
+		FFmpegPath:               envOr("GANG_FFMPEG_PATH", "ffmpeg"),
+		MusicBoxDir:              envOr("GANG_MUSIC_BOX_DIR", "music-box"),
+		MusicBoxMaxBytesPerRoom:  envIntOr("GANG_MUSIC_BOX_MAX_BYTES_PER_ROOM", DefaultMusicBoxMaxBytesPerRoom),
+		MusicBoxOpusBitrate:      envOr("GANG_MUSIC_BOX_OPUS_BITRATE", "128k"),
+		MusicBoxTranscodeWorkers: int(envIntOr("GANG_MUSIC_BOX_TRANSCODE_WORKERS", 3)),
+		MusicBoxSource:           envOr("GANG_MUSIC_BOX_SOURCE", "netease"),
+		MusicBoxSourceBitrate:    envOr("GANG_MUSIC_BOX_SOURCE_BITRATE", "192"),
 	}
 
 	trustedProxies := strings.Join(cfg.TrustedProxies, ",")
@@ -125,6 +143,13 @@ func Load() *Config {
 	flag.StringVar(&cfg.COSSessionToken, "cos-session-token", cfg.COSSessionToken, "Tencent COS session token for temporary credentials")
 	flag.StringVar(&cfg.COSObjectACL, "cos-object-acl", cfg.COSObjectACL, "COS object ACL for uploaded assets; empty keeps bucket default")
 	flag.StringVar(&cfg.GeoIPDatabasePath, "geoip-db", cfg.GeoIPDatabasePath, "MaxMind GeoIP database path")
+	flag.StringVar(&cfg.FFmpegPath, "ffmpeg-path", cfg.FFmpegPath, "path to the ffmpeg binary used for music transcoding")
+	flag.StringVar(&cfg.MusicBoxDir, "music-box-dir", cfg.MusicBoxDir, "directory for transcoded room music files")
+	flag.Int64Var(&cfg.MusicBoxMaxBytesPerRoom, "music-box-max-bytes-per-room", cfg.MusicBoxMaxBytesPerRoom, "max on-disk bytes of transcoded music per room")
+	flag.StringVar(&cfg.MusicBoxOpusBitrate, "music-box-opus-bitrate", cfg.MusicBoxOpusBitrate, "Opus bitrate for broadcast transcode, e.g. 128k")
+	flag.IntVar(&cfg.MusicBoxTranscodeWorkers, "music-box-transcode-workers", cfg.MusicBoxTranscodeWorkers, "max concurrent transcode jobs")
+	flag.StringVar(&cfg.MusicBoxSource, "music-box-source", cfg.MusicBoxSource, "default GD music source")
+	flag.StringVar(&cfg.MusicBoxSourceBitrate, "music-box-source-bitrate", cfg.MusicBoxSourceBitrate, "GD source download quality (128/192/320/740/999)")
 	flag.StringVar(&trustedProxies, "trusted-proxies", trustedProxies, "comma-separated trusted proxy IPs/CIDRs")
 	flag.Parse()
 	cfg.TrustedProxies = parseList(trustedProxies)

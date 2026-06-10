@@ -6,6 +6,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/zhuangkaiyi/gang-chat/server/internal/config"
 	"github.com/zhuangkaiyi/gang-chat/server/internal/eventbus"
+	"github.com/zhuangkaiyi/gang-chat/server/internal/musicbox"
 	"github.com/zhuangkaiyi/gang-chat/server/internal/storage"
 )
 
@@ -29,11 +30,12 @@ func (noopLiveController) SetCanPublish(string, string, bool) error  { return ni
 func (noopLiveController) MuteMicrophone(string, string, bool) error { return nil }
 
 type Handler struct {
-	DB     *sql.DB
-	Cfg    *config.Config
-	Bus    *eventbus.Bus
-	Live   liveMediaController
-	Assets *storage.AssetStorage
+	DB       *sql.DB
+	Cfg      *config.Config
+	Bus      *eventbus.Bus
+	Live     liveMediaController
+	Assets   *storage.AssetStorage
+	MusicBox *musicbox.Manager
 }
 
 // RegisterRoutes wires the chat API onto g and returns the handler so the
@@ -41,7 +43,7 @@ type Handler struct {
 // publish live snapshots through the same bus. bus may be nil (tests); all
 // publish paths tolerate a nil bus. live may be nil; moderation then degrades
 // to DB-only bookkeeping without driving the LiveKit media session.
-func RegisterRoutes(g *gin.RouterGroup, db *sql.DB, cfg *config.Config, bus *eventbus.Bus, live liveMediaController, assetStores ...*storage.AssetStorage) *Handler {
+func RegisterRoutes(g *gin.RouterGroup, db *sql.DB, cfg *config.Config, bus *eventbus.Bus, live liveMediaController, mb *musicbox.Manager, assetStores ...*storage.AssetStorage) *Handler {
 	if live == nil {
 		live = noopLiveController{}
 	}
@@ -53,7 +55,15 @@ func RegisterRoutes(g *gin.RouterGroup, db *sql.DB, cfg *config.Config, bus *eve
 			panic(err)
 		}
 	}
-	h := &Handler{DB: db, Cfg: cfg, Bus: bus, Live: live, Assets: assetStore}
+	h := &Handler{DB: db, Cfg: cfg, Bus: bus, Live: live, Assets: assetStore, MusicBox: mb}
+
+	// The music box fans out a fresh snapshot whenever a room's queue or
+	// playback changes; route it through the same SSE bus as everything else.
+	if mb != nil {
+		mb.SetOnRoomChanged(func(roomID string) {
+			h.publishMusicBoxSnapshot(roomID)
+		})
+	}
 
 	g.GET("/me/stream", h.liveStream)
 
@@ -119,6 +129,16 @@ func RegisterRoutes(g *gin.RouterGroup, db *sql.DB, cfg *config.Config, bus *eve
 	g.POST("/rooms/:room_id/music/session", h.controlMusicSession)
 	g.POST("/rooms/:room_id/music/invites", h.createMusicInvites)
 	g.POST("/rooms/:room_id/music/queue", h.addMusicQueue)
+
+	// Server-side music box: search/enqueue/control a broadcast track. Distinct
+	// from the /music/* client-coordinated feature above.
+	g.GET("/rooms/:room_id/music-box/search", h.searchMusicBox)
+	g.GET("/rooms/:room_id/music-box/state", h.getMusicBoxState)
+	g.POST("/rooms/:room_id/music-box/queue", h.enqueueMusicBox)
+	g.DELETE("/rooms/:room_id/music-box/queue/:item_id", h.removeMusicBoxItem)
+	g.POST("/rooms/:room_id/music-box/control", h.controlMusicBox)
+	g.GET("/rooms/:room_id/music-box/lyric", h.getMusicBoxLyric)
+
 	g.GET("/rooms/:room_id/playlists", h.listRoomPlaylists)
 	g.POST("/rooms/:room_id/playlists", h.createRoomPlaylist)
 	g.PATCH("/rooms/:room_id/playlists/:playlist_id", h.updateRoomPlaylist)
