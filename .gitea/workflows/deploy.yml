@@ -18,9 +18,9 @@ jobs:
       GOPROXY: https://goproxy.cn,direct
       GOTOOLCHAIN: auto
     steps:
-      # 从 gitea.com 的镜像拉 action，不走被墙的 github.com。
+      # 从 github.com 拉 action（gitea.com 镜像间歇性 504 超时）。
       - name: Checkout
-        uses: https://gitea.com/actions/checkout@v4
+        uses: https://github.com/actions/checkout@v4
 
       - name: Ensure build and deploy tools
         run: |
@@ -48,7 +48,7 @@ jobs:
 
       - name: Cache Go
         id: cache-go
-        uses: https://gitea.com/actions/cache@v4
+        uses: https://github.com/actions/cache@v4
         with:
           path: |
             .cache/go-build
