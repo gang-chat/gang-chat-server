@@ -97,7 +97,31 @@ status_service() {
 }
 
 # --- service definitions -------------------------------------------------
-svc_gang_start()    { start_service gang    "$GANG_BIN"; }
+
+# ensure_ffmpeg makes sure ffmpeg + ffprobe are present, since the music box
+# downloads tracks and transcodes them to Opus on the server. Idempotent:
+# does nothing if both are already on PATH. Best-effort install via apt.
+ensure_ffmpeg() {
+  if command -v ffmpeg >/dev/null 2>&1 && command -v ffprobe >/dev/null 2>&1; then
+    return 0
+  fi
+  echo "[ffmpeg] not found, installing (needed by the music box)..."
+  local SUDO=""; command -v sudo >/dev/null 2>&1 && SUDO="sudo"
+  if ! command -v apt-get >/dev/null 2>&1; then
+    echo "[ffmpeg] apt-get not available; install ffmpeg manually" >&2
+    return 1
+  fi
+  $SUDO apt-get update
+  $SUDO apt-get install -y --no-install-recommends ffmpeg
+  if command -v ffmpeg >/dev/null 2>&1 && command -v ffprobe >/dev/null 2>&1; then
+    echo "[ffmpeg] installed: $(ffmpeg -version 2>/dev/null | sed -n '1p')"
+  else
+    echo "[ffmpeg] install failed; the music box will be degraded" >&2
+    return 1
+  fi
+}
+
+svc_gang_start()    { ensure_ffmpeg || true; start_service gang    "$GANG_BIN"; }
 svc_livekit_start() { start_service livekit "$LIVEKIT_BIN" --config "$LIVEKIT_CONFIG"; }
 
 # Dispatch by target: all (default) | gang | livekit
