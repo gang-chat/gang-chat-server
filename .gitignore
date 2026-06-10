@@ -21,3 +21,6 @@ assets-cache/
 
 # Linux livekit binary — lives only on the deploy server, not in git
 /livekit-server/livekit-server
+
+# Codegraph index — tool-generated, machine-local
+/.codegraph/

@@ -88,7 +88,7 @@ func newAPIHarness(t *testing.T) *apiHarness {
 	chatGroup.Use(authMW.Handle)
 	live := &fakeLiveController{}
 	bus := eventbus.New()
-	RegisterRoutes(chatGroup, pool, cfg, bus, live)
+	RegisterRoutes(chatGroup, pool, cfg, bus, live, nil)
 
 	return &apiHarness{
 		t:      t,

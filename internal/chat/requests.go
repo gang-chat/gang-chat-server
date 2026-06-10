@@ -105,6 +105,21 @@ type musicInviteRequest struct {
 	IncludeAllNotListening bool     `json:"include_all_not_listening"`
 }
 
+type musicBoxEnqueueRequest struct {
+	Source     string `json:"source"`
+	TrackID    string `json:"track_id"`
+	Title      string `json:"title"`
+	Artist     string `json:"artist"`
+	Album      string `json:"album"`
+	PicID      string `json:"pic_id"`
+	LyricID    string `json:"lyric_id"`
+	DurationMS *int64 `json:"duration_ms"`
+}
+
+type musicBoxControlRequest struct {
+	Action string `json:"action"`
+}
+
 type playlistRequest struct {
 	Name string `json:"name"`
 }
