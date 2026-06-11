@@ -659,6 +659,10 @@ func (h *Handler) removeMember(c *gin.Context) {
 	}
 	defer tx.Rollback()
 	liveRes, _ := tx.Exec(`DELETE FROM live_participants WHERE room_id = ? AND user_id = ?`, roomID, targetID)
+	if err := h.deleteRoomInviteHistoryForTargetTx(tx, roomID, targetID); err != nil {
+		h.jsonError(c, http.StatusInternalServerError, "internal_error", "remove member failed")
+		return
+	}
 	res, err := tx.Exec(`DELETE FROM room_memberships WHERE room_id = ? AND user_id = ?`, roomID, targetID)
 	if err != nil {
 		h.jsonError(c, http.StatusInternalServerError, "internal_error", "remove member failed")
@@ -681,6 +685,7 @@ func (h *Handler) removeMember(c *gin.Context) {
 	// (unless the room was pruned to empty, leaving no one to notify).
 	h.publishRoomDeleted(roomID, targetID)
 	h.publishPendingRoomInvitesUpdatedForInviter(roomID, targetID)
+	h.publishRoomInvitesUpdated(targetID)
 	if !pruned {
 		h.publishRoomUpdated(roomID)
 		if n, _ := liveRes.RowsAffected(); n > 0 {
@@ -1086,6 +1091,11 @@ func (h *Handler) memberPayload(roomID, userID string) gin.H {
 		roomID, userID,
 	).Scan(&id, &uid, &username, &displayName, &avatarURL, &defaultAvatar, &role, &joinedAt)
 	return gin.H{"user": summaryFromUserFields(id, uid, username, displayName, avatarURL, defaultAvatar), "role": role, "joined_at": formatMillis(joinedAt)}
+}
+
+func (h *Handler) deleteRoomInviteHistoryForTargetTx(tx *sql.Tx, roomID, targetUserID string) error {
+	_, err := tx.Exec(`DELETE FROM room_invites WHERE room_id = ? AND target_user_id = ?`, roomID, targetUserID)
+	return err
 }
 
 func scanJoinRequest(rows *sql.Rows) (gin.H, string, error) {

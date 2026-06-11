@@ -671,6 +671,17 @@ func TestRoomOnlineMemberCountUsesActiveConnections(t *testing.T) {
 	status, response := api.request(http.MethodPost, "/rooms/"+roomID+"/join", alice.Token, nil)
 	api.requireStatus(status, http.StatusOK, response)
 
+	status, response = api.request(http.MethodGet, "/rooms/"+roomID+"/members?limit=50", owner.Token, nil)
+	api.requireStatus(status, http.StatusOK, response)
+	ownerMember := memberByUserID(t, response, owner.User["id"].(string))
+	aliceMember := memberByUserID(t, response, alice.User["id"].(string))
+	if ownerMember["user"].(map[string]any)["is_online"] != true {
+		t.Fatalf("current requester should be online even before SSE connects: %v", response)
+	}
+	if aliceMember["user"].(map[string]any)["is_online"] != false {
+		t.Fatalf("other members should still depend on active connections: %v", response)
+	}
+
 	ownerA := api.bus.Subscribe(owner.User["id"].(string))
 	defer ownerA.Close()
 	ownerB := api.bus.Subscribe(owner.User["id"].(string))
@@ -696,8 +707,8 @@ func TestRoomOnlineMemberCountUsesActiveConnections(t *testing.T) {
 
 	status, response = api.request(http.MethodGet, "/rooms/"+roomID+"/members?limit=50", owner.Token, nil)
 	api.requireStatus(status, http.StatusOK, response)
-	ownerMember := memberByUserID(t, response, owner.User["id"].(string))
-	aliceMember := memberByUserID(t, response, alice.User["id"].(string))
+	ownerMember = memberByUserID(t, response, owner.User["id"].(string))
+	aliceMember = memberByUserID(t, response, alice.User["id"].(string))
 	if ownerMember["user"].(map[string]any)["is_online"] != true ||
 		aliceMember["user"].(map[string]any)["is_online"] != true {
 		t.Fatalf("member payload should expose online state: %v", response)
@@ -1676,6 +1687,84 @@ func TestApprovalRequiredJoinFlow(t *testing.T) {
 	if membership["role"] != "member" {
 		t.Fatalf("approved joiner should become member: %v", membership)
 	}
+}
+
+func TestRoomInviteHistoryClearedWhenTargetLeavesOrIsRemoved(t *testing.T) {
+	api := newAPIHarness(t)
+	owner := api.register("invite_clear_owner")
+	leaver := api.register("invite_clear_leaver")
+	removed := api.register("invite_clear_removed")
+	room := api.createRoom(owner.Token, map[string]any{"name": "Invite Cleanup", "join_policy": "approval_required"})
+	roomID := room["id"].(string)
+
+	assertNoInviteHistory := func(userID string) {
+		t.Helper()
+		var count int
+		if err := api.db.QueryRow(
+			`SELECT COUNT(*) FROM room_invites WHERE room_id = ? AND target_user_id = ?`,
+			roomID,
+			userID,
+		).Scan(&count); err != nil {
+			t.Fatalf("count invite history: %v", err)
+		}
+		if count != 0 {
+			t.Fatalf("invite history should be cleared for %s, got %d rows", userID, count)
+		}
+	}
+
+	assertDirectApplication := func(token, userID string) string {
+		t.Helper()
+		status, response := api.request(http.MethodPost, "/rooms/"+roomID+"/join", token, map[string]any{"reason": "again"})
+		api.requireStatus(status, http.StatusAccepted, response)
+		requestID := response["join_request"].(map[string]any)["id"].(string)
+
+		status, response = api.request(http.MethodGet, "/rooms/"+roomID+"/join-requests?status=pending", owner.Token, nil)
+		api.requireStatus(status, http.StatusOK, response)
+		for _, item := range response["requests"].([]any) {
+			request := item.(map[string]any)
+			user := request["user"].(map[string]any)
+			if user["id"] != userID {
+				continue
+			}
+			if request["source"] != "public_search" {
+				t.Fatalf("stale invite source should not survive leave/remove: %v", request)
+			}
+			if got := len(request["inviters"].([]any)); got != 0 {
+				t.Fatalf("stale inviters should be cleared, got %d: %v", got, request)
+			}
+			return requestID
+		}
+		t.Fatalf("join request for %s not found: %v", userID, response)
+		return ""
+	}
+
+	status, response := api.request(http.MethodPost, "/rooms/"+roomID+"/invites", owner.Token, map[string]any{
+		"user_id": leaver.User["id"].(string),
+	})
+	api.requireStatus(status, http.StatusCreated, response)
+	status, response = api.request(http.MethodPatch, "/room-invites/"+response["invite"].(map[string]any)["id"].(string), leaver.Token, map[string]any{
+		"decision": "accept",
+	})
+	api.requireStatus(status, http.StatusOK, response)
+	status, response = api.request(http.MethodPost, "/rooms/"+roomID+"/leave", leaver.Token, nil)
+	api.requireStatus(status, http.StatusOK, response)
+	assertNoInviteHistory(leaver.User["id"].(string))
+	requestID := assertDirectApplication(leaver.Token, leaver.User["id"].(string))
+	status, response = api.request(http.MethodPatch, "/rooms/"+roomID+"/join-requests/"+requestID, owner.Token, map[string]any{"decision": "approve"})
+	api.requireStatus(status, http.StatusOK, response)
+
+	status, response = api.request(http.MethodPost, "/rooms/"+roomID+"/invites", owner.Token, map[string]any{
+		"user_id": removed.User["id"].(string),
+	})
+	api.requireStatus(status, http.StatusCreated, response)
+	status, response = api.request(http.MethodPatch, "/room-invites/"+response["invite"].(map[string]any)["id"].(string), removed.Token, map[string]any{
+		"decision": "accept",
+	})
+	api.requireStatus(status, http.StatusOK, response)
+	status, response = api.request(http.MethodDelete, "/rooms/"+roomID+"/members/"+removed.User["id"].(string), owner.Token, nil)
+	api.requireStatus(status, http.StatusOK, response)
+	assertNoInviteHistory(removed.User["id"].(string))
+	assertDirectApplication(removed.Token, removed.User["id"].(string))
 }
 
 func TestRoomApplicationNotifications(t *testing.T) {

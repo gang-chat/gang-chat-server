@@ -43,6 +43,7 @@ func (h *Handler) listMembers(c *gin.Context) {
 	if !h.requireRoomAccess(c, roomID) {
 		return
 	}
+	viewerID := currentUserID(c)
 
 	limit := parseLimit(c.Query("limit"), 50, 100)
 	// Fetch one extra row to decide whether a further page exists.
@@ -100,7 +101,7 @@ func (h *Handler) listMembers(c *gin.Context) {
 			mutedUntil = &v
 		}
 		user := summaryFromUserFields(id, uid, username, displayName, avatarURL, defaultAvatar)
-		isOnline := h.isUserOnline(id)
+		isOnline := h.isUserOnlineForViewer(id, viewerID)
 		user.IsOnline = &isOnline
 		members = append(members, currentMember{
 			User:           user,
@@ -255,6 +256,10 @@ func (h *Handler) leaveRoom(c *gin.Context) {
 	defer tx.Rollback()
 
 	liveRes, _ := tx.Exec(`DELETE FROM live_participants WHERE room_id = ? AND user_id = ?`, roomID, userID)
+	if err := h.deleteRoomInviteHistoryForTargetTx(tx, roomID, userID); err != nil {
+		h.jsonError(c, http.StatusInternalServerError, "internal_error", "failed to leave room")
+		return
+	}
 	_, err = tx.Exec(`DELETE FROM room_memberships WHERE room_id = ? AND user_id = ?`, roomID, userID)
 	if err != nil {
 		h.jsonError(c, http.StatusInternalServerError, "internal_error", "failed to leave room")
@@ -275,6 +280,7 @@ func (h *Handler) leaveRoom(c *gin.Context) {
 	// to notify.
 	h.publishRoomDeleted(roomID, userID)
 	h.publishPendingRoomInvitesUpdatedForInviter(roomID, userID)
+	h.publishRoomInvitesUpdated(userID)
 	if !pruned {
 		h.publishRoomUpdated(roomID)
 		if n, _ := liveRes.RowsAffected(); n > 0 {

@@ -304,7 +304,7 @@ func (h *Handler) profileUserSummary(userID, viewerID string) (userSummary, erro
 	summary := summaryFromUserFields(id, uid, username, displayName, avatarURL, defaultAvatar)
 	summary.Bio = nullableString(bio)
 	summary.IsSuperuser = isSuperuser != 0
-	isOnline := h.isUserOnline(id)
+	isOnline := h.isUserOnlineForViewer(id, viewerID)
 	summary.IsOnline = &isOnline
 	if !summary.IsSuperuser {
 		rooms, err := h.userProfileRooms(id, viewerID, viewerID == id || h.isSuperuser(viewerID))
@@ -673,6 +673,13 @@ func (h *Handler) isUserOnline(userID string) bool {
 	}
 	_, ok := h.Bus.OnlineUserIDs()[userID]
 	return ok
+}
+
+func (h *Handler) isUserOnlineForViewer(userID, viewerID string) bool {
+	if userID != "" && userID == viewerID {
+		return true
+	}
+	return h.isUserOnline(userID)
 }
 
 func allowed(value string, values ...string) bool {
