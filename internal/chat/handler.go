@@ -189,9 +189,6 @@ type liveParticipant struct {
 	VoiceBlocked        bool        `json:"voice_blocked"`
 	CameraOn            bool        `json:"camera_on"`
 	ScreenSharing       bool        `json:"screen_sharing"`
-	MusicListening      bool        `json:"music_listening"`
-	MusicSessionID      *string     `json:"music_session_id"`
-	ListeningWithUserID *string     `json:"listening_with_user_id"`
 	ConnectionState     string      `json:"connection_state"`
 }
 

@@ -101,3 +101,12 @@ func (h *Handler) moderateLiveParticipant(c *gin.Context) {
 
 	c.JSON(http.StatusOK, gin.H{"ok": true, "action": req.Action, "user_id": targetID})
 }
+
+// isLiveParticipant reports whether a user currently has a live_participants
+// row in the room. Used by moderation and member-volume handlers to validate a
+// target is actually in the live session.
+func (h *Handler) isLiveParticipant(roomID, userID string) bool {
+	var count int
+	_ = h.DB.QueryRow(`SELECT COUNT(*) FROM live_participants WHERE room_id = ? AND user_id = ?`, roomID, userID).Scan(&count)
+	return count > 0
+}

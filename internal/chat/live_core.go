@@ -232,7 +232,6 @@ func (h *Handler) buildLiveState(roomID string, fallbackUpdatedAt int64) (liveSt
 		}
 		participants = append(participants, participant)
 	}
-	participants = h.annotateMusicParticipants(roomID, participants)
 	return liveState{
 		RoomID:           roomID,
 		ParticipantCount: len(participants),
@@ -253,10 +252,6 @@ func (h *Handler) liveParticipantForUser(roomID, userID string) (liveParticipant
 		roomID, userID,
 	)
 	participant, _, err := scanLiveParticipant(row)
-	if err == nil {
-		participants := h.annotateMusicParticipants(roomID, []liveParticipant{participant})
-		participant = participants[0]
-	}
 	return participant, err
 }
 

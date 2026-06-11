@@ -64,13 +64,6 @@ func RegisterRoutes(g *gin.RouterGroup, db *sql.DB, cfg *config.Config) {
 	g.DELETE("/users/me/account", h.Authed(), h.deleteAccount)
 	g.PATCH("/users/:user_id/settings", h.Authed(), h.forceUpdateUserSettings)
 	g.GET("/users/search", h.Authed(), h.searchUsers)
-	g.GET("/users/me/playlists", h.Authed(), h.listPersonalPlaylists)
-	g.POST("/users/me/playlists", h.Authed(), h.createPersonalPlaylist)
-	g.PATCH("/users/me/playlists/:playlist_id", h.Authed(), h.updatePersonalPlaylist)
-	g.DELETE("/users/me/playlists/:playlist_id", h.Authed(), h.deletePersonalPlaylist)
-	g.POST("/users/me/playlists/:playlist_id/tracks", h.Authed(), h.addPersonalPlaylistTrack)
-	g.PATCH("/users/me/playlists/:playlist_id/tracks/:track_id", h.Authed(), h.updatePersonalPlaylistTrack)
-	g.DELETE("/users/me/playlists/:playlist_id/tracks/:track_id", h.Authed(), h.deletePersonalPlaylistTrack)
 }
 
 func (h *Handler) Authed() gin.HandlerFunc {

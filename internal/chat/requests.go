@@ -83,35 +83,6 @@ type stickerReorderRequest struct {
 	StickerIDs []string `json:"sticker_ids"`
 }
 
-type musicPlaybackRequest struct {
-	Action        string `json:"action"`
-	Mode          string `json:"mode"`
-	PlaylistID    string `json:"playlist_id"`
-	PlaylistScope string `json:"playlist_scope"`
-}
-
-type musicQueueRequest struct {
-	SourceURL  string `json:"source_url"`
-	Title      string `json:"title"`
-	Artist     string `json:"artist"`
-	DurationMS *int64 `json:"duration_ms"`
-}
-
-type musicSessionRequest struct {
-	Action        string `json:"action"`
-	QueueID       string `json:"queue_id"`
-	TargetUserID  string `json:"target_user_id"`
-	Mode          string `json:"mode"`
-	PlaylistID    string `json:"playlist_id"`
-	PlaylistScope string `json:"playlist_scope"`
-	PositionMS    *int64 `json:"position_ms"`
-}
-
-type musicInviteRequest struct {
-	TargetUserIDs          []string `json:"target_user_ids"`
-	IncludeAllNotListening bool     `json:"include_all_not_listening"`
-}
-
 type musicBoxEnqueueRequest struct {
 	Source     string `json:"source"`
 	TrackID    string `json:"track_id"`
@@ -123,19 +94,6 @@ type musicBoxEnqueueRequest struct {
 
 type musicBoxControlRequest struct {
 	Action string `json:"action"`
-}
-
-type playlistRequest struct {
-	Name string `json:"name"`
-}
-
-type playlistTrackRequest struct {
-	Title      string `json:"title"`
-	Artist     string `json:"artist"`
-	Source     string `json:"source"`
-	SourceURL  string `json:"source_url"`
-	DurationMS *int64 `json:"duration_ms"`
-	SortOrder  *int   `json:"sort_order"`
 }
 
 type saveStickerRequest struct {

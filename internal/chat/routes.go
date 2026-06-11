@@ -129,27 +129,13 @@ func RegisterRoutes(g *gin.RouterGroup, db *sql.DB, cfg *config.Config, bus *eve
 	g.GET("/rooms/:room_id/live/me/member-volumes", h.listMyLiveMemberVolumes)
 	g.PATCH("/rooms/:room_id/live/me/member-volumes/:target_user_id", h.updateMyLiveMemberVolume)
 	g.POST("/rooms/:room_id/live/participants/:user_id/moderation", h.moderateLiveParticipant)
-	g.GET("/rooms/:room_id/music/state", h.getMusicState)
-	g.POST("/rooms/:room_id/music/playback", h.controlMusicPlayback)
-	g.POST("/rooms/:room_id/music/session", h.controlMusicSession)
-	g.POST("/rooms/:room_id/music/invites", h.createMusicInvites)
-	g.POST("/rooms/:room_id/music/queue", h.addMusicQueue)
 
-	// Server-side music box: search/enqueue/control a broadcast track. Distinct
-	// from the /music/* client-coordinated feature above.
+	// Server-side music box: search/enqueue/control a broadcast track.
 	g.GET("/rooms/:room_id/music-box/search", h.searchMusicBox)
 	g.GET("/rooms/:room_id/music-box/state", h.getMusicBoxState)
 	g.POST("/rooms/:room_id/music-box/queue", h.enqueueMusicBox)
 	g.DELETE("/rooms/:room_id/music-box/queue/:item_id", h.removeMusicBoxItem)
 	g.POST("/rooms/:room_id/music-box/control", h.controlMusicBox)
-
-	g.GET("/rooms/:room_id/playlists", h.listRoomPlaylists)
-	g.POST("/rooms/:room_id/playlists", h.createRoomPlaylist)
-	g.PATCH("/rooms/:room_id/playlists/:playlist_id", h.updateRoomPlaylist)
-	g.DELETE("/rooms/:room_id/playlists/:playlist_id", h.deleteRoomPlaylist)
-	g.POST("/rooms/:room_id/playlists/:playlist_id/tracks", h.addRoomPlaylistTrack)
-	g.PATCH("/rooms/:room_id/playlists/:playlist_id/tracks/:track_id", h.updateRoomPlaylistTrack)
-	g.DELETE("/rooms/:room_id/playlists/:playlist_id/tracks/:track_id", h.deleteRoomPlaylistTrack)
 
 	return h
 }
