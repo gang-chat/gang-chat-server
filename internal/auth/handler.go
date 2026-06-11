@@ -4,6 +4,7 @@ import (
 	"crypto/rand"
 	"database/sql"
 	"encoding/base64"
+	"log"
 	"net/http"
 	"regexp"
 	"strings"
@@ -25,7 +26,11 @@ type Handler struct {
 func NewHandler(db *sql.DB, cfg *config.Config) *Handler {
 	locationResolver, err := NewSessionLocationResolver(cfg.GeoIPDatabasePath)
 	if err != nil {
-		panic(err)
+		// A missing/corrupt GeoIP database must not take down the whole
+		// server. Location() already degrades to "unknown" when the reader
+		// is nil, so fall back to an empty resolver and log loudly instead.
+		log.Printf("auth: GeoIP database unavailable (%v); session locations will be unknown", err)
+		locationResolver = &SessionLocationResolver{}
 	}
 	return &Handler{
 		DB:               db,
@@ -227,7 +232,7 @@ func (h *Handler) logout(c *gin.Context) {
 		_ = model.RevokeSessionByRefreshToken(h.DB, *req.RefreshToken)
 	} else {
 		sid := getSessionID(c)
-		_ = model.RevokeSession(h.DB, sid)
+		_, _ = model.RevokeSession(h.DB, sid, getUserID(c))
 	}
 	c.JSON(http.StatusOK, MessageResponse{OK: true})
 }
@@ -321,9 +326,15 @@ func (h *Handler) revokeSession(c *gin.Context) {
 		return
 	}
 
-	err := model.RevokeSession(h.DB, sessionID)
+	ok, err := model.RevokeSession(h.DB, sessionID, getUserID(c))
 	if err != nil {
 		errorJSON(c, http.StatusInternalServerError, "internal_error", "revoke failed")
+		return
+	}
+	if !ok {
+		// No active session with that id belongs to this user — either it
+		// doesn't exist or it's someone else's. Don't disclose which.
+		errorJSON(c, http.StatusNotFound, "not_found", "session not found")
 		return
 	}
 	c.JSON(http.StatusOK, MessageResponse{OK: true})

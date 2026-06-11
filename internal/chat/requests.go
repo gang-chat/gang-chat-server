@@ -27,6 +27,13 @@ type userIDRequest struct {
 	UserID string `json:"user_id"`
 }
 
+type leaveRoomRequest struct {
+	// ConfirmDeleteIfEmpty must be true for the leave to proceed when the
+	// caller is the last member and leaving would delete the room. Without it
+	// the server refuses (409) so the client can prompt for confirmation.
+	ConfirmDeleteIfEmpty bool `json:"confirm_delete_if_empty"`
+}
+
 type roleRequest struct {
 	Role string `json:"role"`
 }

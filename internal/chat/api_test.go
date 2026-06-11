@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
@@ -733,7 +734,11 @@ func TestRoomLeaveDeletesAndPromotesAdmin(t *testing.T) {
 
 	solo := api.createRoom(owner.Token, map[string]any{"name": "Solo", "join_policy": "open"})
 	soloID := solo["id"].(string)
+	// Owner is the only member, so leaving deletes the room — which now
+	// requires explicit confirmation. Without it the server returns 409.
 	status, response = api.request(http.MethodPost, "/rooms/"+soloID+"/leave", owner.Token, nil)
+	api.requireStatus(status, http.StatusConflict, response)
+	status, response = api.request(http.MethodPost, "/rooms/"+soloID+"/leave", owner.Token, map[string]any{"confirm_delete_if_empty": true})
 	api.requireStatus(status, http.StatusOK, response)
 	var exists int
 	if err := api.db.QueryRow(`SELECT COUNT(*) FROM rooms WHERE id = ?`, soloID).Scan(&exists); err != nil {
@@ -2170,5 +2175,66 @@ func TestMessageRecallPolicies(t *testing.T) {
 	afterApprove := findMessage(t, response, candidate["id"].(string))
 	if afterApprove["is_recalled"] != true {
 		t.Fatalf("message should be recalled after approval: %v", afterApprove)
+	}
+}
+
+// TestListMembersPaginates verifies that listMembers walks every member across
+// pages via next_cursor, with no gaps or duplicates, when a room has more
+// members than the page limit.
+func TestListMembersPaginates(t *testing.T) {
+	api := newAPIHarness(t)
+	owner := api.register("page_owner")
+	room := api.createRoom(owner.Token, map[string]any{"name": "Paginate", "join_policy": "open"})
+	roomID := room["id"].(string)
+
+	want := map[string]bool{owner.User["id"].(string): true}
+	const extra = 7
+	for i := 0; i < extra; i++ {
+		u := api.register(fmt.Sprintf("page_member_%d", i))
+		status, response := api.request(http.MethodPost, "/rooms/"+roomID+"/join", u.Token, nil)
+		api.requireStatus(status, http.StatusOK, response)
+		want[u.User["id"].(string)] = true
+	}
+
+	seen := map[string]bool{}
+	cursor := ""
+	pages := 0
+	for {
+		path := "/rooms/" + roomID + "/members?limit=3"
+		if cursor != "" {
+			path += "&cursor=" + cursor
+		}
+		status, response := api.request(http.MethodGet, path, owner.Token, nil)
+		api.requireStatus(status, http.StatusOK, response)
+		items, _ := response["members"].([]any)
+		if len(items) > 3 {
+			t.Fatalf("page returned %d members, exceeds limit 3", len(items))
+		}
+		for _, item := range items {
+			m := item.(map[string]any)
+			id := m["user"].(map[string]any)["id"].(string)
+			if seen[id] {
+				t.Fatalf("member %s returned on more than one page", id)
+			}
+			seen[id] = true
+		}
+		pages++
+		if pages > 20 {
+			t.Fatalf("pagination did not terminate")
+		}
+		next, ok := response["next_cursor"].(string)
+		if !ok || next == "" {
+			break
+		}
+		cursor = next
+	}
+
+	if len(seen) != len(want) {
+		t.Fatalf("paginated over %d members, want %d", len(seen), len(want))
+	}
+	for id := range want {
+		if !seen[id] {
+			t.Fatalf("member %s missing from paginated results", id)
+		}
 	}
 }

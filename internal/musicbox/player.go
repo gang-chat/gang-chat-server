@@ -3,6 +3,7 @@ package musicbox
 import (
 	"errors"
 	"io"
+	"log"
 	"os"
 	"sync"
 	"time"
@@ -203,6 +204,10 @@ func (p *player) playFile(item *QueueItem) (stopPlayer bool) {
 			if errors.Is(err, io.EOF) {
 				return false // track finished, advance to next
 			}
+			// A non-EOF read error means a corrupt/truncated Opus file. Don't
+			// silently vanish it — log so the failure is diagnosable, then
+			// advance to the next track.
+			log.Printf("musicbox: room %s track %q read error, skipping: %v", p.roomID, item.ID, err)
 			return false
 		}
 		dur, err := oggreader.ParsePacketDuration(payload)

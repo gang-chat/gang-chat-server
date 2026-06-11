@@ -54,10 +54,24 @@ func GetSessionByID(db *sql.DB, id string) (*UserSession, error) {
 	return s, nil
 }
 
-func RevokeSession(db *sql.DB, id string) error {
+// RevokeSession revokes the session identified by id, but only if it belongs
+// to userID. Scoping by user_id prevents one account from revoking another's
+// session (IDOR). Returns (false, nil) when no matching active session exists
+// so the caller can answer 404 rather than silently succeeding.
+func RevokeSession(db *sql.DB, id, userID string) (bool, error) {
 	now := time.Now().Unix()
-	_, err := db.Exec(`UPDATE user_sessions SET revoked_at = ? WHERE id = ?`, now, id)
-	return err
+	res, err := db.Exec(
+		`UPDATE user_sessions SET revoked_at = ? WHERE id = ? AND user_id = ? AND revoked_at IS NULL`,
+		now, id, userID,
+	)
+	if err != nil {
+		return false, err
+	}
+	affected, err := res.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return affected > 0, nil
 }
 
 func RevokeSessionByRefreshToken(db *sql.DB, token string) error {

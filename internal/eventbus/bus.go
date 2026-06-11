@@ -97,6 +97,11 @@ func (s *Subscription) Close() {
 		return
 	}
 	s.closed = true
+	// Close the channel while still holding s.mu — the same lock deliver
+	// takes around its send — so a concurrent fan-out can never send on an
+	// already-closed channel. deliver re-checks s.closed under the lock and
+	// bails before touching s.events.
+	close(s.events)
 	s.mu.Unlock()
 
 	s.bus.mu.Lock()
@@ -116,7 +121,6 @@ func (s *Subscription) Close() {
 	}
 	delete(s.bus.byID, s.id)
 	s.bus.mu.Unlock()
-	close(s.events)
 }
 
 // Bus is the registry of active subscriptions. Concurrency-safe; intended
@@ -271,11 +275,14 @@ func (b *Bus) PublishUser(userID string, ev Event) {
 // (non-blocking) so the publisher never waits on a slow consumer.
 func deliver(sub *Subscription, ev Event) {
 	sub.mu.Lock()
+	defer sub.mu.Unlock()
 	if sub.closed {
-		sub.mu.Unlock()
 		return
 	}
-	sub.mu.Unlock()
+	// The send happens under sub.mu, which Close also holds while it closes
+	// the channel, so we can never send on a closed channel. The loop is
+	// non-blocking (drop-oldest on a full buffer), so holding the lock is
+	// bounded and never waits on a slow consumer.
 	for {
 		select {
 		case sub.events <- ev:

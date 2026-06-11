@@ -2,10 +2,41 @@ package chat
 
 import (
 	"database/sql"
+	"encoding/base64"
 	"net/http"
+	"strconv"
+	"strings"
 
 	"github.com/gin-gonic/gin"
 )
+
+// memberCursor is a keyset pagination cursor over (joined_at, user_id). It is
+// opaque to clients (base64 of "joinedAt:userID"). joined_at alone isn't
+// unique, so user_id is the stable tiebreaker that guarantees a total order
+// and no skipped/duplicated rows across pages.
+func encodeMemberCursor(joinedAt int64, userID string) string {
+	raw := strconv.FormatInt(joinedAt, 10) + ":" + userID
+	return base64.RawURLEncoding.EncodeToString([]byte(raw))
+}
+
+func decodeMemberCursor(raw string) (joinedAt int64, userID string, ok bool) {
+	if raw == "" {
+		return 0, "", false
+	}
+	decoded, err := base64.RawURLEncoding.DecodeString(raw)
+	if err != nil {
+		return 0, "", false
+	}
+	parts := strings.SplitN(string(decoded), ":", 2)
+	if len(parts) != 2 {
+		return 0, "", false
+	}
+	joinedAt, err = strconv.ParseInt(parts[0], 10, 64)
+	if err != nil || parts[1] == "" {
+		return 0, "", false
+	}
+	return joinedAt, parts[1], true
+}
 
 func (h *Handler) listMembers(c *gin.Context) {
 	roomID := c.Param("room_id")
@@ -14,16 +45,37 @@ func (h *Handler) listMembers(c *gin.Context) {
 	}
 
 	limit := parseLimit(c.Query("limit"), 50, 100)
-	rows, err := h.DB.Query(
-		`SELECT u.id, u.uid, u.username, u.display_name, u.avatar_url, u.default_avatar_key,
-		        rm.role, rm.text_muted_until, rm.joined_at
-		 FROM room_memberships rm
-		 JOIN users u ON u.id = rm.user_id
-		 WHERE rm.room_id = ?
-		 ORDER BY rm.joined_at ASC
-		 LIMIT ?`,
-		roomID, limit,
+	// Fetch one extra row to decide whether a further page exists.
+	fetch := limit + 1
+
+	var (
+		rows *sql.Rows
+		err  error
 	)
+	if curJoinedAt, curUserID, ok := decodeMemberCursor(c.Query("cursor")); ok {
+		rows, err = h.DB.Query(
+			`SELECT u.id, u.uid, u.username, u.display_name, u.avatar_url, u.default_avatar_key,
+			        rm.role, rm.text_muted_until, rm.joined_at
+			 FROM room_memberships rm
+			 JOIN users u ON u.id = rm.user_id
+			 WHERE rm.room_id = ?
+			   AND (rm.joined_at > ? OR (rm.joined_at = ? AND rm.user_id > ?))
+			 ORDER BY rm.joined_at ASC, rm.user_id ASC
+			 LIMIT ?`,
+			roomID, curJoinedAt, curJoinedAt, curUserID, fetch,
+		)
+	} else {
+		rows, err = h.DB.Query(
+			`SELECT u.id, u.uid, u.username, u.display_name, u.avatar_url, u.default_avatar_key,
+			        rm.role, rm.text_muted_until, rm.joined_at
+			 FROM room_memberships rm
+			 JOIN users u ON u.id = rm.user_id
+			 WHERE rm.room_id = ?
+			 ORDER BY rm.joined_at ASC, rm.user_id ASC
+			 LIMIT ?`,
+			roomID, fetch,
+		)
+	}
 	if err != nil {
 		h.jsonError(c, http.StatusInternalServerError, "internal_error", "failed to list members")
 		return
@@ -31,6 +83,7 @@ func (h *Handler) listMembers(c *gin.Context) {
 	defer rows.Close()
 
 	members := make([]currentMember, 0)
+	rawJoinedAt := make([]int64, 0)
 	for rows.Next() {
 		var id, uid, username string
 		var displayName, avatarURL, defaultAvatar sql.NullString
@@ -52,8 +105,18 @@ func (h *Handler) listMembers(c *gin.Context) {
 			TextMutedUntil: mutedUntil,
 			JoinedAt:       formatMillis(joinedAt),
 		})
+		rawJoinedAt = append(rawJoinedAt, joinedAt)
 	}
-	c.JSON(http.StatusOK, gin.H{"members": members, "next_cursor": nil})
+
+	// More rows than the page size means there's a next page; trim the probe
+	// row and hand back a cursor anchored on the last returned member.
+	var nextCursor any
+	if len(members) > limit {
+		members = members[:limit]
+		last := members[limit-1]
+		nextCursor = encodeMemberCursor(rawJoinedAt[limit-1], last.User.ID)
+	}
+	c.JSON(http.StatusOK, gin.H{"members": members, "next_cursor": nextCursor})
 }
 
 func (h *Handler) joinRoom(c *gin.Context) {
@@ -161,8 +224,24 @@ func (h *Handler) leaveRoom(c *gin.Context) {
 		h.jsonError(c, http.StatusNotFound, "not_found", "room not found")
 		return
 	}
-	if !h.bindOptionalJSON(c, nil) {
+	var req leaveRoomRequest
+	if !h.bindOptionalJSON(c, &req) {
 		return
+	}
+
+	// If this user is the last member, leaving deletes the room. Require an
+	// explicit confirm_delete_if_empty so the client can prompt first instead
+	// of silently destroying the room.
+	if !req.ConfirmDeleteIfEmpty {
+		var memberCount int
+		if err := h.DB.QueryRow(`SELECT COUNT(*) FROM room_memberships WHERE room_id = ?`, roomID).Scan(&memberCount); err != nil {
+			h.jsonError(c, http.StatusInternalServerError, "internal_error", "failed to leave room")
+			return
+		}
+		if memberCount <= 1 {
+			h.jsonError(c, http.StatusConflict, "confirmation_required", "leaving will delete this empty room; resend with confirm_delete_if_empty")
+			return
+		}
 	}
 
 	tx, err := h.DB.Begin()

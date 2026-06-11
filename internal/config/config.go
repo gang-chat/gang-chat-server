@@ -40,6 +40,7 @@ type Config struct {
 	COSObjectACL           string
 	GeoIPDatabasePath      string
 	TrustedProxies         []string
+	AllowedOrigins         []string
 	LiveKitHost            string
 	LiveKitAPIKey          string
 	LiveKitAPISecret       string
@@ -112,6 +113,7 @@ func Load() *Config {
 		COSObjectACL:           envOr("GANG_COS_OBJECT_ACL", "public-read"),
 		GeoIPDatabasePath:      envOr("GANG_GEOIP_DB_PATH", ""),
 		TrustedProxies:         envListOr("GANG_TRUSTED_PROXIES", []string{"127.0.0.1", "::1"}),
+		AllowedOrigins:         envListOr("GANG_ALLOWED_ORIGINS", []string{"*"}),
 		LiveKitHost:            envOr("LIVEKIT_HOST", "http://localhost:7880"),
 		LiveKitAPIKey:          envOr("LIVEKIT_API_KEY", ""),
 		LiveKitAPISecret:       envOr("LIVEKIT_API_SECRET", ""),
@@ -151,8 +153,11 @@ func Load() *Config {
 	flag.StringVar(&cfg.MusicBoxSource, "music-box-source", cfg.MusicBoxSource, "default GD music source")
 	flag.StringVar(&cfg.MusicBoxSourceBitrate, "music-box-source-bitrate", cfg.MusicBoxSourceBitrate, "GD source download quality (128/192/320/740/999)")
 	flag.StringVar(&trustedProxies, "trusted-proxies", trustedProxies, "comma-separated trusted proxy IPs/CIDRs")
+	allowedOrigins := strings.Join(cfg.AllowedOrigins, ",")
+	flag.StringVar(&allowedOrigins, "allowed-origins", allowedOrigins, "comma-separated allowed CORS origins, or * for any")
 	flag.Parse()
 	cfg.TrustedProxies = parseList(trustedProxies)
+	cfg.AllowedOrigins = parseList(allowedOrigins)
 
 	if cfg.JWTSecret == "" {
 		panic("GANG_JWT_SECRET is required")

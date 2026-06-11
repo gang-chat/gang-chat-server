@@ -2,8 +2,10 @@ package chat
 
 import (
 	"database/sql"
+	"encoding/base64"
 	"errors"
 	"net/http"
+	"strconv"
 	"strings"
 	"unicode/utf8"
 
@@ -11,9 +13,41 @@ import (
 	"github.com/zhuangkaiyi/gang-chat/server/internal/idgen"
 )
 
+// offset cursors carry an opaque base64 of "o:<offset>". They're used where
+// the result ordering is volatile (e.g. rooms sorted live-first), so a keyset
+// cursor over a stable key isn't possible. A bad/missing cursor decodes to 0.
+func encodeOffsetCursor(offset int) string {
+	return base64.RawURLEncoding.EncodeToString([]byte("o:" + strconv.Itoa(offset)))
+}
+
+func decodeOffsetCursor(raw string) int {
+	if raw == "" {
+		return 0
+	}
+	decoded, err := base64.RawURLEncoding.DecodeString(raw)
+	if err != nil {
+		return 0
+	}
+	s := string(decoded)
+	if !strings.HasPrefix(s, "o:") {
+		return 0
+	}
+	n, err := strconv.Atoi(strings.TrimPrefix(s, "o:"))
+	if err != nil || n < 0 {
+		return 0
+	}
+	return n
+}
+
 func (h *Handler) listRooms(c *gin.Context) {
 	userID := currentUserID(c)
 	limit := parseLimit(c.Query("limit"), 50, 100)
+	// Rooms are ordered live-first (a volatile key), so a keyset cursor isn't
+	// stable. Offset pagination keeps the cursor meaningful within a snapshot
+	// without pretending the ordering is immutable. Fetch one extra row to
+	// detect whether a further page exists.
+	offset := decodeOffsetCursor(c.Query("cursor"))
+	fetch := limit + 1
 
 	var rows *sql.Rows
 	var err error
@@ -26,9 +60,9 @@ func (h *Handler) listRooms(c *gin.Context) {
 			 FROM rooms r
 			 ORDER BY (
 			   SELECT COUNT(*) FROM live_participants lp WHERE lp.room_id = r.id
-			 ) = 0, r.updated_at DESC, r.created_at DESC
-			 LIMIT ?`,
-			limit,
+			 ) = 0, r.updated_at DESC, r.created_at DESC, r.id DESC
+			 LIMIT ? OFFSET ?`,
+			fetch, offset,
 		)
 	} else {
 		rows, err = h.DB.Query(
@@ -41,9 +75,9 @@ func (h *Handler) listRooms(c *gin.Context) {
 			 WHERE rm.user_id = ?
 			 ORDER BY (
 			   SELECT COUNT(*) FROM live_participants lp WHERE lp.room_id = r.id
-			 ) = 0, r.updated_at DESC, rm.joined_at DESC
-			 LIMIT ?`,
-			userID, limit,
+			 ) = 0, r.updated_at DESC, rm.joined_at DESC, r.id DESC
+			 LIMIT ? OFFSET ?`,
+			userID, fetch, offset,
 		)
 	}
 	if err != nil {
@@ -67,7 +101,12 @@ func (h *Handler) listRooms(c *gin.Context) {
 		rooms = append(rooms, card)
 	}
 
-	c.JSON(http.StatusOK, gin.H{"rooms": rooms, "next_cursor": nil})
+	var nextCursor any
+	if len(rooms) > limit {
+		rooms = rooms[:limit]
+		nextCursor = encodeOffsetCursor(offset + limit)
+	}
+	c.JSON(http.StatusOK, gin.H{"rooms": rooms, "next_cursor": nextCursor})
 }
 
 func (h *Handler) createRoom(c *gin.Context) {

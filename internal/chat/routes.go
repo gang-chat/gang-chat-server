@@ -96,13 +96,18 @@ func RegisterRoutes(g *gin.RouterGroup, db *sql.DB, cfg *config.Config, bus *eve
 	g.POST("/rooms/:room_id/leave", h.leaveRoom)
 	g.DELETE("/rooms/:room_id", h.deleteRoom)
 	g.GET("/rooms/:room_id/me/settings", h.getMyRoomSettings)
+	// Alias of PATCH /rooms/:room_id/me below; both update the caller's own
+	// per-room settings. Kept for client compatibility.
 	g.PATCH("/rooms/:room_id/me/settings", h.updateMyRoomSettings)
 	g.PATCH("/rooms/:room_id/me", h.updateMyRoomSettings)
 	g.GET("/rooms/:room_id/settings", h.getRoomSettings)
+	// Alias of PATCH /rooms/:room_id above (room-level settings).
 	g.PATCH("/rooms/:room_id/settings", h.updateRoomSettings)
 	g.POST("/rooms/:room_id/invites", h.inviteMember)
 	g.DELETE("/rooms/:room_id/members/:user_id", h.removeMember)
 	g.PATCH("/rooms/:room_id/members/:user_id", h.updateMemberRole)
+	// Alias of PATCH /rooms/:room_id/members/:user_id (role change). Kept for
+	// client compatibility.
 	g.PATCH("/rooms/:room_id/members/:user_id/role", h.updateMemberRole)
 	g.PATCH("/rooms/:room_id/creator", h.transferRoomCreator)
 	g.POST("/rooms/:room_id/members/:user_id/text-mute", h.textMuteMember)

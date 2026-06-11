@@ -26,6 +26,17 @@ func (h *Handler) liveStream(c *gin.Context) {
 		return
 	}
 
+	// Resolve the interest set BEFORE committing the 200 + SSE headers. If the
+	// DB hiccups here we can still answer a real error status, so the client
+	// retries instead of getting wedged on a "successful" but permanently
+	// silent stream (heartbeats would otherwise keep its watchdog from ever
+	// tripping a reconnect).
+	rooms, err := h.userRoomIDs(userID)
+	if err != nil {
+		h.jsonError(c, http.StatusServiceUnavailable, "stream_unavailable", "could not load room interests")
+		return
+	}
+
 	w := c.Writer
 	w.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-cache")
@@ -33,14 +44,6 @@ func (h *Handler) liveStream(c *gin.Context) {
 	w.Header().Set("X-Accel-Buffering", "no") // tell nginx not to buffer
 	w.WriteHeader(http.StatusOK)
 	w.Flush()
-
-	rooms, err := h.userRoomIDs(userID)
-	if err != nil {
-		// We've already sent 200 + headers, so we can't switch to an error
-		// status. Carry on with an empty room set; the client's reconnect
-		// snapshot pull will heal anything we miss.
-		rooms = nil
-	}
 
 	sub := h.Bus.Subscribe(userID)
 	sub.SetRooms(rooms)
