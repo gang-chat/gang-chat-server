@@ -202,27 +202,33 @@ func TestCountDownloading(t *testing.T) {
 	}
 }
 
-func TestResetOrphanedDownloads(t *testing.T) {
+func TestClearAllQueues(t *testing.T) {
 	s := newTestStore(t)
 	add(t, s, "a", 10)
 	add(t, s, "b", 20)
 	_ = s.setStatus("a", StatusDownloading)
 	_ = s.markReady("b", "/tmp/b.ogg", 1, 0)
+	_ = s.saveState(RoomState{RoomID: "r1", State: StatePlaying, CurrentItemID: "b", PositionMS: 5000, Volume: 80})
 
-	n, err := s.resetOrphanedDownloads()
-	if err != nil {
-		t.Fatalf("resetOrphanedDownloads: %v", err)
+	if err := s.clearAllQueues(); err != nil {
+		t.Fatalf("clearAllQueues: %v", err)
 	}
-	if n != 1 {
-		t.Fatalf("reset count = %d, want 1", n)
+
+	// Every queued track is gone.
+	items, _ := s.listQueue("r1")
+	if len(items) != 0 {
+		t.Fatalf("queue len = %d, want 0", len(items))
 	}
-	// a is back to pending; b stays ready.
-	got, _ := s.getItem("a")
-	if got.Status != StatusPending {
-		t.Fatalf("a status = %q, want pending", got.Status)
+	// Playback state is reset to stopped with no current track.
+	st, _ := s.getState("r1")
+	if st.State != StateStopped {
+		t.Fatalf("state = %q, want stopped", st.State)
 	}
-	if n, _ := s.countDownloading("r1"); n != 0 {
-		t.Fatalf("countDownloading after reset = %d, want 0", n)
+	if st.CurrentItemID != "" {
+		t.Fatalf("current item = %q, want empty", st.CurrentItemID)
+	}
+	if st.PositionMS != 0 {
+		t.Fatalf("position = %d, want 0", st.PositionMS)
 	}
 }
 

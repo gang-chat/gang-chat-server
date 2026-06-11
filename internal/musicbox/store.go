@@ -141,21 +141,6 @@ func (s *store) firstPending(roomID string) (*QueueItem, error) {
 	return it, err
 }
 
-// resetOrphanedDownloads flips any rows left in 'downloading' (e.g. by a crash
-// mid-transcode) back to 'pending' so the scheduler can retry them. Their
-// transcode never completed, so they hold no counted bytes. Returns the number
-// of rows reset.
-func (s *store) resetOrphanedDownloads() (int64, error) {
-	res, err := s.db.Exec(
-		`UPDATE room_music_box_queue SET status = 'pending', updated_at = ?
-		 WHERE status = 'downloading'`, nowMillis())
-	if err != nil {
-		return 0, err
-	}
-	n, _ := res.RowsAffected()
-	return n, nil
-}
-
 func (s *store) nextSortOrder(roomID string) (int64, error) {
 	var max sql.NullInt64
 	err := s.db.QueryRow(
@@ -207,6 +192,20 @@ func (s *store) deleteItem(id string) (*QueueItem, error) {
 		return nil, err
 	}
 	return it, nil
+}
+
+// clearAllQueues removes every queued track across all rooms and resets every
+// room's playback state to stopped. Used at startup so a restart begins with an
+// empty music box (the on-disk .ogg files are wiped separately by the manager).
+func (s *store) clearAllQueues() error {
+	if _, err := s.db.Exec(`DELETE FROM room_music_box_queue`); err != nil {
+		return err
+	}
+	_, err := s.db.Exec(
+		`UPDATE room_music_box_state
+		 SET state = 'stopped', current_item_id = NULL, position_ms = 0, updated_at = ?`,
+		nowMillis())
+	return err
 }
 
 // firstReadyAfter returns the first ready item at or after the given sort

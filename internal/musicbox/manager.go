@@ -73,12 +73,27 @@ func NewManager(db *sql.DB, cfg Config, tokenFn TokenFunc, onRoomChanged func(st
 		onRoomChanged: onRoomChanged,
 		players:       map[string]*player{},
 	}
-	// A previous process may have died mid-download, leaving rows stuck in
-	// 'downloading' that would otherwise block their room's scheduler forever.
+	// A restart wipes the music box clean: clear every room's queue and state
+	// in the DB and delete all transcoded files on disk. Nothing here is worth
+	// preserving across restarts — playback can't resume mid-track anyway, and
+	// starting empty guarantees no stale (e.g. pre-FEC) cached files linger.
 	if cfg.Enabled {
-		_, _ = m.store.resetOrphanedDownloads()
+		m.resetOnStartup()
 	}
 	return m
+}
+
+// resetOnStartup clears all queued tracks and playback state, then removes the
+// on-disk transcode directory. Best-effort: a failure to clean disk is logged
+// implicitly by leaving files behind, but never blocks startup.
+func (m *Manager) resetOnStartup() {
+	_ = m.store.clearAllQueues()
+	if m.cfg.Dir != "" {
+		// Remove the whole tree (per-room subdirs of .ogg files), then recreate
+		// the base dir so the first download has somewhere to write.
+		_ = os.RemoveAll(m.cfg.Dir)
+		_ = os.MkdirAll(m.cfg.Dir, 0o755)
+	}
 }
 
 // GD exposes the underlying API client for the search passthrough handler.
