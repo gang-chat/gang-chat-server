@@ -1712,6 +1712,23 @@ func TestRoomInviteHistoryClearedWhenTargetLeavesOrIsRemoved(t *testing.T) {
 		}
 	}
 
+	insertStaleInviteHistory := func(userID string) {
+		t.Helper()
+		old := nowMillis() - 60000
+		if _, err := api.db.Exec(
+			`INSERT INTO room_invites (id, room_id, inviter_user_id, target_user_id, status, created_at, updated_at)
+			 VALUES (?, ?, ?, ?, 'accepted', ?, ?)`,
+			newID("rinv"),
+			roomID,
+			owner.User["id"].(string),
+			userID,
+			old,
+			old,
+		); err != nil {
+			t.Fatalf("insert stale invite history: %v", err)
+		}
+	}
+
 	assertDirectApplication := func(token, userID string) string {
 		t.Helper()
 		status, response := api.request(http.MethodPost, "/rooms/"+roomID+"/join", token, map[string]any{"reason": "again"})
@@ -1749,6 +1766,7 @@ func TestRoomInviteHistoryClearedWhenTargetLeavesOrIsRemoved(t *testing.T) {
 	status, response = api.request(http.MethodPost, "/rooms/"+roomID+"/leave", leaver.Token, nil)
 	api.requireStatus(status, http.StatusOK, response)
 	assertNoInviteHistory(leaver.User["id"].(string))
+	insertStaleInviteHistory(leaver.User["id"].(string))
 	requestID := assertDirectApplication(leaver.Token, leaver.User["id"].(string))
 	status, response = api.request(http.MethodPatch, "/rooms/"+roomID+"/join-requests/"+requestID, owner.Token, map[string]any{"decision": "approve"})
 	api.requireStatus(status, http.StatusOK, response)
@@ -1764,6 +1782,7 @@ func TestRoomInviteHistoryClearedWhenTargetLeavesOrIsRemoved(t *testing.T) {
 	status, response = api.request(http.MethodDelete, "/rooms/"+roomID+"/members/"+removed.User["id"].(string), owner.Token, nil)
 	api.requireStatus(status, http.StatusOK, response)
 	assertNoInviteHistory(removed.User["id"].(string))
+	insertStaleInviteHistory(removed.User["id"].(string))
 	assertDirectApplication(removed.Token, removed.User["id"].(string))
 }
 

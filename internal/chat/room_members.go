@@ -908,12 +908,12 @@ func (h *Handler) listJoinRequests(c *gin.Context) {
 	defer rows.Close()
 	requests := make([]gin.H, 0)
 	for rows.Next() {
-		request, targetUserID, err := scanJoinRequest(rows)
+		request, targetUserID, requestCreatedAt, err := scanJoinRequest(rows)
 		if err != nil {
 			h.jsonError(c, http.StatusInternalServerError, "internal_error", "read join request failed")
 			return
 		}
-		source, inviters := h.joinRequestSourcePayload(roomID, targetUserID)
+		source, inviters := h.joinRequestSourcePayload(roomID, targetUserID, requestCreatedAt)
 		request["source"] = source
 		request["inviters"] = inviters
 		requests = append(requests, request)
@@ -1098,29 +1098,29 @@ func (h *Handler) deleteRoomInviteHistoryForTargetTx(tx *sql.Tx, roomID, targetU
 	return err
 }
 
-func scanJoinRequest(rows *sql.Rows) (gin.H, string, error) {
+func scanJoinRequest(rows *sql.Rows) (gin.H, string, int64, error) {
 	var requestID, status, reason, id, uid, username string
 	var displayName, avatarURL, defaultAvatar sql.NullString
 	var createdAt int64
 	if err := rows.Scan(&requestID, &status, &reason, &createdAt, &id, &uid, &username, &displayName, &avatarURL, &defaultAvatar); err != nil {
-		return nil, "", err
+		return nil, "", 0, err
 	}
 	return gin.H{
 		"id": requestID, "status": status, "reason": reason, "created_at": formatMillis(createdAt),
 		"user": summaryFromUserFields(id, uid, username, displayName, avatarURL, defaultAvatar),
-	}, id, nil
+	}, id, createdAt, nil
 }
 
-func (h *Handler) joinRequestSourcePayload(roomID, targetUserID string) (string, []userSummary) {
+func (h *Handler) joinRequestSourcePayload(roomID, targetUserID string, requestCreatedAt int64) (string, []userSummary) {
 	rows, err := h.DB.Query(
 		`SELECT DISTINCT u.id, u.uid, u.username, u.display_name, u.avatar_url, u.default_avatar_key,
 		        irm.room_display_name, irm.role
 		 FROM room_invites ri
 		 JOIN users u ON u.id = ri.inviter_user_id
 		 LEFT JOIN room_memberships irm ON irm.room_id = ri.room_id AND irm.user_id = ri.inviter_user_id
-		 WHERE ri.room_id = ? AND ri.target_user_id = ? AND ri.status IN ('pending', 'accepted')
+		 WHERE ri.room_id = ? AND ri.target_user_id = ? AND ri.status IN ('pending', 'accepted') AND ri.updated_at >= ?
 		 ORDER BY ri.created_at ASC`,
-		roomID, targetUserID,
+		roomID, targetUserID, requestCreatedAt,
 	)
 	if err != nil {
 		return "public_search", []userSummary{}
