@@ -4,9 +4,9 @@ rtc:
   port_range_start: 50000
   port_range_end: 50100
   use_external_ip: false
-  node_ip: 198.44.178.206
+  node_ip: 45.205.28.177
   stun_servers:
-    - 198.44.178.206:3478
+    - 45.205.28.177:3478
 keys:
   ikun: yingmianzoulaidenirangworucichunchunyudong
 webhook:
