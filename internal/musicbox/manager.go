@@ -237,7 +237,7 @@ func (m *Manager) process(itemID string) {
 	}
 	dst := filepath.Join(roomDir, itemID+".ogg")
 
-	res, err := m.tc.transcode(ctx, resolved.URL, dst)
+	res, err := m.tc.transcode(ctx, item.Source, resolved.URL, dst)
 	if err != nil {
 		_ = m.store.markFailed(itemID, err.Error())
 		m.notify(item.RoomID)

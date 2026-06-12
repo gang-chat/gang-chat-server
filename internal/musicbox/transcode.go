@@ -39,7 +39,11 @@ type transcodeResult struct {
 // transcode reads sourceURL (an http(s) URL or local path) and writes an
 // Ogg/Opus file to dstPath. It blocks on a worker slot first, so callers run
 // it from their own goroutine. ctx cancellation kills the ffmpeg process.
-func (t *transcoder) transcode(ctx context.Context, sourceURL, dstPath string) (*transcodeResult, error) {
+//
+// source is the GD music source the URL came from; some sources hand back a
+// CDN URL that enforces hotlink protection (bilibili's *.bilivideo.com checks
+// Referer), so we set the matching request headers for those.
+func (t *transcoder) transcode(ctx context.Context, source, sourceURL, dstPath string) (*transcodeResult, error) {
 	select {
 	case t.slots <- struct{}{}:
 		defer func() { <-t.slots }()
@@ -52,6 +56,11 @@ func (t *transcoder) transcode(ctx context.Context, sourceURL, dstPath string) (
 	// any embedded cover art video stream. 48kHz stereo matches WebRTC Opus.
 	args := []string{
 		"-hide_banner", "-loglevel", "error", "-nostdin", "-y",
+	}
+	// Hotlink-protected sources need browser-like request headers on the input,
+	// or the CDN answers 403. These ffmpeg flags must precede the matching -i.
+	args = append(args, inputHeaderArgs(source)...)
+	args = append(args,
 		"-i", sourceURL,
 		"-vn",
 		"-c:a", "libopus",
@@ -67,7 +76,7 @@ func (t *transcoder) transcode(ctx context.Context, sourceURL, dstPath string) (
 		"-ac", "2",
 		"-f", "ogg",
 		dstPath,
-	}
+	)
 	cmd := exec.CommandContext(ctx, t.ffmpegPath, args...)
 	var stderr strings.Builder
 	cmd.Stderr = &stderr
@@ -116,6 +125,21 @@ func (t *transcoder) probeDuration(ctx context.Context, path string) int64 {
 		return 0
 	}
 	return int64(f * 1000)
+}
+
+// inputHeaderArgs returns the ffmpeg input flags needed to fetch a given
+// source's CDN URL. bilibili serves audio from *.bilivideo.com, which rejects
+// requests without a bilibili Referer (HTTP 403); a browser-like User-Agent
+// and Referer satisfy the hotlink check. Other sources need nothing.
+func inputHeaderArgs(source string) []string {
+	if source != "bilibili" {
+		return nil
+	}
+	return []string{
+		"-user_agent", "Mozilla/5.0",
+		// ffmpeg expects raw CRLF-terminated header lines here.
+		"-headers", "Referer: https://www.bilibili.com\r\n",
+	}
 }
 
 func ffprobePath(ffmpeg string) string {
