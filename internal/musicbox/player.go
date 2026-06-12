@@ -37,6 +37,11 @@ type player struct {
 	current   *QueueItem
 	positionMS int64
 
+	// done is closed once when the player shuts down, so the heartbeat goroutine
+	// that fans out per-second position snapshots can exit.
+	done     chan struct{}
+	doneOnce sync.Once
+
 	// advance returns the next item to play after the given one finishes (or
 	// the first item if prev is nil). Returns nil when the queue is exhausted.
 	advance func(prev *QueueItem) *QueueItem
@@ -65,6 +70,7 @@ func newPlayer(roomID, host, token string, advance func(prev *QueueItem) *QueueI
 		host:    host,
 		token:   token,
 		cmd:     make(chan command, 8),
+		done:    make(chan struct{}),
 		advance: advance,
 		onState: onState,
 	}
@@ -105,6 +111,7 @@ func (p *player) connect() error {
 // queue is exhausted or stop is requested, then disconnects.
 func (p *player) run() {
 	defer p.disconnect()
+	go p.heartbeat()
 	var prev *QueueItem
 	for {
 		item := p.advance(prev)
@@ -145,7 +152,35 @@ func (p *player) idleWait() bool {
 	}
 }
 
-// playFile streams one Opus file into the track sample-by-sample, honoring
+// heartbeat fans out a fresh state snapshot once per second while a track is
+// actively playing, so SSE subscribers get a steadily advancing position. The
+// audio write loop only records the position locally (setPosition); driving the
+// fan-out from a separate goroutine keeps the per-second DB write and network
+// broadcast off the 20ms sample-pacing path. Exits when the player shuts down.
+func (p *player) heartbeat() {
+	ticker := time.NewTicker(time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-p.done:
+			return
+		case <-ticker.C:
+			if p.isPlaying() && p.onState != nil {
+				p.onState()
+			}
+		}
+	}
+}
+
+// isPlaying reports whether a track is actively streaming (running, not paused,
+// with a current item) — the only state in which the position is advancing.
+func (p *player) isPlaying() bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return !p.stopped && !p.paused && p.current != nil
+}
+
+
 // pause/resume/skip/stop. Returns true if the player should stop entirely.
 func (p *player) playFile(item *QueueItem) (stopPlayer bool) {
 	f, err := os.Open(item.FilePath)
@@ -259,6 +294,7 @@ func (p *player) send(c command) {
 }
 
 func (p *player) disconnect() {
+	p.doneOnce.Do(func() { close(p.done) })
 	p.mu.Lock()
 	p.stopped = true
 	room := p.room
