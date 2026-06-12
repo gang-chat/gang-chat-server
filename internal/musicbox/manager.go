@@ -13,7 +13,6 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/zhuangkaiyi/gang-chat/server/internal/gdmusic"
-	"github.com/zhuangkaiyi/gang-chat/server/internal/meloyou"
 )
 
 // ErrUnavailable is returned when the music box can't operate (LiveKit not
@@ -43,7 +42,7 @@ type Manager struct {
 	cfg     Config
 	store   *store
 	tc      *transcoder
-	router  *meloyou.Router
+	gd      *gdmusic.Client
 	tokenFn TokenFunc
 
 	// onRoomChanged is invoked (room id) whenever a room's music box state or
@@ -69,7 +68,7 @@ func NewManager(db *sql.DB, cfg Config, tokenFn TokenFunc, onRoomChanged func(st
 		cfg:           cfg,
 		store:         &store{db: db},
 		tc:            newTranscoder(cfg.FFmpegPath, cfg.OpusBitrate, cfg.TranscodeWorkers),
-		router:        meloyou.New(gd),
+		gd:            gd,
 		tokenFn:       tokenFn,
 		onRoomChanged: onRoomChanged,
 		players:       map[string]*player{},
@@ -97,9 +96,8 @@ func (m *Manager) resetOnStartup() {
 	}
 }
 
-// Router exposes the underlying source router for the search passthrough
-// handler.
-func (m *Manager) Router() *meloyou.Router { return m.router }
+// GD exposes the underlying API client for the search passthrough handler.
+func (m *Manager) GD() *gdmusic.Client { return m.gd }
 
 // SetOnRoomChanged installs the change callback after construction. The chat
 // layer uses this to fan out an SSE snapshot, but it owns the Handler that
@@ -220,7 +218,7 @@ func (m *Manager) process(itemID string) {
 	}
 	// Status is already 'downloading' (set by pumpRoom under its lock).
 
-	resolved, err := m.router.TrackURL(ctx, item.Source, item.TrackID, m.cfg.SourceBitrate)
+	resolved, err := m.gd.TrackURL(ctx, item.Source, item.TrackID, m.cfg.SourceBitrate)
 	if err != nil {
 		_ = m.store.markFailed(itemID, "resolve url: "+err.Error())
 		m.notify(item.RoomID)

@@ -44,7 +44,7 @@ func (h *Handler) searchMusicBox(c *gin.Context) {
 	}
 	count, _ := strconv.Atoi(c.Query("count"))
 	page, _ := strconv.Atoi(c.Query("page"))
-	results, err := h.MusicBox.Router().Search(c.Request.Context(), c.Query("source"), keyword, count, page)
+	results, err := h.MusicBox.GD().Search(c.Request.Context(), c.Query("source"), keyword, count, page)
 	if err != nil {
 		h.jsonError(c, http.StatusBadGateway, "upstream_error", "music search failed: "+err.Error())
 		return
