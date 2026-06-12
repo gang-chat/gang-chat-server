@@ -44,7 +44,7 @@ func (h *Handler) searchMusicBox(c *gin.Context) {
 	}
 	count, _ := strconv.Atoi(c.Query("count"))
 	page, _ := strconv.Atoi(c.Query("page"))
-	results, err := h.MusicBox.GD().Search(c.Request.Context(), c.Query("source"), keyword, count, page)
+	results, err := h.MusicBox.Router().Search(c.Request.Context(), c.Query("source"), keyword, count, page)
 	if err != nil {
 		h.jsonError(c, http.StatusBadGateway, "upstream_error", "music search failed: "+err.Error())
 		return
@@ -55,7 +55,6 @@ func (h *Handler) searchMusicBox(c *gin.Context) {
 			"track_id": r.ID,
 			"name":     r.Name,
 			"artists":  r.Artists,
-			"pic_id":   r.PicID,
 			"source":   r.Source,
 		})
 	}
@@ -97,7 +96,6 @@ func (h *Handler) enqueueMusicBox(c *gin.Context) {
 		TrackID:       strings.TrimSpace(req.TrackID),
 		Title:         strings.TrimSpace(req.Title),
 		Artist:        strings.TrimSpace(req.Artist),
-		PicID:         strings.TrimSpace(req.PicID),
 		DurationMS:    duration,
 		AddedByUserID: currentUserID(c),
 	})
@@ -178,7 +176,6 @@ func (h *Handler) musicBoxStatePayload(roomID string) gin.H {
 			"track_id":         it.TrackID,
 			"title":            it.Title,
 			"artist":           it.Artist,
-			"pic_id":           it.PicID,
 			"duration_ms":      it.DurationMS,
 			"status":           string(it.Status),
 			"file_size_bytes":  it.FileSizeBytes,

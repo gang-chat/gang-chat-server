@@ -27,7 +27,6 @@ func newTestStore(t *testing.T) *store {
 			id TEXT PRIMARY KEY NOT NULL, room_id TEXT NOT NULL,
 			source TEXT NOT NULL DEFAULT 'netease', track_id TEXT NOT NULL,
 			title TEXT NOT NULL, artist TEXT NOT NULL DEFAULT '',
-			pic_id TEXT,
 			duration_ms INTEGER, status TEXT NOT NULL DEFAULT 'pending',
 			file_path TEXT, file_size_bytes INTEGER NOT NULL DEFAULT 0, error TEXT,
 			added_by_user_id TEXT NOT NULL, sort_order INTEGER NOT NULL DEFAULT 0,

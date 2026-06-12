@@ -88,7 +88,6 @@ type musicBoxEnqueueRequest struct {
 	TrackID    string `json:"track_id"`
 	Title      string `json:"title"`
 	Artist     string `json:"artist"`
-	PicID      string `json:"pic_id"`
 	DurationMS *int64 `json:"duration_ms"`
 }
 
