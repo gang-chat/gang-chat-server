@@ -14,8 +14,9 @@ import (
 )
 
 // offset cursors carry an opaque base64 of "o:<offset>". They're used where
-// the result ordering is volatile (e.g. rooms sorted live-first), so a keyset
-// cursor over a stable key isn't possible. A bad/missing cursor decodes to 0.
+// the result ordering is volatile (e.g. live state and latest messages), so a
+// keyset cursor over a stable key isn't possible. A bad/missing cursor decodes
+// to 0.
 func encodeOffsetCursor(offset int) string {
 	return base64.RawURLEncoding.EncodeToString([]byte("o:" + strconv.Itoa(offset)))
 }
@@ -42,12 +43,17 @@ func decodeOffsetCursor(raw string) int {
 func (h *Handler) listRooms(c *gin.Context) {
 	userID := currentUserID(c)
 	limit := parseLimit(c.Query("limit"), 50, 100)
-	// Rooms are ordered live-first (a volatile key), so a keyset cursor isn't
-	// stable. Offset pagination keeps the cursor meaningful within a snapshot
-	// without pretending the ordering is immutable. Fetch one extra row to
-	// detect whether a further page exists.
+	// Rooms are ordered by live presence first, then by the latest visible
+	// message time. Both keys are volatile, so offset pagination keeps the
+	// cursor meaningful within a snapshot without pretending the ordering is
+	// immutable. Fetch one extra row to detect whether a further page exists.
 	offset := decodeOffsetCursor(c.Query("cursor"))
 	fetch := limit + 1
+	latestMessageTimeSQL := `(SELECT m.created_at
+			   FROM messages m
+			   WHERE m.room_id = r.id AND ` + visibleMessageSQL("m") + `
+			   ORDER BY m.created_at DESC
+			   LIMIT 1)`
 
 	var rows *sql.Rows
 	var err error
@@ -59,8 +65,9 @@ func (h *Handler) listRooms(c *gin.Context) {
 			        r.description, r.created_at, r.updated_at
 			 FROM rooms r
 			 ORDER BY (
-			   SELECT COUNT(*) FROM live_participants lp WHERE lp.room_id = r.id
-			 ) = 0, r.updated_at DESC, r.created_at DESC, r.id DESC
+			   SELECT COUNT(*) FROM live_participants lp
+			   WHERE lp.room_id = r.id AND lp.connection_state != 'left'
+			 ) = 0, COALESCE(`+latestMessageTimeSQL+`, r.updated_at) DESC, r.created_at DESC, r.id DESC
 			 LIMIT ? OFFSET ?`,
 			fetch, offset,
 		)
@@ -74,8 +81,9 @@ func (h *Handler) listRooms(c *gin.Context) {
 			 JOIN room_memberships rm ON rm.room_id = r.id
 			 WHERE rm.user_id = ?
 			 ORDER BY (
-			   SELECT COUNT(*) FROM live_participants lp WHERE lp.room_id = r.id
-			 ) = 0, r.updated_at DESC, rm.joined_at DESC, r.id DESC
+			   SELECT COUNT(*) FROM live_participants lp
+			   WHERE lp.room_id = r.id AND lp.connection_state != 'left'
+			 ) = 0, COALESCE(`+latestMessageTimeSQL+`, r.updated_at) DESC, rm.joined_at DESC, r.id DESC
 			 LIMIT ? OFFSET ?`,
 			userID, fetch, offset,
 		)

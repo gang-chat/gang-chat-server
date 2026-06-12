@@ -665,6 +665,55 @@ func TestHistoricalLiveSystemMessagesAreHidden(t *testing.T) {
 	}
 }
 
+func TestListRoomsOrdersLiveFirstThenLatestMessage(t *testing.T) {
+	api := newAPIHarness(t)
+	owner := api.register("room_order_owner")
+	liveRoom := api.createRoom(owner.Token, map[string]any{"name": "Live Old", "join_policy": "open"})
+	oldRoom := api.createRoom(owner.Token, map[string]any{"name": "Old", "join_policy": "open"})
+	newRoom := api.createRoom(owner.Token, map[string]any{"name": "New", "join_policy": "open"})
+	liveRoomID := liveRoom["id"].(string)
+	oldRoomID := oldRoom["id"].(string)
+	newRoomID := newRoom["id"].(string)
+
+	base := nowMillis()
+	liveMessage := api.sendMessage(owner.Token, liveRoomID, "live but older")
+	oldMessage := api.sendMessage(owner.Token, oldRoomID, "older")
+	newMessage := api.sendMessage(owner.Token, newRoomID, "newer")
+	setMessageCreatedAt := func(message map[string]any, createdAt int64) {
+		t.Helper()
+		if _, err := api.db.Exec(`UPDATE messages SET created_at = ? WHERE id = ?`, createdAt, message["id"].(string)); err != nil {
+			t.Fatalf("set message created_at: %v", err)
+		}
+	}
+	setMessageCreatedAt(liveMessage, base+1000)
+	setMessageCreatedAt(oldMessage, base+2000)
+	setMessageCreatedAt(newMessage, base+3000)
+
+	status, response := api.request(http.MethodPost, "/rooms/"+liveRoomID+"/live/join", owner.Token, map[string]any{
+		"client_live_session_id": "clive_order_owner",
+		"source":                 "live_panel",
+	})
+	api.requireStatus(status, http.StatusOK, response)
+
+	status, response = api.request(http.MethodGet, "/rooms?limit=10", owner.Token, nil)
+	api.requireStatus(status, http.StatusOK, response)
+	rooms, ok := response["rooms"].([]any)
+	if !ok || len(rooms) < 3 {
+		t.Fatalf("rooms response missing entries: %v", response)
+	}
+	got := []string{
+		rooms[0].(map[string]any)["id"].(string),
+		rooms[1].(map[string]any)["id"].(string),
+		rooms[2].(map[string]any)["id"].(string),
+	}
+	want := []string{liveRoomID, newRoomID, oldRoomID}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("room order mismatch: got %v want first three %v", got, want)
+		}
+	}
+}
+
 func TestAttachmentDispositionUsesUTF8FilenameStar(t *testing.T) {
 	header := attachmentDisposition("表情 包.webp")
 	if strings.Contains(header, "表情") {
