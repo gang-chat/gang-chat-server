@@ -24,3 +24,6 @@ assets-cache/
 
 # Codegraph index — tool-generated, machine-local
 /.codegraph/
+
+# QQ音乐 service config — holds the service password, never commit
+/qqmusic.json

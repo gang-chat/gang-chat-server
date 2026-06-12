@@ -13,7 +13,13 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/zhuangkaiyi/gang-chat/server/internal/gdmusic"
+	"github.com/zhuangkaiyi/gang-chat/server/internal/qqmusic"
 )
+
+// SourceTencent routes search and URL resolution to the self-hosted QQ音乐
+// service instead of the GD API. It matches the source value the client sends
+// for QQ音乐 tracks.
+const SourceTencent = "tencent"
 
 // ErrUnavailable is returned when the music box can't operate (LiveKit not
 // configured). Handlers map it to 503.
@@ -34,6 +40,10 @@ type Config struct {
 	SourceBitrate    string // GD download quality
 	LiveKitHost      string
 	Enabled          bool // false when LiveKit isn't configured
+
+	// QQ is the optional self-hosted QQ音乐 client. nil disables the tencent
+	// source; search/resolve for it then return an error.
+	QQ *qqmusic.Client
 }
 
 // Manager owns all room music boxes: the queue store, the transcode pool, the
@@ -43,6 +53,7 @@ type Manager struct {
 	store   *store
 	tc      *transcoder
 	gd      *gdmusic.Client
+	qq      *qqmusic.Client // nil when QQ音乐 integration is disabled
 	tokenFn TokenFunc
 
 	// onRoomChanged is invoked (room id) whenever a room's music box state or
@@ -69,6 +80,7 @@ func NewManager(db *sql.DB, cfg Config, tokenFn TokenFunc, onRoomChanged func(st
 		store:         &store{db: db},
 		tc:            newTranscoder(cfg.FFmpegPath, cfg.OpusBitrate, cfg.TranscodeWorkers),
 		gd:            gd,
+		qq:            cfg.QQ,
 		tokenFn:       tokenFn,
 		onRoomChanged: onRoomChanged,
 		players:       map[string]*player{},
@@ -96,8 +108,67 @@ func (m *Manager) resetOnStartup() {
 	}
 }
 
-// GD exposes the underlying API client for the search passthrough handler.
+// GD exposes the underlying GD API client (used for album art lookups).
 func (m *Manager) GD() *gdmusic.Client { return m.gd }
+
+// QQEnabled reports whether the QQ音乐 (tencent) source is available.
+func (m *Manager) QQEnabled() bool { return m.qq != nil }
+
+// SearchTrack is one normalized search hit across sources.
+type SearchTrack struct {
+	TrackID string
+	Name    string
+	Artists []string
+	Source  string
+}
+
+// Search routes a keyword search to the right backend by source. The tencent
+// source uses the self-hosted QQ音乐 service; every other source (or empty,
+// meaning the GD default) uses the GD API. Results are normalized so callers
+// don't branch on source.
+func (m *Manager) Search(ctx context.Context, source, keyword string, count, page int) ([]SearchTrack, error) {
+	if source == SourceTencent {
+		if m.qq == nil {
+			return nil, fmt.Errorf("musicbox: QQ音乐 source is not configured")
+		}
+		hits, err := m.qq.Search(ctx, keyword, count, page)
+		if err != nil {
+			return nil, err
+		}
+		out := make([]SearchTrack, 0, len(hits))
+		for _, h := range hits {
+			out = append(out, SearchTrack{TrackID: h.ID, Name: h.Name, Artists: h.Artists, Source: SourceTencent})
+		}
+		return out, nil
+	}
+	hits, err := m.gd.Search(ctx, source, keyword, count, page)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]SearchTrack, 0, len(hits))
+	for _, h := range hits {
+		out = append(out, SearchTrack{TrackID: h.ID, Name: h.Name, Artists: h.Artists, Source: h.Source})
+	}
+	return out, nil
+}
+
+// resolveURL resolves a playable source URL for a queue item by source. The
+// tencent source resolves a fresh OGG_192 link via the QQ音乐 service at this
+// moment (vkey is short-lived, so we resolve just before transcoding); other
+// sources use the GD API.
+func (m *Manager) resolveURL(ctx context.Context, item *QueueItem) (string, error) {
+	if item.Source == SourceTencent {
+		if m.qq == nil {
+			return "", fmt.Errorf("musicbox: QQ音乐 source is not configured")
+		}
+		return m.qq.TrackURL(ctx, item.TrackID)
+	}
+	resolved, err := m.gd.TrackURL(ctx, item.Source, item.TrackID, m.cfg.SourceBitrate)
+	if err != nil {
+		return "", err
+	}
+	return resolved.URL, nil
+}
 
 // SetOnRoomChanged installs the change callback after construction. The chat
 // layer uses this to fan out an SSE snapshot, but it owns the Handler that
@@ -218,7 +289,7 @@ func (m *Manager) process(itemID string) {
 	}
 	// Status is already 'downloading' (set by pumpRoom under its lock).
 
-	resolved, err := m.gd.TrackURL(ctx, item.Source, item.TrackID, m.cfg.SourceBitrate)
+	resolvedURL, err := m.resolveURL(ctx, item)
 	if err != nil {
 		_ = m.store.markFailed(itemID, "resolve url: "+err.Error())
 		m.notify(item.RoomID)
@@ -235,7 +306,7 @@ func (m *Manager) process(itemID string) {
 	}
 	dst := filepath.Join(roomDir, itemID+".ogg")
 
-	res, err := m.tc.transcode(ctx, item.Source, resolved.URL, dst)
+	res, err := m.tc.transcode(ctx, item.Source, resolvedURL, dst)
 	if err != nil {
 		_ = m.store.markFailed(itemID, err.Error())
 		m.notify(item.RoomID)

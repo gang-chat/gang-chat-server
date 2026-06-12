@@ -1,7 +1,9 @@
 package main
 
 import (
+	"context"
 	"log"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/joho/godotenv"
@@ -14,6 +16,7 @@ import (
 	"github.com/zhuangkaiyi/gang-chat/server/internal/livekitwebhook"
 	"github.com/zhuangkaiyi/gang-chat/server/internal/middleware"
 	"github.com/zhuangkaiyi/gang-chat/server/internal/musicbox"
+	"github.com/zhuangkaiyi/gang-chat/server/internal/qqmusic"
 	"github.com/zhuangkaiyi/gang-chat/server/internal/storage"
 
 	lksdk "github.com/livekit/server-sdk-go/v2"
@@ -44,6 +47,25 @@ func main() {
 
 	bus := eventbus.New()
 
+	// QQ音乐 integration is optional: enabled only when a qqmusic.json config is
+	// present. When present, a failed login (service down or wrong password)
+	// aborts startup, so a misconfiguration is loud rather than silently off.
+	var qqClient *qqmusic.Client
+	if cfg.QQMusic != nil {
+		qc, err := qqmusic.New(cfg.QQMusic.BaseURL, cfg.QQMusic.Password)
+		if err != nil {
+			log.Fatalf("qqmusic: init client: %v", err)
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+		if err := qc.Login(ctx); err != nil {
+			cancel()
+			log.Fatalf("qqmusic: startup health check failed: %v", err)
+		}
+		cancel()
+		qqClient = qc
+		log.Printf("qqmusic: connected to %s", cfg.QQMusic.BaseURL)
+	}
+
 	// Music box: server-side download/transcode/broadcast of room music. It
 	// needs LiveKit to publish a bot track, so it's only enabled when LiveKit
 	// is configured. The token func issues a publish-only token for the bot.
@@ -57,6 +79,7 @@ func main() {
 		SourceBitrate:    cfg.MusicBoxSourceBitrate,
 		LiveKitHost:      cfg.LiveKitHost,
 		Enabled:          cfg.LiveKitAPIKey != "" && cfg.LiveKitAPISecret != "",
+		QQ:               qqClient,
 	}, func(roomID, identity string) (string, error) {
 		return livekithandler.GenerateJoinToken(livekithandler.TokenParams{
 			APIKey:       cfg.LiveKitAPIKey,

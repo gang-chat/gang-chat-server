@@ -1,6 +1,7 @@
 package config
 
 import (
+	"encoding/json"
 	"flag"
 	"os"
 	"strconv"
@@ -51,6 +52,10 @@ type Config struct {
 	MusicBoxTranscodeWorkers int
 	MusicBoxSource           string
 	MusicBoxSourceBitrate    string
+
+	// QQMusic is the optional self-hosted QQ音乐 API integration. It's nil when
+	// no config file is present (feature off); non-nil and validated when one is.
+	QQMusic *QQMusicConfig
 }
 
 func envOr(key, fallback string) string {
@@ -163,5 +168,46 @@ func Load() *Config {
 		panic("GANG_JWT_SECRET is required")
 	}
 
+	cfg.QQMusic = loadQQMusicConfig(envOr("GANG_QQMUSIC_CONFIG", "qqmusic.json"))
+
 	return cfg
+}
+
+// QQMusicConfig holds the connection details for the self-hosted QQ音乐 API
+// service. It's loaded from a JSON file (default qqmusic.json) so the password
+// stays out of the environment/process listing and out of version control.
+type QQMusicConfig struct {
+	// BaseURL is the service origin, e.g. "http://103.47.83.189:12345".
+	BaseURL string `json:"base_url"`
+	// Password is the service access password (the config.json "password" on
+	// the service side).
+	Password string `json:"password"`
+}
+
+// loadQQMusicConfig reads the QQ音乐 service config from path. Behavior:
+//   - file absent: returns nil (feature stays off; netease/bilibili unaffected).
+//   - file present but unreadable/invalid/missing fields: panics, so a broken
+//     config fails loudly at startup rather than silently disabling QQ音乐.
+//
+// Reachability and password correctness are verified separately at startup by
+// calling the client's Login; that's where a wrong password or down service
+// aborts the boot.
+func loadQQMusicConfig(path string) *QQMusicConfig {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		panic("read QQ音乐 config " + path + ": " + err.Error())
+	}
+	var qc QQMusicConfig
+	if err := json.Unmarshal(raw, &qc); err != nil {
+		panic("parse QQ音乐 config " + path + ": " + err.Error())
+	}
+	qc.BaseURL = strings.TrimSpace(qc.BaseURL)
+	qc.Password = strings.TrimSpace(qc.Password)
+	if qc.BaseURL == "" || qc.Password == "" {
+		panic("QQ音乐 config " + path + " must set both base_url and password")
+	}
+	return &qc
 }

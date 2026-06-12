@@ -44,7 +44,7 @@ func (h *Handler) searchMusicBox(c *gin.Context) {
 	}
 	count, _ := strconv.Atoi(c.Query("count"))
 	page, _ := strconv.Atoi(c.Query("page"))
-	results, err := h.MusicBox.GD().Search(c.Request.Context(), c.Query("source"), keyword, count, page)
+	results, err := h.MusicBox.Search(c.Request.Context(), c.Query("source"), keyword, count, page)
 	if err != nil {
 		h.jsonError(c, http.StatusBadGateway, "upstream_error", "music search failed: "+err.Error())
 		return
@@ -52,7 +52,7 @@ func (h *Handler) searchMusicBox(c *gin.Context) {
 	tracks := make([]gin.H, 0, len(results))
 	for _, r := range results {
 		tracks = append(tracks, gin.H{
-			"track_id": r.ID,
+			"track_id": r.TrackID,
 			"name":     r.Name,
 			"artists":  r.Artists,
 			"source":   r.Source,
