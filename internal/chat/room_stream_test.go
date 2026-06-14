@@ -279,7 +279,7 @@ func TestStreamMessageRefreshesLastMessage(t *testing.T) {
 	})
 	updated = ownerStream.await("room_updated")
 	snap = updated["snapshot"].(roomSnapshot)
-	if snap.LastMessage == nil || snap.LastMessage.BodyPreview != "[语音] 15s" {
+	if snap.LastMessage == nil || snap.LastMessage.BodyPreview != `[语音] 15"` {
 		t.Fatalf("room_updated should label voice last_message: %+v", snap.LastMessage)
 	}
 }

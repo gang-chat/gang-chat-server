@@ -569,6 +569,7 @@ func (h *Handler) lastMessage(roomID string) (*lastMessagePreview, error) {
 	}
 	return &lastMessagePreview{
 		ID:                id,
+		Type:              messageType,
 		SenderDisplayName: sender,
 		BodyPreview:       lastMessageBodyPreview(messageType, body, attachmentsJSON),
 		CreatedAt:         formatMillis(createdAt),
@@ -638,7 +639,7 @@ func formatVoicePreviewDuration(durationMS int64) string {
 	}
 	totalSeconds := (durationMS + 999) / 1000
 	if totalSeconds < 60 {
-		return strconv.FormatInt(totalSeconds, 10) + "s"
+		return strconv.FormatInt(totalSeconds, 10) + `"`
 	}
 	minutes := totalSeconds / 60
 	seconds := totalSeconds % 60
@@ -646,7 +647,7 @@ func formatVoicePreviewDuration(durationMS int64) string {
 	if seconds < 10 {
 		secondsText = "0" + secondsText
 	}
-	return strconv.FormatInt(minutes, 10) + ":" + secondsText
+	return strconv.FormatInt(minutes, 10) + "'" + secondsText + `"`
 }
 
 func labelledLastMessagePreview(label, name string) string {

@@ -63,6 +63,7 @@ type currentMember struct {
 
 type lastMessagePreview struct {
 	ID                string `json:"id"`
+	Type              string `json:"type"`
 	SenderDisplayName string `json:"sender_display_name"`
 	BodyPreview       string `json:"body_preview"`
 	CreatedAt         string `json:"created_at"`

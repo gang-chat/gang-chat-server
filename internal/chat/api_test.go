@@ -573,7 +573,7 @@ func TestLastMessagePreviewUsesAttachmentLabels(t *testing.T) {
 			},
 		},
 	})
-	assertLastPreview("[语音] 15s")
+	assertLastPreview(`[语音] 15"`)
 
 	api.sendTypedMessage(owner.Token, roomID, "file", "screenshot.png", []any{
 		map[string]any{
@@ -616,6 +616,28 @@ func TestLastMessagePreviewUsesAttachmentLabels(t *testing.T) {
 		},
 	})
 	assertLastPreview("[表情] wave")
+}
+
+func TestLastMessagePreviewIncludesSystemType(t *testing.T) {
+	api := newAPIHarness(t)
+	owner := api.register("system_preview_owner")
+	member := api.register("system_preview_member")
+	room := api.createRoom(owner.Token, map[string]any{"name": "System Preview", "join_policy": "open"})
+	roomID := room["id"].(string)
+
+	status, response := api.request(http.MethodPost, "/rooms/"+roomID+"/join", member.Token, nil)
+	api.requireStatus(status, http.StatusOK, response)
+
+	status, response = api.request(http.MethodGet, "/rooms", owner.Token, nil)
+	api.requireStatus(status, http.StatusOK, response)
+	card := roomCardByID(t, response, roomID)
+	last := card["last_message"].(map[string]any)
+	if last["type"] != systemMessageType {
+		t.Fatalf("system last_message should include type: %v", last)
+	}
+	if last["sender_display_name"] != "system_preview_member" || last["body_preview"] != "加入了房间" {
+		t.Fatalf("system last_message should carry subject and detail: %v", last)
+	}
 }
 
 func TestHistoricalLiveSystemMessagesAreHidden(t *testing.T) {
