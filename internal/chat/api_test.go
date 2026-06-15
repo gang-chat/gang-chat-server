@@ -1061,6 +1061,17 @@ func TestMemberProfileIncludesBioAndRoomLinks(t *testing.T) {
 		t.Fatalf("common room should include target room identity: %v", commonRoom)
 	}
 
+	status, response = api.request(http.MethodGet, "/users/"+alice.User["id"].(string)+"/profile", viewer.Token, nil)
+	api.requireStatus(status, http.StatusOK, response)
+	user = response["profile"].(map[string]any)["user"].(map[string]any)
+	if user["bio"] != "Ships quietly" || user["is_online"] != true {
+		t.Fatalf("global profile should include latest user state: %v", user)
+	}
+	commonRooms = user["common_rooms"].([]any)
+	if len(commonRooms) != 1 || commonRooms[0].(map[string]any)["id"] != room1ID {
+		t.Fatalf("global profile should include viewer-visible common rooms: %v", commonRooms)
+	}
+
 	status, response = api.request(http.MethodGet, "/rooms/"+room1ID+"/members/"+alice.User["id"].(string)+"/profile", super.Token, nil)
 	api.requireStatus(status, http.StatusOK, response)
 	user = response["profile"].(map[string]any)["user"].(map[string]any)

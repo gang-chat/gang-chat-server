@@ -65,6 +65,19 @@ func (h *Handler) getMemberProfile(c *gin.Context) {
 	}})
 }
 
+func (h *Handler) getUserProfile(c *gin.Context) {
+	user, err := h.profileUserSummary(c.Param("user_id"), currentUserID(c))
+	if errors.Is(err, sql.ErrNoRows) {
+		h.jsonError(c, http.StatusNotFound, "not_found", "user not found")
+		return
+	}
+	if err != nil {
+		h.jsonError(c, http.StatusInternalServerError, "internal_error", "failed to read user profile")
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"profile": gin.H{"user": user}})
+}
+
 func (h *Handler) getMyRoomSettings(c *gin.Context) {
 	roomID := c.Param("room_id")
 	if !h.requireMember(c, roomID) {
