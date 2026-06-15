@@ -1267,7 +1267,7 @@ func (h *Handler) roomInvitePayload(inviteID, viewerID string) gin.H {
 	var id, roomID, status, inviterID, inviterUID, inviterUsername string
 	var inviterDisplayName, inviterAvatarURL, inviterDefaultAvatar, inviterRoomDisplayName, inviterRoomRole sql.NullString
 	var rid, name, defaultAvatar, visibility, joinPolicy string
-	var avatarURL sql.NullString
+	var avatarURL, roomDescription, roomCreatedByUserID sql.NullString
 	var createdAt, updatedAt int64
 	var roomExists int
 	err := h.DB.QueryRow(
@@ -1280,6 +1280,8 @@ func (h *Handler) roomInvitePayload(inviteID, viewerID string) gin.H {
 		        COALESCE(r.default_avatar_key, ri.room_default_avatar_key),
 		        COALESCE(r.visibility, ri.room_visibility),
 		        COALESCE(r.join_policy, ri.room_join_policy),
+		        r.description,
+		        r.created_by_user_id,
 		        CASE WHEN r.id IS NULL THEN 0 ELSE 1 END
 		 FROM room_invites ri
 		 JOIN users u ON u.id = ri.inviter_user_id
@@ -1291,20 +1293,11 @@ func (h *Handler) roomInvitePayload(inviteID, viewerID string) gin.H {
 		&id, &roomID, &status, &createdAt, &updatedAt,
 		&inviterID, &inviterUID, &inviterUsername, &inviterDisplayName, &inviterAvatarURL, &inviterDefaultAvatar,
 		&inviterRoomDisplayName, &inviterRoomRole,
-		&rid, &name, &avatarURL, &defaultAvatar, &visibility, &joinPolicy, &roomExists,
+		&rid, &name, &avatarURL, &defaultAvatar, &visibility, &joinPolicy, &roomDescription, &roomCreatedByUserID, &roomExists,
 	)
 	if err != nil {
 		return gin.H{"id": inviteID}
 	}
-	memberCount := 0
-	liveCount := 0
-	if roomExists != 0 {
-		memberCount, _ = h.memberCount(roomID)
-		_, liveCount, _ = h.livePreview(roomID)
-	}
-	var joinedCount int
-	_ = h.DB.QueryRow(`SELECT COUNT(*) FROM room_memberships WHERE room_id = ? AND user_id = ?`, roomID, viewerID).Scan(&joinedCount)
-	joined := joinedCount > 0
 	inviter := summaryFromUserFields(
 		inviterID,
 		inviterUID,
@@ -1329,13 +1322,10 @@ func (h *Handler) roomInvitePayload(inviteID, viewerID string) gin.H {
 	return gin.H{
 		"id": id, "status": status, "created_at": formatMillis(createdAt), "updated_at": formatMillis(updatedAt),
 		"room_exists": roomExists != 0, "invalid_reason": nullableStringFromText(invalidReason),
-		"room": gin.H{
-			"id": roomID, "rid": rid, "name": name,
-			"avatar_url": nullableString(avatarURL), "default_avatar_key": defaultAvatar,
-			"visibility": visibility, "join_policy": joinPolicy,
-			"member_count": memberCount, "live_participant_count": liveCount,
-			"joined": joined, "join_state": h.joinState(roomID, viewerID, joined),
-		},
+		"room": h.roomNotificationRoomPayload(
+			roomID, viewerID, rid, name, defaultAvatar, visibility, joinPolicy,
+			avatarURL, roomDescription, roomCreatedByUserID, roomExists != 0,
+		),
 		"inviter": inviter,
 	}
 }
@@ -1406,13 +1396,14 @@ func (h *Handler) roomApplicationPayload(requestID, viewerID string) gin.H {
 	var reviewerDisplayName, reviewerAvatarURL, reviewerDefaultAvatar, reviewerRoomDisplayName, reviewerRoomRole sql.NullString
 	var reviewedAt sql.NullInt64
 	var rid, name, defaultAvatar, visibility, joinPolicy string
-	var avatarURL sql.NullString
+	var avatarURL, roomDescription, roomCreatedByUserID sql.NullString
 	err := h.DB.QueryRow(
 		`SELECT jr.id, jr.room_id, jr.status, jr.reason, jr.created_at, jr.updated_at,
 		        jr.reviewer_user_id, jr.reviewed_at,
 		        u.id, u.uid, u.username, u.display_name, u.avatar_url, u.default_avatar_key,
 		        rrm.room_display_name, rrm.role,
-		        r.rid, r.name, r.avatar_url, r.default_avatar_key, r.visibility, r.join_policy
+		        r.rid, r.name, r.avatar_url, r.default_avatar_key, r.visibility, r.join_policy,
+		        r.description, r.created_by_user_id
 		 FROM join_requests jr
 		 JOIN rooms r ON r.id = jr.room_id
 		 LEFT JOIN users u ON u.id = jr.reviewer_user_id
@@ -1424,18 +1415,11 @@ func (h *Handler) roomApplicationPayload(requestID, viewerID string) gin.H {
 		&reviewerID, &reviewedAt,
 		&reviewerID, &reviewerUID, &reviewerUsername, &reviewerDisplayName, &reviewerAvatarURL, &reviewerDefaultAvatar,
 		&reviewerRoomDisplayName, &reviewerRoomRole,
-		&rid, &name, &avatarURL, &defaultAvatar, &visibility, &joinPolicy,
+		&rid, &name, &avatarURL, &defaultAvatar, &visibility, &joinPolicy, &roomDescription, &roomCreatedByUserID,
 	)
 	if err != nil {
 		return gin.H{"id": requestID}
 	}
-
-	memberCount, _ := h.memberCount(roomID)
-	onlineCount, _ := h.onlineMemberCount(roomID)
-	_, liveCount, _ := h.livePreview(roomID)
-	var joinedCount int
-	_ = h.DB.QueryRow(`SELECT COUNT(*) FROM room_memberships WHERE room_id = ? AND user_id = ?`, roomID, viewerID).Scan(&joinedCount)
-	joined := joinedCount > 0
 
 	var reviewer any
 	if reviewerID.Valid && reviewerID.String != "" && reviewerUsername.Valid {
@@ -1459,15 +1443,87 @@ func (h *Handler) roomApplicationPayload(requestID, viewerID string) gin.H {
 	return gin.H{
 		"id": id, "status": status, "reason": reason, "created_at": formatMillis(createdAt), "updated_at": formatMillis(updatedAt),
 		"reviewed_at": nullableMillis(reviewedAt),
-		"room": gin.H{
-			"id": roomID, "rid": rid, "name": name,
-			"avatar_url": nullableString(avatarURL), "default_avatar_key": defaultAvatar,
-			"visibility": visibility, "join_policy": joinPolicy,
-			"member_count": memberCount, "online_member_count": onlineCount, "live_participant_count": liveCount,
-			"joined": joined, "join_state": h.joinState(roomID, viewerID, joined),
-		},
+		"room": h.roomNotificationRoomPayload(
+			roomID, viewerID, rid, name, defaultAvatar, visibility, joinPolicy,
+			avatarURL, roomDescription, roomCreatedByUserID, true,
+		),
 		"reviewer": reviewer,
 	}
+}
+
+func (h *Handler) roomNotificationRoomPayload(
+	roomID, viewerID, rid, name, defaultAvatar, visibility, joinPolicy string,
+	avatarURL, description, createdByUserID sql.NullString,
+	roomExists bool,
+) gin.H {
+	memberCount := 0
+	onlineCount := 0
+	liveCount := 0
+	joined := false
+	if roomExists {
+		memberCount, _ = h.memberCount(roomID)
+		onlineCount, _ = h.onlineMemberCount(roomID)
+		_, liveCount, _ = h.livePreview(roomID)
+		var joinedCount int
+		_ = h.DB.QueryRow(`SELECT COUNT(*) FROM room_memberships WHERE room_id = ? AND user_id = ?`, roomID, viewerID).Scan(&joinedCount)
+		joined = joinedCount > 0
+	}
+
+	room := gin.H{
+		"id": roomID, "rid": rid, "name": name,
+		"description": description.String,
+		"avatar_url":  nullableString(avatarURL), "default_avatar_key": defaultAvatar,
+		"visibility": visibility, "join_policy": joinPolicy,
+		"member_count": memberCount, "online_member_count": onlineCount, "live_participant_count": liveCount,
+		"joined": joined, "join_state": h.joinState(roomID, viewerID, joined),
+	}
+
+	if !roomExists {
+		return room
+	}
+	if createdByUserID.Valid && createdByUserID.String != "" {
+		rec := roomRecord{ID: roomID, CreatedByUserID: createdByUserID}
+		if !h.shouldHideRoomCreator(rec) {
+			if summary, err := h.userSummary(createdByUserID.String); err == nil {
+				room["created_by"] = summary
+			}
+		}
+	}
+	if profile, membership, ok := h.roomViewerMembershipPayload(roomID, viewerID); ok {
+		room["personal_profile"] = profile
+		room["my_membership"] = membership
+	}
+	return room
+}
+
+func (h *Handler) roomViewerMembershipPayload(roomID, userID string) (roomPersonalProfile, roomMembership, bool) {
+	var role, notificationLevel string
+	var remarkName, roomDisplayName, roomAvatarURL, roomDefaultAvatarKey sql.NullString
+	var joinedAt int64
+	err := h.DB.QueryRow(
+		`SELECT role, notification_level, remark_name, room_display_name, room_avatar_url,
+		        room_default_avatar_key, joined_at
+		 FROM room_memberships
+		 WHERE room_id = ? AND user_id = ?`,
+		roomID, userID,
+	).Scan(&role, &notificationLevel, &remarkName, &roomDisplayName, &roomAvatarURL, &roomDefaultAvatarKey, &joinedAt)
+	if err != nil {
+		return roomPersonalProfile{}, roomMembership{}, false
+	}
+
+	return roomPersonalProfile{
+			DisplayName:      nullableString(roomDisplayName),
+			AvatarURL:        nullableString(roomAvatarURL),
+			DefaultAvatarKey: nullableString(roomDefaultAvatarKey),
+		}, roomMembership{
+			Role:                 role,
+			JoinedAt:             formatMillis(joinedAt),
+			RemarkName:           nullableString(remarkName),
+			RoomDisplayName:      nullableString(roomDisplayName),
+			RoomAvatarURL:        nullableString(roomAvatarURL),
+			RoomDefaultAvatarKey: nullableString(roomDefaultAvatarKey),
+			NotificationLevel:    notificationLevel,
+		}, true
 }
 
 func cleanJoinRequestReason(value string) string {

@@ -2311,7 +2311,7 @@ func TestRoomApplicationNotifications(t *testing.T) {
 	api := newAPIHarness(t)
 	owner := api.register("application_owner")
 	joiner := api.register("application_joiner")
-	room := api.createRoom(owner.Token, map[string]any{"name": "Application Room"})
+	room := api.createRoom(owner.Token, map[string]any{"name": "Application Room", "description": "Application room bio"})
 	roomID := room["id"].(string)
 
 	status, response := api.request(http.MethodPost, "/rooms/"+roomID+"/join", joiner.Token, map[string]any{
@@ -2335,6 +2335,16 @@ func TestRoomApplicationNotifications(t *testing.T) {
 	}
 	if application["room"].(map[string]any)["name"] != "Application Room" {
 		t.Fatalf("application should include room payload: %v", application)
+	}
+	pendingRoom := application["room"].(map[string]any)
+	if pendingRoom["description"] != "Application room bio" {
+		t.Fatalf("application room should include description: %v", pendingRoom)
+	}
+	if pendingRoom["created_by"].(map[string]any)["id"] != owner.User["id"] {
+		t.Fatalf("application room should include creator: %v", pendingRoom)
+	}
+	if _, ok := pendingRoom["my_membership"]; ok {
+		t.Fatalf("pending application should not include viewer room membership: %v", pendingRoom)
 	}
 
 	status, response = api.request(http.MethodPatch, "/room-applications/"+requestID, joiner.Token, map[string]any{"decision": "withdraw"})
@@ -2372,6 +2382,16 @@ func TestRoomApplicationNotifications(t *testing.T) {
 	}
 	if reviewer["room_role"] != "owner" {
 		t.Fatalf("reviewer should include room role: %v", reviewer)
+	}
+	approvedRoom := application["room"].(map[string]any)
+	if approvedRoom["joined"] != true {
+		t.Fatalf("approved application room should be marked joined: %v", approvedRoom)
+	}
+	if approvedRoom["my_membership"].(map[string]any)["role"] != "member" {
+		t.Fatalf("approved application room should include viewer membership: %v", approvedRoom)
+	}
+	if _, ok := approvedRoom["personal_profile"].(map[string]any); !ok {
+		t.Fatalf("approved application room should include viewer room profile: %v", approvedRoom)
 	}
 }
 
