@@ -621,6 +621,28 @@ func TestLastMessagePreviewUsesAttachmentLabels(t *testing.T) {
 	assertLastPreview("[表情] wave")
 }
 
+func TestLastMessagePreviewUsesRoomDisplayName(t *testing.T) {
+	api := newAPIHarness(t)
+	owner := api.register("last_preview_room_name_owner")
+	room := api.createRoom(owner.Token, map[string]any{"name": "Preview Name Room", "join_policy": "open"})
+	roomID := room["id"].(string)
+
+	status, response := api.request(http.MethodPatch, "/rooms/"+roomID+"/me", owner.Token, map[string]any{
+		"room_display_name": "Owner In Room",
+	})
+	api.requireStatus(status, http.StatusOK, response)
+
+	api.sendMessage(owner.Token, roomID, "hello from room profile")
+
+	status, response = api.request(http.MethodGet, "/rooms", owner.Token, nil)
+	api.requireStatus(status, http.StatusOK, response)
+	roomCard := roomCardByID(t, response, roomID)
+	last := roomCard["last_message"].(map[string]any)
+	if last["sender_display_name"] != "Owner In Room" {
+		t.Fatalf("last_message should use room display name, got %v", last)
+	}
+}
+
 func TestLastMessagePreviewIncludesSystemType(t *testing.T) {
 	api := newAPIHarness(t)
 	owner := api.register("system_preview_owner")

@@ -553,9 +553,12 @@ func (h *Handler) lastMessage(roomID string) (*lastMessagePreview, error) {
 	var id, sender, messageType, body, attachmentsJSON string
 	var createdAt int64
 	err := h.DB.QueryRow(
-		`SELECT m.id, u.username, m.type, m.body, m.attachments_json, m.created_at
+		`SELECT m.id,
+		        COALESCE(NULLIF(sender_rm.room_display_name, ''), NULLIF(u.display_name, ''), u.username),
+		        m.type, m.body, m.attachments_json, m.created_at
 		 FROM messages m
 		 JOIN users u ON u.id = m.sender_user_id
+		 LEFT JOIN room_memberships sender_rm ON sender_rm.room_id = m.room_id AND sender_rm.user_id = m.sender_user_id
 		 WHERE m.room_id = ? AND `+visibleMessageSQL("m")+`
 		 ORDER BY m.created_at DESC
 		 LIMIT 1`,
