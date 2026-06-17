@@ -172,10 +172,10 @@ func (h *Handler) searchMessages(userID, query string, limit int) ([]messageSear
 		  AND (
 		    instr(lower(m.body), lower(?)) > 0
 		    OR instr(lower(r.name), lower(?)) > 0
-		    OR instr(lower(COALESCE(r.rid, '')), lower(?)) > 0
+		    OR COALESCE(r.rid, '') = ?
 		    OR instr(lower(u.username), lower(?)) > 0
 		    OR instr(lower(COALESCE(u.display_name, '')), lower(?)) > 0
-		    OR instr(lower(COALESCE(u.uid, '')), lower(?)) > 0
+		    OR COALESCE(u.uid, '') = ?
 		    OR instr(lower(COALESCE(sender_rm.room_display_name, '')), lower(?)) > 0
 		  )`,
 		[]any{query, query, query, query, query, query, query},

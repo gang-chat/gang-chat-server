@@ -987,6 +987,58 @@ func TestSearchAllReturnsCategoriesAndRespectsMembership(t *testing.T) {
 	if messageHit["message"].(map[string]any)["sender"].(map[string]any)["username"] != "search_all_owner" {
 		t.Fatalf("username message search should return sender context: %v", messageHit)
 	}
+
+	teamRID := teamRoom["rid"].(string)
+	status, response = api.request(http.MethodGet, "/search?q="+teamRID+"&limit=5", member.Token, nil)
+	api.requireStatus(status, http.StatusOK, response)
+	messages = response["messages"].([]any)
+	if len(messages) != 1 {
+		t.Fatalf("message search should match the complete room rid: %v", response)
+	}
+	messageHit = messages[0].(map[string]any)
+	if messageHit["room"].(map[string]any)["id"] != teamRoomID {
+		t.Fatalf("rid message search should keep room context: %v", messageHit)
+	}
+
+	status, response = api.request(http.MethodGet, "/rooms/search?q="+teamRID+"&limit=5", member.Token, nil)
+	api.requireStatus(status, http.StatusOK, response)
+	roomsByRID := response["rooms"].([]any)
+	if len(roomsByRID) != 1 || roomsByRID[0].(map[string]any)["id"] != teamRoomID {
+		t.Fatalf("room search should match the complete room rid: %v", response)
+	}
+
+	partialTeamRID := teamRID[:len(teamRID)-1]
+	status, response = api.request(http.MethodGet, "/search?q="+partialTeamRID+"&limit=5", member.Token, nil)
+	api.requireStatus(status, http.StatusOK, response)
+	messages = response["messages"].([]any)
+	if len(messages) != 0 {
+		t.Fatalf("message search should not partially match room rid, got %d: %v", len(messages), response)
+	}
+	status, response = api.request(http.MethodGet, "/rooms/search?q="+partialTeamRID+"&limit=5", member.Token, nil)
+	api.requireStatus(status, http.StatusOK, response)
+	if got := len(response["rooms"].([]any)); got != 0 {
+		t.Fatalf("room search should not partially match room rid, got %d: %v", got, response)
+	}
+
+	ownerUID := owner.User["uid"].(string)
+	status, response = api.request(http.MethodGet, "/search?q="+ownerUID+"&limit=5", member.Token, nil)
+	api.requireStatus(status, http.StatusOK, response)
+	messages = response["messages"].([]any)
+	if len(messages) != 1 {
+		t.Fatalf("message search should match the complete sender uid: %v", response)
+	}
+	messageHit = messages[0].(map[string]any)
+	if messageHit["message"].(map[string]any)["sender"].(map[string]any)["uid"] != ownerUID {
+		t.Fatalf("uid message search should return sender context: %v", messageHit)
+	}
+
+	partialOwnerUID := ownerUID[:len(ownerUID)-1]
+	status, response = api.request(http.MethodGet, "/search?q="+partialOwnerUID+"&limit=5", member.Token, nil)
+	api.requireStatus(status, http.StatusOK, response)
+	messages = response["messages"].([]any)
+	if len(messages) != 0 {
+		t.Fatalf("message search should not partially match sender uid, got %d: %v", len(messages), response)
+	}
 }
 
 func TestUserSearchIncludesSuperuserFlag(t *testing.T) {
@@ -1006,6 +1058,22 @@ func TestUserSearchIncludesSuperuserFlag(t *testing.T) {
 	users = response["users"].([]any)
 	if len(users) == 0 || users[0].(map[string]any)["id"] != normal.User["id"] || users[0].(map[string]any)["is_superuser"] != false {
 		t.Fatalf("user search should include normal superuser flag: %v", response)
+	}
+
+	normalUID := normal.User["uid"].(string)
+	status, response = api.request(http.MethodGet, "/users/search?q="+normalUID+"&limit=20", normal.Token, nil)
+	api.requireStatus(status, http.StatusOK, response)
+	users = response["users"].([]any)
+	if len(users) != 1 || users[0].(map[string]any)["id"] != normal.User["id"] {
+		t.Fatalf("user search should match the complete uid: %v", response)
+	}
+
+	partialNormalUID := normalUID[:len(normalUID)-1]
+	status, response = api.request(http.MethodGet, "/users/search?q="+partialNormalUID+"&limit=20", normal.Token, nil)
+	api.requireStatus(status, http.StatusOK, response)
+	users = response["users"].([]any)
+	if len(users) != 0 {
+		t.Fatalf("user search should not partially match uid, got %d: %v", len(users), response)
 	}
 }
 
