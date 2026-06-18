@@ -929,6 +929,15 @@ func TestSearchAllReturnsCategoriesAndRespectsMembership(t *testing.T) {
 
 	status, response = api.request(http.MethodGet, "/search?q=Alpha&limit=5", member.Token, nil)
 	api.requireStatus(status, http.StatusOK, response)
+	initialCursors, ok := response["next_cursors"].(map[string]any)
+	if !ok {
+		t.Fatalf("q+limit search response should include next_cursors: %v", response)
+	}
+	for _, category := range []string{"my_rooms", "public_rooms", "messages", "files"} {
+		if _, ok := initialCursors[category]; !ok {
+			t.Fatalf("q+limit next_cursors should include %s: %v", category, response)
+		}
+	}
 
 	myRooms := response["my_rooms"].([]any)
 	if len(myRooms) != 1 || myRooms[0].(map[string]any)["id"] != teamRoomID {
@@ -1060,6 +1069,112 @@ func TestSearchAllReturnsCategoriesAndRespectsMembership(t *testing.T) {
 	messages = response["messages"].([]any)
 	if len(messages) != 0 {
 		t.Fatalf("message search should not partially match sender uid, got %d: %v", len(messages), response)
+	}
+}
+
+func TestSearchAllPaginatesMessagesIndependently(t *testing.T) {
+	api := newAPIHarness(t)
+	owner := api.register("search_page_owner")
+	discoverer := api.register("search_page_discoverer")
+	room := api.createRoom(owner.Token, map[string]any{
+		"name":        "Cursor needle-paging Room",
+		"join_policy": "open",
+	})
+	roomID := room["id"].(string)
+	api.createRoom(discoverer.Token, map[string]any{
+		"name":        "needle-paging Public Room",
+		"visibility":  "public",
+		"join_policy": "open",
+	})
+	api.sendTypedMessage(owner.Token, roomID, "file", "needle-paging.pdf", []any{
+		map[string]any{
+			"type": "file",
+			"name": "needle-paging.pdf",
+			"asset": map[string]any{
+				"id":        "asset_needle_paging",
+				"url":       "/assets/needle-paging.pdf",
+				"mime_type": "application/pdf",
+				"filename":  "needle-paging.pdf",
+			},
+		},
+	})
+
+	oldest := api.sendMessage(owner.Token, roomID, "needle-paging oldest")
+	middle := api.sendMessage(owner.Token, roomID, "needle-paging middle")
+	newest := api.sendMessage(owner.Token, roomID, "needle-paging newest")
+	for _, item := range []struct {
+		message   map[string]any
+		createdAt int64
+	}{
+		{message: oldest, createdAt: 1000},
+		{message: middle, createdAt: 2000},
+		{message: newest, createdAt: 3000},
+	} {
+		if _, err := api.db.Exec(`UPDATE messages SET created_at = ? WHERE id = ?`, item.createdAt, item.message["id"].(string)); err != nil {
+			t.Fatalf("set message created_at: %v", err)
+		}
+	}
+
+	status, response := api.request(http.MethodGet, "/search?q=needle-paging&limit=1&categories=messages,,unknown", owner.Token, nil)
+	api.requireStatus(status, http.StatusOK, response)
+	messages := response["messages"].([]any)
+	if len(messages) != 1 || messages[0].(map[string]any)["message"].(map[string]any)["id"] != newest["id"] {
+		t.Fatalf("first message page should return newest hit only: %v", response)
+	}
+	cursors, ok := response["next_cursors"].(map[string]any)
+	if !ok {
+		t.Fatalf("search response missing next_cursors: %v", response)
+	}
+	messagesCursor, ok := cursors["messages"].(string)
+	if !ok || messagesCursor == "" {
+		t.Fatalf("limit=1 message search should return a message cursor: %v", response)
+	}
+	for _, category := range []string{"my_rooms", "public_rooms", "files"} {
+		if _, ok := cursors[category]; !ok {
+			t.Fatalf("next_cursors should include %s: %v", category, response)
+		}
+		if cursors[category] != nil {
+			t.Fatalf("unrequested category %s should not advance: %v", category, response)
+		}
+		items, ok := response[category].([]any)
+		if !ok || len(items) != 0 {
+			t.Fatalf("unrequested category %s should remain an empty array: %v", category, response)
+		}
+	}
+
+	status, response = api.request(http.MethodGet, "/search?q=needle-paging&limit=1&categories=messages&messages_cursor="+messagesCursor, owner.Token, nil)
+	api.requireStatus(status, http.StatusOK, response)
+	messages = response["messages"].([]any)
+	if len(messages) != 1 || messages[0].(map[string]any)["message"].(map[string]any)["id"] != middle["id"] {
+		t.Fatalf("message cursor should return the next matching message only: %v", response)
+	}
+	cursors, ok = response["next_cursors"].(map[string]any)
+	if !ok {
+		t.Fatalf("cursor response missing next_cursors: %v", response)
+	}
+	if next, ok := cursors["messages"].(string); !ok || next == "" {
+		t.Fatalf("second page should still expose the next message cursor: %v", response)
+	}
+	for _, category := range []string{"my_rooms", "public_rooms", "files"} {
+		if _, ok := cursors[category]; !ok {
+			t.Fatalf("cursor response next_cursors should include %s: %v", category, response)
+		}
+		if cursors[category] != nil {
+			t.Fatalf("cursor request should not advance unrequested category %s: %v", category, response)
+		}
+		items, ok := response[category].([]any)
+		if !ok || len(items) != 0 {
+			t.Fatalf("cursor request should keep unrequested category %s empty: %v", category, response)
+		}
+	}
+
+	status, response = api.request(http.MethodGet, "/search?q=needle-paging&limit=1&categories=unknown,,", owner.Token, nil)
+	api.requireStatus(status, http.StatusOK, response)
+	for _, category := range []string{"my_rooms", "public_rooms", "messages", "files"} {
+		items, ok := response[category].([]any)
+		if !ok || len(items) != 1 {
+			t.Fatalf("search with no valid categories should fall back to all categories; %s got %v in %v", category, response[category], response)
+		}
 	}
 }
 
