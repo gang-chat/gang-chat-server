@@ -81,6 +81,12 @@ func (h *Handler) searchAll(c *gin.Context) {
 		searchCategoryMessages:    nil,
 		searchCategoryFiles:       nil,
 	}
+	totalCounts := gin.H{
+		searchCategoryMyRooms:     0,
+		searchCategoryPublicRooms: 0,
+		searchCategoryMessages:    0,
+		searchCategoryFiles:       0,
+	}
 
 	myRooms := make([]roomCard, 0)
 	publicRooms := make([]publicRoom, 0)
@@ -88,38 +94,43 @@ func (h *Handler) searchAll(c *gin.Context) {
 	files := make([]messageSearchResult, 0)
 	var err error
 	var nextCursor any
+	var totalCount int
 
 	if categories.myRooms {
-		myRooms, nextCursor, err = h.searchMyRooms(userID, query, limit, decodeOffsetCursor(c.Query(searchParamMyRoomsCursor)))
+		myRooms, nextCursor, totalCount, err = h.searchMyRooms(userID, query, limit, decodeOffsetCursor(c.Query(searchParamMyRoomsCursor)))
 		if err != nil {
 			h.jsonError(c, http.StatusInternalServerError, "internal_error", "failed to search my rooms")
 			return
 		}
 		nextCursors[searchCategoryMyRooms] = nextCursor
+		totalCounts[searchCategoryMyRooms] = totalCount
 	}
 	if categories.publicRooms {
-		publicRooms, nextCursor, err = h.searchPublicRooms(userID, query, limit, decodeOffsetCursor(c.Query(searchParamPublicRoomsCursor)))
+		publicRooms, nextCursor, totalCount, err = h.searchPublicRooms(userID, query, limit, decodeOffsetCursor(c.Query(searchParamPublicRoomsCursor)))
 		if err != nil {
 			h.jsonError(c, http.StatusInternalServerError, "internal_error", "failed to search public rooms")
 			return
 		}
 		nextCursors[searchCategoryPublicRooms] = nextCursor
+		totalCounts[searchCategoryPublicRooms] = totalCount
 	}
 	if categories.messages {
-		messages, nextCursor, err = h.searchMessages(userID, query, limit, decodeOffsetCursor(c.Query(searchParamMessagesCursor)))
+		messages, nextCursor, totalCount, err = h.searchMessages(userID, query, limit, decodeOffsetCursor(c.Query(searchParamMessagesCursor)))
 		if err != nil {
 			h.jsonError(c, http.StatusInternalServerError, "internal_error", "failed to search messages")
 			return
 		}
 		nextCursors[searchCategoryMessages] = nextCursor
+		totalCounts[searchCategoryMessages] = totalCount
 	}
 	if categories.files {
-		files, nextCursor, err = h.searchFiles(userID, query, limit, decodeOffsetCursor(c.Query(searchParamFilesCursor)))
+		files, nextCursor, totalCount, err = h.searchFiles(userID, query, limit, decodeOffsetCursor(c.Query(searchParamFilesCursor)))
 		if err != nil {
 			h.jsonError(c, http.StatusInternalServerError, "internal_error", "failed to search files")
 			return
 		}
 		nextCursors[searchCategoryFiles] = nextCursor
+		totalCounts[searchCategoryFiles] = totalCount
 	}
 
 	c.JSON(http.StatusOK, gin.H{
@@ -128,14 +139,25 @@ func (h *Handler) searchAll(c *gin.Context) {
 		searchCategoryMessages:    messages,
 		searchCategoryFiles:       files,
 		"next_cursors":            nextCursors,
+		"total_counts":            totalCounts,
 	})
 }
 
-func (h *Handler) searchMyRooms(userID, query string, limit, offset int) ([]roomCard, any, error) {
+func (h *Handler) searchMyRooms(userID, query string, limit, offset int) ([]roomCard, any, int, error) {
 	fetch := limit + 1
+	var total int
 	var rows *sql.Rows
 	var err error
 	if h.isSuperuser(userID) {
+		if err := h.DB.QueryRow(
+			`SELECT COUNT(*)
+			 FROM rooms r
+			 WHERE r.rid = ?
+			    OR instr(lower(r.name), lower(?)) > 0`,
+			query, query,
+		).Scan(&total); err != nil {
+			return nil, nil, 0, err
+		}
 		rows, err = h.DB.Query(
 			`SELECT r.id, r.rid, r.name, r.avatar_url, r.default_avatar_key, r.created_by_user_id,
 			        r.visibility, r.join_policy, r.ai_voice_announce_enabled,
@@ -149,6 +171,21 @@ func (h *Handler) searchMyRooms(userID, query string, limit, offset int) ([]room
 			query, query, fetch, offset,
 		)
 	} else {
+		if err := h.DB.QueryRow(
+			`SELECT COUNT(*)
+			 FROM rooms r
+			 JOIN room_memberships rm ON rm.room_id = r.id
+			 WHERE rm.user_id = ?
+			   AND (
+			     r.rid = ?
+			     OR instr(lower(r.name), lower(?)) > 0
+			     OR instr(lower(COALESCE(rm.remark_name, '')), lower(?)) > 0
+			     OR instr(lower(COALESCE(rm.room_display_name, '')), lower(?)) > 0
+			   )`,
+			userID, query, query, query, query,
+		).Scan(&total); err != nil {
+			return nil, nil, 0, err
+		}
 		rows, err = h.DB.Query(
 			`SELECT r.id, r.rid, r.name, r.avatar_url, r.default_avatar_key, r.created_by_user_id,
 			        r.visibility, r.join_policy, r.ai_voice_announce_enabled,
@@ -169,7 +206,7 @@ func (h *Handler) searchMyRooms(userID, query string, limit, offset int) ([]room
 		)
 	}
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, 0, err
 	}
 	defer rows.Close()
 
@@ -177,27 +214,38 @@ func (h *Handler) searchMyRooms(userID, query string, limit, offset int) ([]room
 	for rows.Next() {
 		rec, err := scanRoomRecord(rows)
 		if err != nil {
-			return nil, nil, err
+			return nil, nil, 0, err
 		}
 		card, err := h.buildRoomCard(rec, userID)
 		if err != nil {
-			return nil, nil, err
+			return nil, nil, 0, err
 		}
 		rooms = append(rooms, card)
 	}
 	if err := rows.Err(); err != nil {
-		return nil, nil, err
+		return nil, nil, 0, err
 	}
 	rooms, nextCursor := trimSearchPage(rooms, limit, offset)
-	return rooms, nextCursor, nil
+	return rooms, nextCursor, total, nil
 }
 
-func (h *Handler) searchPublicRooms(userID, query string, limit, offset int) ([]publicRoom, any, error) {
+func (h *Handler) searchPublicRooms(userID, query string, limit, offset int) ([]publicRoom, any, int, error) {
 	fetch := limit + 1
 	superuser := h.isSuperuser(userID)
 	visibilityFilter := `(r.rid = ? OR (r.visibility = 'public' AND instr(lower(r.name), lower(?)) > 0))`
 	if superuser {
 		visibilityFilter = `(r.rid = ? OR instr(lower(r.name), lower(?)) > 0)`
+	}
+	var total int
+	if err := h.DB.QueryRow(
+		`SELECT COUNT(*)
+		 FROM rooms r
+		 LEFT JOIN room_memberships rm ON rm.room_id = r.id AND rm.user_id = ?
+		 WHERE `+visibilityFilter+`
+		   AND rm.user_id IS NULL`,
+		userID, query, query,
+	).Scan(&total); err != nil {
+		return nil, nil, 0, err
 	}
 	rows, err := h.DB.Query(
 		`SELECT r.id, r.rid, r.name, r.avatar_url, r.default_avatar_key, r.created_by_user_id,
@@ -214,7 +262,7 @@ func (h *Handler) searchPublicRooms(userID, query string, limit, offset int) ([]
 		userID, query, query, fetch, offset,
 	)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, 0, err
 	}
 	defer rows.Close()
 
@@ -222,19 +270,19 @@ func (h *Handler) searchPublicRooms(userID, query string, limit, offset int) ([]
 	for rows.Next() {
 		rec, joined, err := scanPublicRoomRecord(rows)
 		if err != nil {
-			return nil, nil, err
+			return nil, nil, 0, err
 		}
 		memberCount, err := h.memberCount(rec.ID)
 		if err != nil {
-			return nil, nil, err
+			return nil, nil, 0, err
 		}
 		onlineMemberCount, err := h.onlineMemberCount(rec.ID)
 		if err != nil {
-			return nil, nil, err
+			return nil, nil, 0, err
 		}
 		_, liveCount, err := h.livePreview(rec.ID)
 		if err != nil {
-			return nil, nil, err
+			return nil, nil, 0, err
 		}
 		rooms = append(rooms, publicRoom{
 			ID:                   rec.ID,
@@ -253,13 +301,13 @@ func (h *Handler) searchPublicRooms(userID, query string, limit, offset int) ([]
 		})
 	}
 	if err := rows.Err(); err != nil {
-		return nil, nil, err
+		return nil, nil, 0, err
 	}
 	rooms, nextCursor := trimSearchPage(rooms, limit, offset)
-	return rooms, nextCursor, nil
+	return rooms, nextCursor, total, nil
 }
 
-func (h *Handler) searchMessages(userID, query string, limit, offset int) ([]messageSearchResult, any, error) {
+func (h *Handler) searchMessages(userID, query string, limit, offset int) ([]messageSearchResult, any, int, error) {
 	return h.searchMessageRows(
 		userID,
 		`m.type NOT IN ('file', 'audio', 'system')
@@ -278,7 +326,7 @@ func (h *Handler) searchMessages(userID, query string, limit, offset int) ([]mes
 	)
 }
 
-func (h *Handler) searchFiles(userID, query string, limit, offset int) ([]messageSearchResult, any, error) {
+func (h *Handler) searchFiles(userID, query string, limit, offset int) ([]messageSearchResult, any, int, error) {
 	return h.searchMessageRows(
 		userID,
 		`EXISTS (
@@ -297,7 +345,7 @@ func (h *Handler) searchFiles(userID, query string, limit, offset int) ([]messag
 	)
 }
 
-func (h *Handler) searchMessageRows(userID, predicate string, predicateArgs []any, limit, offset int) ([]messageSearchResult, any, error) {
+func (h *Handler) searchMessageRows(userID, predicate string, predicateArgs []any, limit, offset int) ([]messageSearchResult, any, int, error) {
 	fetch := limit + 1
 	accessJoin := `JOIN room_memberships rm ON rm.room_id = m.room_id AND rm.user_id = ?`
 	args := []any{userID}
@@ -306,6 +354,22 @@ func (h *Handler) searchMessageRows(userID, predicate string, predicateArgs []an
 		args = []any{}
 	}
 	args = append(args, predicateArgs...)
+
+	var total int
+	if err := h.DB.QueryRow(
+		`SELECT COUNT(*)
+		 FROM messages m
+		 JOIN users u ON u.id = m.sender_user_id
+		 JOIN rooms r ON r.id = m.room_id
+		 LEFT JOIN room_memberships sender_rm ON sender_rm.room_id = m.room_id AND sender_rm.user_id = m.sender_user_id
+		 `+accessJoin+`
+		 WHERE m.is_recalled = 0
+		   AND m.is_force_deleted = 0
+		   AND `+predicate,
+		args...,
+	).Scan(&total); err != nil {
+		return nil, nil, 0, err
+	}
 	args = append(args, fetch, offset)
 
 	rows, err := h.DB.Query(
@@ -330,7 +394,7 @@ func (h *Handler) searchMessageRows(userID, predicate string, predicateArgs []an
 		args...,
 	)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, 0, err
 	}
 	defer rows.Close()
 
@@ -338,7 +402,7 @@ func (h *Handler) searchMessageRows(userID, predicate string, predicateArgs []an
 	for rows.Next() {
 		msg, room, err := scanSearchMessage(rows)
 		if err != nil {
-			return nil, nil, err
+			return nil, nil, 0, err
 		}
 		results = append(results, messageSearchResult{
 			Room:    room,
@@ -346,10 +410,10 @@ func (h *Handler) searchMessageRows(userID, predicate string, predicateArgs []an
 		})
 	}
 	if err := rows.Err(); err != nil {
-		return nil, nil, err
+		return nil, nil, 0, err
 	}
 	results, nextCursor := trimSearchPage(results, limit, offset)
-	return results, nextCursor, nil
+	return results, nextCursor, total, nil
 }
 
 func trimSearchPage[T any](results []T, limit, offset int) ([]T, any) {

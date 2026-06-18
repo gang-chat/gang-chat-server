@@ -938,6 +938,15 @@ func TestSearchAllReturnsCategoriesAndRespectsMembership(t *testing.T) {
 			t.Fatalf("q+limit next_cursors should include %s: %v", category, response)
 		}
 	}
+	initialTotals, ok := response["total_counts"].(map[string]any)
+	if !ok {
+		t.Fatalf("q+limit search response should include total_counts: %v", response)
+	}
+	for _, category := range []string{"my_rooms", "public_rooms", "messages", "files"} {
+		if initialTotals[category] != float64(1) {
+			t.Fatalf("q+limit total_counts[%s] should be 1: %v", category, response)
+		}
+	}
 
 	myRooms := response["my_rooms"].([]any)
 	if len(myRooms) != 1 || myRooms[0].(map[string]any)["id"] != teamRoomID {
@@ -1129,6 +1138,13 @@ func TestSearchAllPaginatesMessagesIndependently(t *testing.T) {
 	if !ok || messagesCursor == "" {
 		t.Fatalf("limit=1 message search should return a message cursor: %v", response)
 	}
+	totals, ok := response["total_counts"].(map[string]any)
+	if !ok {
+		t.Fatalf("search response missing total_counts: %v", response)
+	}
+	if totals["messages"] != float64(3) {
+		t.Fatalf("message total count should include all matching messages: %v", response)
+	}
 	for _, category := range []string{"my_rooms", "public_rooms", "files"} {
 		if _, ok := cursors[category]; !ok {
 			t.Fatalf("next_cursors should include %s: %v", category, response)
@@ -1139,6 +1155,9 @@ func TestSearchAllPaginatesMessagesIndependently(t *testing.T) {
 		items, ok := response[category].([]any)
 		if !ok || len(items) != 0 {
 			t.Fatalf("unrequested category %s should remain an empty array: %v", category, response)
+		}
+		if totals[category] != float64(0) {
+			t.Fatalf("unrequested category %s should keep zero total count: %v", category, response)
 		}
 	}
 
@@ -1155,6 +1174,13 @@ func TestSearchAllPaginatesMessagesIndependently(t *testing.T) {
 	if next, ok := cursors["messages"].(string); !ok || next == "" {
 		t.Fatalf("second page should still expose the next message cursor: %v", response)
 	}
+	totals, ok = response["total_counts"].(map[string]any)
+	if !ok {
+		t.Fatalf("cursor response missing total_counts: %v", response)
+	}
+	if totals["messages"] != float64(3) {
+		t.Fatalf("cursor response should keep full message total count: %v", response)
+	}
 	for _, category := range []string{"my_rooms", "public_rooms", "files"} {
 		if _, ok := cursors[category]; !ok {
 			t.Fatalf("cursor response next_cursors should include %s: %v", category, response)
@@ -1166,6 +1192,9 @@ func TestSearchAllPaginatesMessagesIndependently(t *testing.T) {
 		if !ok || len(items) != 0 {
 			t.Fatalf("cursor request should keep unrequested category %s empty: %v", category, response)
 		}
+		if totals[category] != float64(0) {
+			t.Fatalf("cursor request should keep unrequested category %s zero total count: %v", category, response)
+		}
 	}
 
 	status, response = api.request(http.MethodGet, "/search?q=needle-paging&limit=1&categories=unknown,,", owner.Token, nil)
@@ -1174,6 +1203,21 @@ func TestSearchAllPaginatesMessagesIndependently(t *testing.T) {
 		items, ok := response[category].([]any)
 		if !ok || len(items) != 1 {
 			t.Fatalf("search with no valid categories should fall back to all categories; %s got %v in %v", category, response[category], response)
+		}
+	}
+	totals, ok = response["total_counts"].(map[string]any)
+	if !ok {
+		t.Fatalf("fallback response missing total_counts: %v", response)
+	}
+	wantTotals := map[string]float64{
+		"my_rooms":     1,
+		"public_rooms": 1,
+		"messages":     3,
+		"files":        1,
+	}
+	for category, want := range wantTotals {
+		if totals[category] != want {
+			t.Fatalf("fallback total_counts[%s] got %v want %v in %v", category, totals[category], want, response)
 		}
 	}
 }
