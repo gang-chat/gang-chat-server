@@ -10,13 +10,16 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/tencentyun/cos-go-sdk-v5"
 	"github.com/zhuangkaiyi/gang-chat/server/internal/config"
 )
 
 const defaultAssetCacheControl = "public, max-age=31536000, immutable"
+const defaultAssetCacheMaxAgeSeconds int64 = 31536000
 
 type AssetStorage struct {
 	cacheDir     string
@@ -37,7 +40,8 @@ func NewAssetStorage(cfg *config.Config) (*AssetStorage, error) {
 	backend := ""
 	objectPrefix := "assets"
 	publicBase := ""
-	cacheControl := defaultAssetCacheControl
+	cacheControl := ""
+	cacheMaxAgeSeconds := defaultAssetCacheMaxAgeSeconds
 	if cfg != nil {
 		if cfg.AssetDir != "" {
 			cacheDir = cfg.AssetDir
@@ -54,6 +58,12 @@ func NewAssetStorage(cfg *config.Config) (*AssetStorage, error) {
 		publicBase = strings.TrimRight(strings.TrimSpace(cfg.AssetPublicBaseURL), "/")
 		if cfg.AssetCacheControl != "" {
 			cacheControl = strings.TrimSpace(cfg.AssetCacheControl)
+		}
+		if cfg.AssetCacheTTLSeconds > 0 {
+			cacheMaxAgeSeconds = cfg.AssetCacheTTLSeconds
+		}
+		if cacheControl == "" {
+			cacheControl = assetCacheControl(cacheMaxAgeSeconds)
 		}
 	}
 
@@ -86,6 +96,39 @@ func (s *AssetStorage) CacheControl() string {
 		return defaultAssetCacheControl
 	}
 	return s.cacheControl
+}
+
+func (s *AssetStorage) ApplyCacheHeaders(header http.Header, now time.Time) {
+	if header == nil {
+		return
+	}
+	cacheControl := s.CacheControl()
+	header.Set("Cache-Control", cacheControl)
+	maxAge := cacheMaxAge(cacheControl)
+	if maxAge > 0 {
+		header.Set("Expires", now.UTC().Add(time.Duration(maxAge)*time.Second).Format(http.TimeFormat))
+	}
+}
+
+func assetCacheControl(maxAgeSeconds int64) string {
+	if maxAgeSeconds <= 0 {
+		maxAgeSeconds = defaultAssetCacheMaxAgeSeconds
+	}
+	return "public, max-age=" + strconv.FormatInt(maxAgeSeconds, 10) + ", immutable"
+}
+
+func cacheMaxAge(cacheControl string) int64 {
+	for _, part := range strings.Split(cacheControl, ",") {
+		part = strings.TrimSpace(strings.ToLower(part))
+		if strings.HasPrefix(part, "max-age=") {
+			value := strings.TrimSpace(strings.TrimPrefix(part, "max-age="))
+			maxAge, err := strconv.ParseInt(value, 10, 64)
+			if err == nil && maxAge > 0 {
+				return maxAge
+			}
+		}
+	}
+	return 0
 }
 
 func (s *AssetStorage) RemoteEnabled() bool {

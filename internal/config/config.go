@@ -18,33 +18,34 @@ const (
 )
 
 type Config struct {
-	Bind                   string
-	DatabaseURL            string
-	JWTSecret              string
-	AccessTokenTTLSeconds  int64
-	RefreshTokenTTLSeconds int64
-	LoginMaxAttempts       int
-	LoginWindowSeconds     int64
-	AssetDir               string
-	StorageBackend         string
-	AssetPublicBaseURL     string
-	AssetObjectPrefix      string
-	AssetCacheControl      string
-	AssetUploadMaxBytes    int64
-	ImageUploadMaxBytes    int64
-	COSBucket              string
-	COSRegion              string
-	COSBucketURL           string
-	COSSecretID            string
-	COSSecretKey           string
-	COSSessionToken        string
-	COSObjectACL           string
-	GeoIPDatabasePath      string
-	TrustedProxies         []string
-	AllowedOrigins         []string
-	LiveKitHost            string
-	LiveKitAPIKey          string
-	LiveKitAPISecret       string
+	Bind                     string
+	DatabaseURL              string
+	JWTSecret                string
+	AccessTokenTTLSeconds    int64
+	RefreshTokenTTLSeconds   int64
+	LoginMaxAttempts         int
+	LoginWindowSeconds       int64
+	AssetDir                 string
+	StorageBackend           string
+	AssetPublicBaseURL       string
+	AssetObjectPrefix        string
+	AssetCacheControl        string
+	AssetCacheTTLSeconds     int64
+	AssetUploadMaxBytes      int64
+	ImageUploadMaxBytes      int64
+	COSBucket                string
+	COSRegion                string
+	COSBucketURL             string
+	COSSecretID              string
+	COSSecretKey             string
+	COSSessionToken          string
+	COSObjectACL             string
+	GeoIPDatabasePath        string
+	TrustedProxies           []string
+	AllowedOrigins           []string
+	LiveKitHost              string
+	LiveKitAPIKey            string
+	LiveKitAPISecret         string
 	FFmpegPath               string
 	MusicBoxDir              string
 	MusicBoxMaxBytesPerRoom  int64
@@ -95,33 +96,34 @@ func parseList(value string) []string {
 
 func Load() *Config {
 	cfg := &Config{
-		Bind:                   envOr("GANG_BIND", "127.0.0.1:21116"),
-		DatabaseURL:            envOr("GANG_DATABASE_URL", "gang-chat.db"),
-		JWTSecret:              envOr("GANG_JWT_SECRET", ""),
-		AccessTokenTTLSeconds:  envIntOr("GANG_ACCESS_TOKEN_TTL", 900),
-		RefreshTokenTTLSeconds: envIntOr("GANG_REFRESH_TOKEN_TTL", 2592000),
-		LoginMaxAttempts:       int(envIntOr("GANG_LOGIN_MAX_ATTEMPTS", 5)),
-		LoginWindowSeconds:     envIntOr("GANG_LOGIN_WINDOW_SECONDS", 900),
-		AssetDir:               envOr("GANG_ASSET_DIR", "assets"),
-		StorageBackend:         envOr("GANG_STORAGE_BACKEND", ""),
-		AssetPublicBaseURL:     envOr("GANG_ASSET_PUBLIC_BASE_URL", ""),
-		AssetObjectPrefix:      envOr("GANG_ASSET_OBJECT_PREFIX", "assets"),
-		AssetCacheControl:      envOr("GANG_ASSET_CACHE_CONTROL", "public, max-age=31536000, immutable"),
-		AssetUploadMaxBytes:    envIntOr("GANG_ASSET_UPLOAD_MAX_BYTES", DefaultAssetUploadMaxBytes),
-		ImageUploadMaxBytes:    envIntOr("GANG_IMAGE_UPLOAD_MAX_BYTES", DefaultImageUploadMaxBytes),
-		COSBucket:              envOr("GANG_COS_BUCKET", ""),
-		COSRegion:              envOr("GANG_COS_REGION", ""),
-		COSBucketURL:           envOr("GANG_COS_BUCKET_URL", ""),
-		COSSecretID:            envOr("GANG_COS_SECRET_ID", ""),
-		COSSecretKey:           envOr("GANG_COS_SECRET_KEY", ""),
-		COSSessionToken:        envOr("GANG_COS_SESSION_TOKEN", ""),
-		COSObjectACL:           envOr("GANG_COS_OBJECT_ACL", "public-read"),
-		GeoIPDatabasePath:      envOr("GANG_GEOIP_DB_PATH", ""),
-		TrustedProxies:         envListOr("GANG_TRUSTED_PROXIES", []string{"127.0.0.1", "::1"}),
-		AllowedOrigins:         envListOr("GANG_ALLOWED_ORIGINS", []string{"*"}),
-		LiveKitHost:            envOr("LIVEKIT_HOST", "http://localhost:7880"),
-		LiveKitAPIKey:          envOr("LIVEKIT_API_KEY", ""),
-		LiveKitAPISecret:       envOr("LIVEKIT_API_SECRET", ""),
+		Bind:                     envOr("GANG_BIND", "127.0.0.1:21116"),
+		DatabaseURL:              envOr("GANG_DATABASE_URL", "gang-chat.db"),
+		JWTSecret:                envOr("GANG_JWT_SECRET", ""),
+		AccessTokenTTLSeconds:    envIntOr("GANG_ACCESS_TOKEN_TTL", 900),
+		RefreshTokenTTLSeconds:   envIntOr("GANG_REFRESH_TOKEN_TTL", 2592000),
+		LoginMaxAttempts:         int(envIntOr("GANG_LOGIN_MAX_ATTEMPTS", 5)),
+		LoginWindowSeconds:       envIntOr("GANG_LOGIN_WINDOW_SECONDS", 900),
+		AssetDir:                 envOr("GANG_ASSET_DIR", "assets"),
+		StorageBackend:           envOr("GANG_STORAGE_BACKEND", ""),
+		AssetPublicBaseURL:       envOr("GANG_ASSET_PUBLIC_BASE_URL", ""),
+		AssetObjectPrefix:        envOr("GANG_ASSET_OBJECT_PREFIX", "assets"),
+		AssetCacheControl:        envOr("GANG_ASSET_CACHE_CONTROL", ""),
+		AssetCacheTTLSeconds:     envIntOr("GANG_ASSET_CACHE_TTL_SECONDS", 31536000),
+		AssetUploadMaxBytes:      envIntOr("GANG_ASSET_UPLOAD_MAX_BYTES", DefaultAssetUploadMaxBytes),
+		ImageUploadMaxBytes:      envIntOr("GANG_IMAGE_UPLOAD_MAX_BYTES", DefaultImageUploadMaxBytes),
+		COSBucket:                envOr("GANG_COS_BUCKET", ""),
+		COSRegion:                envOr("GANG_COS_REGION", ""),
+		COSBucketURL:             envOr("GANG_COS_BUCKET_URL", ""),
+		COSSecretID:              envOr("GANG_COS_SECRET_ID", ""),
+		COSSecretKey:             envOr("GANG_COS_SECRET_KEY", ""),
+		COSSessionToken:          envOr("GANG_COS_SESSION_TOKEN", ""),
+		COSObjectACL:             envOr("GANG_COS_OBJECT_ACL", "public-read"),
+		GeoIPDatabasePath:        envOr("GANG_GEOIP_DB_PATH", ""),
+		TrustedProxies:           envListOr("GANG_TRUSTED_PROXIES", []string{"127.0.0.1", "::1"}),
+		AllowedOrigins:           envListOr("GANG_ALLOWED_ORIGINS", []string{"*"}),
+		LiveKitHost:              envOr("LIVEKIT_HOST", "http://localhost:7880"),
+		LiveKitAPIKey:            envOr("LIVEKIT_API_KEY", ""),
+		LiveKitAPISecret:         envOr("LIVEKIT_API_SECRET", ""),
 		FFmpegPath:               envOr("GANG_FFMPEG_PATH", "ffmpeg"),
 		MusicBoxDir:              envOr("GANG_MUSIC_BOX_DIR", "music-box"),
 		MusicBoxMaxBytesPerRoom:  envIntOr("GANG_MUSIC_BOX_MAX_BYTES_PER_ROOM", DefaultMusicBoxMaxBytesPerRoom),
@@ -140,6 +142,7 @@ func Load() *Config {
 	flag.StringVar(&cfg.AssetPublicBaseURL, "asset-public-base-url", cfg.AssetPublicBaseURL, "optional CDN/COS public base URL for asset URLs")
 	flag.StringVar(&cfg.AssetObjectPrefix, "asset-object-prefix", cfg.AssetObjectPrefix, "object storage prefix for uploaded assets")
 	flag.StringVar(&cfg.AssetCacheControl, "asset-cache-control", cfg.AssetCacheControl, "Cache-Control header for uploaded assets")
+	flag.Int64Var(&cfg.AssetCacheTTLSeconds, "asset-cache-ttl-seconds", cfg.AssetCacheTTLSeconds, "max-age/Expires TTL for asset HTTP caching when asset-cache-control is not set")
 	flag.Int64Var(&cfg.AssetUploadMaxBytes, "asset-upload-max-bytes", cfg.AssetUploadMaxBytes, "maximum uploaded file size in bytes")
 	flag.Int64Var(&cfg.ImageUploadMaxBytes, "image-upload-max-bytes", cfg.ImageUploadMaxBytes, "maximum uploaded image size in bytes")
 	flag.StringVar(&cfg.COSBucket, "cos-bucket", cfg.COSBucket, "Tencent COS bucket name, including appid")

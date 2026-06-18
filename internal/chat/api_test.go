@@ -15,6 +15,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/zhuangkaiyi/gang-chat/server/internal/auth"
@@ -2411,6 +2412,68 @@ func TestUploadFileStoresAssetFile(t *testing.T) {
 	}
 	if !bytes.Equal(saved, fileBytes) {
 		t.Fatalf("saved asset bytes changed: %v", saved)
+	}
+}
+
+func TestAssetRouteSendsExpiringCacheValidators(t *testing.T) {
+	api := newAPIHarness(t)
+	api.cfg.AssetCacheControl = ""
+	api.cfg.AssetCacheTTLSeconds = 60
+	RegisterAssetRoutes(api.router, api.db, api.cfg)
+
+	owner := api.register("asset_cache_owner")
+	assetID := "asset_cache_route"
+	filename := "report.txt"
+	createdAt := time.Date(2026, 6, 18, 10, 0, 0, 0, time.UTC).UnixMilli()
+	body := []byte("cached asset")
+	if err := os.MkdirAll(filepath.Join(api.assets, assetID), 0o755); err != nil {
+		t.Fatalf("create asset dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(api.assets, assetID, filename), body, 0o644); err != nil {
+		t.Fatalf("write asset file: %v", err)
+	}
+	_, err := api.db.Exec(
+		`INSERT INTO assets (id, owner_user_id, purpose, filename, mime_type, size_bytes, url, created_at)
+		 VALUES (?, ?, 'message_file', ?, 'text/plain', ?, ?, ?)`,
+		assetID, owner.User["id"].(string), filename, len(body), "/assets/"+assetID+"/"+filename, createdAt,
+	)
+	if err != nil {
+		t.Fatalf("insert asset: %v", err)
+	}
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/assets/"+assetID+"/"+filename, nil)
+	api.router.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("unexpected status: %d body=%q", rec.Code, rec.Body.String())
+	}
+	if got := rec.Body.Bytes(); !bytes.Equal(got, body) {
+		t.Fatalf("asset body mismatch: %q", got)
+	}
+	if got := rec.Header().Get("Cache-Control"); got != "public, max-age=60, immutable" {
+		t.Fatalf("unexpected Cache-Control: %q", got)
+	}
+	if rec.Header().Get("Expires") == "" {
+		t.Fatalf("asset response missing Expires header")
+	}
+	if got := rec.Header().Get("Last-Modified"); got != "Thu, 18 Jun 2026 10:00:00 GMT" {
+		t.Fatalf("unexpected Last-Modified: %q", got)
+	}
+	etag := rec.Header().Get("ETag")
+	if etag == "" {
+		t.Fatalf("asset response missing ETag")
+	}
+
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodGet, "/assets/"+assetID+"/"+filename, nil)
+	req.Header.Set("If-None-Match", etag)
+	api.router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusNotModified {
+		t.Fatalf("unexpected conditional status: %d body=%q", rec.Code, rec.Body.String())
+	}
+	if rec.Body.Len() != 0 {
+		t.Fatalf("304 response should not include a body: %q", rec.Body.String())
 	}
 }
 

@@ -43,6 +43,8 @@ Run them on the **server**, from the deploy directory:
    GANG_STORAGE_BACKEND=
    GANG_ASSET_OBJECT_PREFIX=assets
    GANG_ASSET_PUBLIC_BASE_URL=https://<bucket-name-with-appid>.cos.<region>.myqcloud.com
+   # Optional: controls Cache-Control max-age and Expires when GANG_ASSET_CACHE_CONTROL is unset.
+   GANG_ASSET_CACHE_TTL_SECONDS=31536000
    GANG_COS_BUCKET=<bucket-name-with-appid>
    GANG_COS_REGION=<region, e.g. ap-shanghai>
    GANG_COS_SECRET_ID=<secret id>
@@ -52,7 +54,9 @@ Run them on the **server**, from the deploy directory:
    With `GANG_ASSET_PUBLIC_BASE_URL` set, uploads are written to COS and API
    payloads return COS/CDN URLs. Asset reads do not pass through the backend and
    no local asset cache is kept. Replace the COS endpoint with a CDN root when
-   CDN is enabled.
+   CDN is enabled. Asset responses include `Cache-Control`, `Expires`, `ETag`,
+   and `Last-Modified`; set `GANG_ASSET_CACHE_CONTROL` to override the generated
+   `public, max-age=<ttl>, immutable` policy.
 5. (Optional) `deploy.env` for path overrides — see `deploy.env.example`.
 6. First boot: `./start.sh all`.
 
