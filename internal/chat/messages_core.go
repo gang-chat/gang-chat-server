@@ -26,9 +26,12 @@ func (h *Handler) listMessages(c *gin.Context) {
 			        m.mentions_json, m.attachments_json, m.is_recalled, m.recalled_at,
 			        m.recalled_by_user_id, m.is_force_deleted, m.force_deleted_at,
 			        m.force_deleted_by_user_id, m.created_at,
-			        u.id, u.uid, u.username, u.display_name, u.avatar_url, u.default_avatar_key
+			        u.id, u.uid, u.username, u.display_name, u.avatar_url, u.default_avatar_key,
+			        u.is_superuser, sender_rm.room_display_name,
+			        CASE WHEN u.is_superuser != 0 THEN 'superuser' ELSE COALESCE(sender_rm.role, '') END
 			 FROM messages m
 			 JOIN users u ON u.id = m.sender_user_id
+			 LEFT JOIN room_memberships sender_rm ON sender_rm.room_id = m.room_id AND sender_rm.user_id = m.sender_user_id
 			 WHERE m.room_id = ? AND `+visibleMessageSQL("m")+`
 			 ORDER BY m.created_at DESC
 			 LIMIT ?`,
@@ -47,9 +50,12 @@ func (h *Handler) listMessages(c *gin.Context) {
 				        m.mentions_json, m.attachments_json, m.is_recalled, m.recalled_at,
 				        m.recalled_by_user_id, m.is_force_deleted, m.force_deleted_at,
 				        m.force_deleted_by_user_id, m.created_at,
-				        u.id, u.uid, u.username, u.display_name, u.avatar_url, u.default_avatar_key
+				        u.id, u.uid, u.username, u.display_name, u.avatar_url, u.default_avatar_key,
+				        u.is_superuser, sender_rm.room_display_name,
+				        CASE WHEN u.is_superuser != 0 THEN 'superuser' ELSE COALESCE(sender_rm.role, '') END
 				 FROM messages m
 				 JOIN users u ON u.id = m.sender_user_id
+				 LEFT JOIN room_memberships sender_rm ON sender_rm.room_id = m.room_id AND sender_rm.user_id = m.sender_user_id
 				 WHERE m.room_id = ? AND m.created_at < ? AND `+visibleMessageSQL("m")+`
 				 ORDER BY m.created_at DESC
 				 LIMIT ?`,
@@ -213,9 +219,12 @@ func (h *Handler) messageByID(messageID string) (message, error) {
 		        m.mentions_json, m.attachments_json, m.is_recalled, m.recalled_at,
 		        m.recalled_by_user_id, m.is_force_deleted, m.force_deleted_at,
 		        m.force_deleted_by_user_id, m.created_at,
-		        u.id, u.uid, u.username, u.display_name, u.avatar_url, u.default_avatar_key
+		        u.id, u.uid, u.username, u.display_name, u.avatar_url, u.default_avatar_key,
+		        u.is_superuser, sender_rm.room_display_name,
+		        CASE WHEN u.is_superuser != 0 THEN 'superuser' ELSE COALESCE(sender_rm.role, '') END
 		 FROM messages m
 		 JOIN users u ON u.id = m.sender_user_id
+		 LEFT JOIN room_memberships sender_rm ON sender_rm.room_id = m.room_id AND sender_rm.user_id = m.sender_user_id
 		 WHERE m.id = ?`,
 		messageID,
 	)
@@ -227,9 +236,12 @@ func (h *Handler) messageByClientID(roomID, userID, clientMessageID string) (mes
 		        m.mentions_json, m.attachments_json, m.is_recalled, m.recalled_at,
 		        m.recalled_by_user_id, m.is_force_deleted, m.force_deleted_at,
 		        m.force_deleted_by_user_id, m.created_at,
-		        u.id, u.uid, u.username, u.display_name, u.avatar_url, u.default_avatar_key
+		        u.id, u.uid, u.username, u.display_name, u.avatar_url, u.default_avatar_key,
+		        u.is_superuser, sender_rm.room_display_name,
+		        CASE WHEN u.is_superuser != 0 THEN 'superuser' ELSE COALESCE(sender_rm.role, '') END
 		 FROM messages m
 		 JOIN users u ON u.id = m.sender_user_id
+		 LEFT JOIN room_memberships sender_rm ON sender_rm.room_id = m.room_id AND sender_rm.user_id = m.sender_user_id
 		 WHERE m.room_id = ? AND m.sender_user_id = ? AND m.client_message_id = ?`,
 		roomID, userID, clientMessageID,
 	)
@@ -239,21 +251,28 @@ func (h *Handler) queryMessage(query string, args ...any) (message, error) {
 	var msg message
 	var senderID, senderUID, senderUsername string
 	var senderDisplayName, senderAvatarURL, senderDefaultAvatar sql.NullString
+	var senderRoomDisplayName, senderRoomRole sql.NullString
 	var mentionsJSON, attachmentsJSON string
 	var recalledAt, forceDeletedAt sql.NullInt64
 	var recalledByUserID, forceDeletedByUserID sql.NullString
-	var isRecalled, isForceDeleted int
+	var isRecalled, isForceDeleted, senderIsSuperuser int
 	var createdAt int64
 	err := h.DB.QueryRow(query, args...).Scan(
 		&msg.ID, &msg.RoomID, &msg.ClientMessageID, &msg.Type, &msg.Body,
 		&mentionsJSON, &attachmentsJSON, &isRecalled, &recalledAt, &recalledByUserID,
 		&isForceDeleted, &forceDeletedAt, &forceDeletedByUserID, &createdAt,
 		&senderID, &senderUID, &senderUsername, &senderDisplayName, &senderAvatarURL, &senderDefaultAvatar,
+		&senderIsSuperuser, &senderRoomDisplayName, &senderRoomRole,
 	)
 	if err != nil {
 		return message{}, err
 	}
 	msg.Sender = summaryFromUserFields(senderID, senderUID, senderUsername, senderDisplayName, senderAvatarURL, senderDefaultAvatar)
+	msg.Sender.IsSuperuser = senderIsSuperuser != 0
+	msg.Sender.RoomDisplayName = nullableString(senderRoomDisplayName)
+	if senderRoomRole.Valid && senderRoomRole.String != "" {
+		msg.Sender.RoomRole = senderRoomRole.String
+	}
 	msg.Mentions = decodeJSONArray(mentionsJSON)
 	msg.Attachments = decodeJSONArray(attachmentsJSON)
 	msg.IsRecalled = isRecalled != 0

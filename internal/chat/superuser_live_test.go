@@ -71,6 +71,20 @@ func TestSuperuserLiveGhost(t *testing.T) {
 	if sender["id"] != superID {
 		t.Fatalf("message should be attributed to the superuser, got: %v", sender)
 	}
+	if sender["is_superuser"] != true || sender["room_role"] != "superuser" {
+		t.Fatalf("message sender should expose superuser identity: %v", sender)
+	}
+
+	status, response = api.request(http.MethodGet, "/rooms/"+roomID+"/messages?limit=20", owner.Token, nil)
+	api.requireStatus(status, http.StatusOK, response)
+	messages := response["messages"].([]any)
+	if len(messages) != 1 {
+		t.Fatalf("expected one listed message, got %d: %v", len(messages), response)
+	}
+	listedSender := messages[0].(map[string]any)["sender"].(map[string]any)
+	if listedSender["is_superuser"] != true || listedSender["room_role"] != "superuser" {
+		t.Fatalf("listed message sender should expose superuser identity: %v", listedSender)
+	}
 
 	// Joining live still must not have created a membership row.
 	var memberships int

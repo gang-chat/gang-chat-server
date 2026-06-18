@@ -217,7 +217,8 @@ func (h *Handler) searchMessageRows(userID, predicate string, predicateArgs []an
 		        m.recalled_by_user_id, m.is_force_deleted, m.force_deleted_at,
 		        m.force_deleted_by_user_id, m.created_at,
 		        u.id, u.uid, u.username, u.display_name, u.avatar_url, u.default_avatar_key,
-		        sender_rm.room_display_name,
+		        u.is_superuser, sender_rm.room_display_name,
+		        CASE WHEN u.is_superuser != 0 THEN 'superuser' ELSE COALESCE(sender_rm.role, '') END,
 		        r.id, r.rid, r.name, r.avatar_url, r.default_avatar_key
 		 FROM messages m
 		 JOIN users u ON u.id = m.sender_user_id
@@ -254,26 +255,30 @@ func scanSearchMessage(rows *sql.Rows) (message, searchRoomContext, error) {
 	var msg message
 	var room searchRoomContext
 	var senderID, senderUID, senderUsername string
-	var senderDisplayName, senderAvatarURL, senderDefaultAvatar, senderRoomDisplayName sql.NullString
+	var senderDisplayName, senderAvatarURL, senderDefaultAvatar, senderRoomDisplayName, senderRoomRole sql.NullString
 	var roomRID, roomAvatarURL, roomDefaultAvatar sql.NullString
 	var mentionsJSON, attachmentsJSON string
 	var recalledAt, forceDeletedAt sql.NullInt64
 	var recalledByUserID, forceDeletedByUserID sql.NullString
-	var isRecalled, isForceDeleted int
+	var isRecalled, isForceDeleted, senderIsSuperuser int
 	var createdAt int64
 	if err := rows.Scan(
 		&msg.ID, &msg.RoomID, &msg.ClientMessageID, &msg.Type, &msg.Body,
 		&mentionsJSON, &attachmentsJSON, &isRecalled, &recalledAt, &recalledByUserID,
 		&isForceDeleted, &forceDeletedAt, &forceDeletedByUserID, &createdAt,
 		&senderID, &senderUID, &senderUsername, &senderDisplayName, &senderAvatarURL, &senderDefaultAvatar,
-		&senderRoomDisplayName,
+		&senderIsSuperuser, &senderRoomDisplayName, &senderRoomRole,
 		&room.ID, &roomRID, &room.Name, &roomAvatarURL, &roomDefaultAvatar,
 	); err != nil {
 		return message{}, searchRoomContext{}, err
 	}
 	msg.Sender = summaryFromUserFields(senderID, senderUID, senderUsername, senderDisplayName, senderAvatarURL, senderDefaultAvatar)
+	msg.Sender.IsSuperuser = senderIsSuperuser != 0
 	if senderRoomDisplayName.Valid && senderRoomDisplayName.String != "" {
 		msg.Sender.RoomDisplayName = &senderRoomDisplayName.String
+	}
+	if senderRoomRole.Valid && senderRoomRole.String != "" {
+		msg.Sender.RoomRole = senderRoomRole.String
 	}
 	msg.Mentions = decodeJSONArray(mentionsJSON)
 	msg.Attachments = decodeJSONArray(attachmentsJSON)

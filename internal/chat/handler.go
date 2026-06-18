@@ -483,20 +483,27 @@ func scanMessage(rows *sql.Rows) (message, error) {
 	var msg message
 	var senderID, senderUID, senderUsername string
 	var senderDisplayName, senderAvatarURL, senderDefaultAvatar sql.NullString
+	var senderRoomDisplayName, senderRoomRole sql.NullString
 	var mentionsJSON, attachmentsJSON string
 	var recalledAt, forceDeletedAt sql.NullInt64
 	var recalledByUserID, forceDeletedByUserID sql.NullString
-	var isRecalled, isForceDeleted int
+	var isRecalled, isForceDeleted, senderIsSuperuser int
 	var createdAt int64
 	if err := rows.Scan(
 		&msg.ID, &msg.RoomID, &msg.ClientMessageID, &msg.Type, &msg.Body,
 		&mentionsJSON, &attachmentsJSON, &isRecalled, &recalledAt, &recalledByUserID,
 		&isForceDeleted, &forceDeletedAt, &forceDeletedByUserID, &createdAt,
 		&senderID, &senderUID, &senderUsername, &senderDisplayName, &senderAvatarURL, &senderDefaultAvatar,
+		&senderIsSuperuser, &senderRoomDisplayName, &senderRoomRole,
 	); err != nil {
 		return message{}, err
 	}
 	msg.Sender = summaryFromUserFields(senderID, senderUID, senderUsername, senderDisplayName, senderAvatarURL, senderDefaultAvatar)
+	msg.Sender.IsSuperuser = senderIsSuperuser != 0
+	msg.Sender.RoomDisplayName = nullableString(senderRoomDisplayName)
+	if senderRoomRole.Valid && senderRoomRole.String != "" {
+		msg.Sender.RoomRole = senderRoomRole.String
+	}
 	msg.Mentions = decodeJSONArray(mentionsJSON)
 	msg.Attachments = decodeJSONArray(attachmentsJSON)
 	msg.IsRecalled = isRecalled != 0
