@@ -291,7 +291,7 @@ func scanSearchMessage(rows *sql.Rows) (message, searchRoomContext, error) {
 
 	room.RID = roomRID.String
 	room.AvatarURL = nullableString(roomAvatarURL)
-	room.DefaultAvatarKey = "room-1"
+	room.DefaultAvatarKey = "blue-3"
 	if roomDefaultAvatar.Valid && roomDefaultAvatar.String != "" {
 		room.DefaultAvatarKey = roomDefaultAvatar.String
 	}
