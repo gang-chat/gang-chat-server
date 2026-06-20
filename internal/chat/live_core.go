@@ -312,6 +312,58 @@ func (h *Handler) liveKitMediaPermissions(roomID, userID string) (bool, bool) {
 	return canPublish, canSubscribe
 }
 
+// issueScreenAudioToken issues a publish-only LiveKit token for the caller's
+// hidden screen-audio aux participant (identity "<userID>#screen-audio"). The
+// aux participant publishes the screen-share audio track through an isolated
+// WebRTC factory (a second PeerConnectionFactory whose ADM is fed by
+// ScreenCaptureKit), so screen audio never shares an AudioState with the mic.
+// It never appears in the roster — no live_participants row is created — and is
+// filtered out of the receiver UI. A voice ban revokes its publish right too,
+// so a banned user cannot broadcast screen audio. canSubscribe is always false:
+// the aux participant is publish-only, so it never receives (and thus never
+// echoes back) other participants' tracks.
+func (h *Handler) issueScreenAudioToken(c *gin.Context) {
+	roomID := c.Param("room_id")
+	userID := currentUserID(c)
+	if !h.requireRoomAccess(c, roomID) {
+		return
+	}
+	auxIdentity := userID + "#screen-audio"
+	canPublish := !h.isVoiceBanned(roomID, userID)
+	token, expiresAt, err := h.screenAudioToken(roomID, userID, auxIdentity, canPublish)
+	if err != nil {
+		h.jsonError(c, http.StatusServiceUnavailable, "livekit_unavailable", "LiveKit cannot issue media sessions")
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"token":            token,
+		"token_expires_at": formatTime(expiresAt),
+		"identity":         auxIdentity,
+		"server_url":       h.Cfg.LiveKitHost,
+		"room_name":        roomID,
+	})
+}
+
+// screenAudioToken mints a LiveKit join token for the hidden screen-audio aux
+// participant. canSubscribe is always false (publish-only).
+func (h *Handler) screenAudioToken(roomID, ownerUserID, identity string, canPublish bool) (string, time.Time, error) {
+	expiresAt := time.Now().UTC().Add(10 * time.Minute)
+	if h.Cfg.LiveKitAPIKey == "" || h.Cfg.LiveKitAPISecret == "" {
+		return "dev-livekit-token", expiresAt, nil
+	}
+	token, err := livekittoken.GenerateJoinToken(livekittoken.TokenParams{
+		APIKey:       h.Cfg.LiveKitAPIKey,
+		APISecret:    h.Cfg.LiveKitAPISecret,
+		Room:         roomID,
+		Identity:     identity,
+		Name:         currentUsernameFromDB(h.DB, ownerUserID),
+		CanPublish:   canPublish,
+		CanSubscribe: false,
+		TTL:          10 * time.Minute,
+	})
+	return token, expiresAt, err
+}
+
 // isVoiceBanned reports whether the user has a persistent voice ban in the
 // room. This survives leave/rejoin, unlike the live_participants.voice_blocked
 // projection.

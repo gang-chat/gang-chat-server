@@ -130,6 +130,7 @@ func RegisterRoutes(g *gin.RouterGroup, db *sql.DB, cfg *config.Config, bus *eve
 	g.GET("/rooms/:room_id/live/me/member-volumes", h.listMyLiveMemberVolumes)
 	g.PATCH("/rooms/:room_id/live/me/member-volumes/:target_user_id", h.updateMyLiveMemberVolume)
 	g.POST("/rooms/:room_id/live/participants/:user_id/moderation", h.moderateLiveParticipant)
+	g.POST("/rooms/:room_id/live/screen-audio-token", h.issueScreenAudioToken)
 
 	// Server-side music box: search/enqueue/control a broadcast track.
 	g.GET("/rooms/:room_id/music-box/search", h.searchMusicBox)
