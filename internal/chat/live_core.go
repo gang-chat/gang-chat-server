@@ -313,10 +313,10 @@ func (h *Handler) liveKitMediaPermissions(roomID, userID string) (bool, bool) {
 }
 
 // issueScreenAudioToken issues a publish-only LiveKit token for the caller's
-// hidden screen-audio aux participant (identity "<userID>#screen-audio"). The
+// hidden screen-audio aux participant (identity "<userID>--screen-audio"). The
 // aux participant publishes the screen-share audio track through an isolated
-// WebRTC factory (a second PeerConnectionFactory whose ADM is fed by
-// ScreenCaptureKit), so screen audio never shares an AudioState with the mic.
+// client WebRTC factory, so screen audio never shares an AudioState with the
+// mic.
 // It never appears in the roster — no live_participants row is created — and is
 // filtered out of the receiver UI. A voice ban revokes its publish right too,
 // so a banned user cannot broadcast screen audio. canSubscribe is always false:
