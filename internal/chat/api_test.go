@@ -1263,6 +1263,27 @@ func TestUserSearchIncludesSuperuserFlag(t *testing.T) {
 	if len(users) != 0 {
 		t.Fatalf("user search should not partially match uid, got %d: %v", len(users), response)
 	}
+
+	owner := api.register("search_room_owner")
+	target := api.register("search_room_target")
+	room := api.createRoom(owner.Token, map[string]any{"name": "NebulaRoomNeedle", "join_policy": "open"})
+	roomID := room["id"].(string)
+	status, response = api.request(http.MethodPost, "/rooms/"+roomID+"/join", target.Token, nil)
+	api.requireStatus(status, http.StatusOK, response)
+	if _, err := api.db.Exec(
+		`UPDATE room_memberships SET room_display_name = ? WHERE room_id = ? AND user_id = ?`,
+		"NebulaRoomAlias", roomID, target.User["id"].(string),
+	); err != nil {
+		t.Fatalf("update target room display name: %v", err)
+	}
+	for _, q := range []string{"NebulaRoomNeedle", "NebulaRoomAlias"} {
+		status, response = api.request(http.MethodGet, "/users/search?q="+q+"&limit=20", normal.Token, nil)
+		api.requireStatus(status, http.StatusOK, response)
+		users = response["users"].([]any)
+		if len(users) != 0 {
+			t.Fatalf("user search should not match room names for %q, got %d: %v", q, len(users), response)
+		}
+	}
 }
 
 func TestMemberProfileIncludesBioAndRoomLinks(t *testing.T) {
