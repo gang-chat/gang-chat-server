@@ -194,6 +194,11 @@ func (h *Handler) updateRoomSettings(c *gin.Context) {
 		h.jsonError(c, http.StatusBadRequest, "bad_request", "invalid JSON body")
 		return
 	}
+	oldJoinPolicy := ""
+	if req.JoinPolicy != nil {
+		_ = h.DB.QueryRow(`SELECT join_policy FROM rooms WHERE id = ?`, roomID).Scan(&oldJoinPolicy)
+	}
+	joinPolicyClosedStateChanged := false
 	sets := []string{"updated_at = ?"}
 	args := []any{nowMillis()}
 	if req.Name != nil {
@@ -227,6 +232,7 @@ func (h *Handler) updateRoomSettings(c *gin.Context) {
 			h.jsonError(c, http.StatusBadRequest, "validation_failed", "invalid join_policy")
 			return
 		}
+		joinPolicyClosedStateChanged = roomJoinPolicyClosed(oldJoinPolicy) != roomJoinPolicyClosed(*req.JoinPolicy)
 		sets = append(sets, "join_policy = ?")
 		args = append(args, *req.JoinPolicy)
 	}
@@ -285,6 +291,9 @@ func (h *Handler) updateRoomSettings(c *gin.Context) {
 	// Name / avatar / visibility / join_policy etc. all live in the room-list
 	// snapshot, so every member's list entry needs to be refreshed.
 	h.publishRoomUpdated(roomID)
+	if joinPolicyClosedStateChanged {
+		h.publishPendingRoomInvitesUpdatedForRoom(roomID)
+	}
 	detail, err := h.buildRoomDetail(roomID, currentUserID(c))
 	if err != nil {
 		h.jsonError(c, http.StatusInternalServerError, "internal_error", "failed to read room")
@@ -512,6 +521,15 @@ func (h *Handler) listRoomInvites(c *gin.Context) {
 			FROM room_blacklist rb
 			WHERE rb.room_id = room_invites.room_id
 			  AND rb.user_id = room_invites.target_user_id
+		)
+	)`
+	query += ` AND NOT (
+		status = 'pending'
+		AND EXISTS (
+			SELECT 1
+			FROM rooms r
+			WHERE r.id = room_invites.room_id
+			  AND r.join_policy = 'closed'
 		)
 	)`
 	query += ` ORDER BY CASE WHEN status = 'pending' THEN 0 ELSE 1 END, created_at DESC`
@@ -1545,6 +1563,9 @@ func (h *Handler) roomInviteInvalidReason(roomID, inviterID, targetUserID string
 	if targetUserID != "" && h.isRoomBlacklisted(roomID, targetUserID) {
 		return "target_blocked"
 	}
+	if h.isRoomJoinPolicyClosed(roomID) {
+		return "room_closed"
+	}
 	if h.isSuperuser(inviterID) {
 		return ""
 	}
@@ -1561,6 +1582,9 @@ func (h *Handler) roomInviteInvalidReason(roomID, inviterID, targetUserID string
 
 func (h *Handler) hasPrivilegedPendingRoomInvite(roomID, targetUserID string) bool {
 	if h.isRoomBlacklisted(roomID, targetUserID) {
+		return false
+	}
+	if h.isRoomJoinPolicyClosed(roomID) {
 		return false
 	}
 	rows, err := h.DB.Query(
@@ -1584,6 +1608,18 @@ func (h *Handler) hasPrivilegedPendingRoomInvite(roomID, targetUserID string) bo
 		}
 	}
 	return false
+}
+
+func (h *Handler) isRoomJoinPolicyClosed(roomID string) bool {
+	var joinPolicy string
+	if err := h.DB.QueryRow(`SELECT join_policy FROM rooms WHERE id = ?`, roomID).Scan(&joinPolicy); err != nil {
+		return false
+	}
+	return roomJoinPolicyClosed(joinPolicy)
+}
+
+func roomJoinPolicyClosed(joinPolicy string) bool {
+	return strings.EqualFold(strings.TrimSpace(joinPolicy), "closed")
 }
 
 func (h *Handler) isPrivilegedRoomInviter(roomID, userID string) bool {

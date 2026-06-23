@@ -249,6 +249,29 @@ func TestStreamSettingsChangeUpdatesMembers(t *testing.T) {
 	}
 }
 
+func TestStreamJoinPolicyChangeRefreshesPendingInvites(t *testing.T) {
+	api := newAPIHarness(t)
+	owner := api.register("owner_invite_policy_stream")
+	target := api.register("target_invite_policy_stream")
+	room := api.createRoom(owner.Token, map[string]any{"name": "Invite Stream", "join_policy": "approval_required"})
+	roomID := room["id"].(string)
+
+	status, resp := api.request(http.MethodPost, "/rooms/"+roomID+"/invites", owner.Token, map[string]any{
+		"user_id": target.User["id"].(string),
+	})
+	api.requireStatus(status, http.StatusCreated, resp)
+
+	targetStream := api.connectStream(target.User["id"].(string))
+
+	status, resp = api.request(http.MethodPatch, "/rooms/"+roomID+"/settings", owner.Token, map[string]any{"join_policy": "closed"})
+	api.requireStatus(status, http.StatusOK, resp)
+	targetStream.await("room_invites_updated")
+
+	status, resp = api.request(http.MethodPatch, "/rooms/"+roomID+"/settings", owner.Token, map[string]any{"join_policy": "approval_required"})
+	api.requireStatus(status, http.StatusOK, resp)
+	targetStream.await("room_invites_updated")
+}
+
 func TestStreamMessageRefreshesLastMessage(t *testing.T) {
 	api := newAPIHarness(t)
 	owner := api.register("owner_msg")

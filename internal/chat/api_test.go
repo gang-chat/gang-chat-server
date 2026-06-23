@@ -3002,6 +3002,67 @@ func TestRoomBlacklistFlow(t *testing.T) {
 	api.requireStatus(status, http.StatusOK, response)
 }
 
+func TestRoomInvitesHideWhileJoinPolicyClosed(t *testing.T) {
+	api := newAPIHarness(t)
+	owner := api.register("invite_policy_owner")
+	target := api.register("invite_policy_target")
+
+	room := api.createRoom(owner.Token, map[string]any{
+		"name":        "Join Policy Invite",
+		"join_policy": "approval_required",
+	})
+	roomID := room["id"].(string)
+
+	status, response := api.request(http.MethodPost, "/rooms/"+roomID+"/invites", owner.Token, map[string]any{
+		"user_id": target.User["id"].(string),
+	})
+	api.requireStatus(status, http.StatusCreated, response)
+	inviteID := response["invite"].(map[string]any)["id"].(string)
+
+	status, response = api.request(http.MethodGet, "/room-invites?status=pending", target.Token, nil)
+	api.requireStatus(status, http.StatusOK, response)
+	if invites := response["invites"].([]any); len(invites) != 1 || invites[0].(map[string]any)["id"] != inviteID {
+		t.Fatalf("pending invite should be visible before closing the room: %v", response)
+	}
+
+	status, response = api.request(http.MethodPatch, "/rooms/"+roomID+"/settings", owner.Token, map[string]any{
+		"join_policy": "closed",
+	})
+	api.requireStatus(status, http.StatusOK, response)
+
+	status, response = api.request(http.MethodGet, "/room-invites?status=pending", target.Token, nil)
+	api.requireStatus(status, http.StatusOK, response)
+	if invites := response["invites"].([]any); len(invites) != 0 {
+		t.Fatalf("closed room should hide pending invite notifications: %v", response)
+	}
+	status, response = api.request(http.MethodGet, "/room-invites?status=all", target.Token, nil)
+	api.requireStatus(status, http.StatusOK, response)
+	if invites := response["invites"].([]any); len(invites) != 0 {
+		t.Fatalf("closed room should hide pending invites from all notifications too: %v", response)
+	}
+
+	status, response = api.request(http.MethodPatch, "/room-invites/"+inviteID, target.Token, map[string]any{
+		"decision": "accept",
+	})
+	api.requireStatus(status, http.StatusConflict, response)
+
+	status, response = api.request(http.MethodPatch, "/rooms/"+roomID+"/settings", owner.Token, map[string]any{
+		"join_policy": "approval_required",
+	})
+	api.requireStatus(status, http.StatusOK, response)
+
+	status, response = api.request(http.MethodGet, "/room-invites?status=pending", target.Token, nil)
+	api.requireStatus(status, http.StatusOK, response)
+	if invites := response["invites"].([]any); len(invites) != 1 || invites[0].(map[string]any)["id"] != inviteID {
+		t.Fatalf("reopening room should show the original pending invite again: %v", response)
+	}
+
+	status, response = api.request(http.MethodPatch, "/room-invites/"+inviteID, target.Token, map[string]any{
+		"decision": "accept",
+	})
+	api.requireStatus(status, http.StatusOK, response)
+}
+
 func TestRoomInviteFlow(t *testing.T) {
 	api := newAPIHarness(t)
 	assertRoomInvitesKeepDeletedRooms(t, api.db)
