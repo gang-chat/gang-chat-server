@@ -238,6 +238,18 @@ func (h *Handler) searchRooms(c *gin.Context) {
 	if superuser {
 		visibilityFilter = `(r.rid = ? OR instr(lower(r.name), lower(?)) > 0)`
 	}
+	blacklistFilter := ``
+	args := []any{userID, query, query}
+	if !superuser {
+		blacklistFilter = ` AND NOT EXISTS (
+		     SELECT 1
+		     FROM room_blacklist rb
+		     WHERE rb.room_id = r.id
+		       AND rb.user_id = ?
+		   )`
+		args = append(args, userID)
+	}
+	args = append(args, limit)
 	rows, err := h.DB.Query(
 		`SELECT r.id, r.rid, r.name, r.avatar_url, r.default_avatar_key, r.created_by_user_id,
 		        r.visibility, r.join_policy, r.ai_voice_announce_enabled,
@@ -247,9 +259,10 @@ func (h *Handler) searchRooms(c *gin.Context) {
 		 FROM rooms r
 		 LEFT JOIN room_memberships rm ON rm.room_id = r.id AND rm.user_id = ?
 		 WHERE `+visibilityFilter+`
+		   `+blacklistFilter+`
 		 ORDER BY joined DESC, r.updated_at DESC, r.name ASC
 		 LIMIT ?`,
-		userID, query, query, limit,
+		args...,
 	)
 	if err != nil {
 		h.jsonError(c, http.StatusInternalServerError, "internal_error", "failed to search rooms")

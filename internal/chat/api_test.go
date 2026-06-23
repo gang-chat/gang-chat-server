@@ -2868,6 +2868,140 @@ func TestRoomApplicationNotifications(t *testing.T) {
 	}
 }
 
+func TestRoomBlacklistFlow(t *testing.T) {
+	api := newAPIHarness(t)
+	super := api.login("GANG", "64n9-Ch47")
+	owner := api.register("blacklist_owner")
+	target := api.register("blacklist_target")
+	applicant := api.register("blacklist_applicant")
+
+	room := api.createRoom(owner.Token, map[string]any{
+		"name":        "BlacklistNeedle",
+		"visibility":  "public",
+		"join_policy": "approval_required",
+	})
+	roomID := room["id"].(string)
+
+	status, response := api.request(http.MethodGet, "/rooms/"+roomID+"/blacklist", owner.Token, nil)
+	api.requireStatus(status, http.StatusOK, response)
+	if items := response["blacklist"].([]any); len(items) != 0 {
+		t.Fatalf("new room blacklist should start empty: %v", response)
+	}
+
+	status, response = api.request(http.MethodPost, "/rooms/"+roomID+"/blacklist", owner.Token, map[string]any{
+		"user_id": owner.User["id"].(string),
+	})
+	api.requireStatus(status, http.StatusConflict, response)
+	status, response = api.request(http.MethodPost, "/rooms/"+roomID+"/blacklist", owner.Token, map[string]any{
+		"user_id": super.User["id"].(string),
+	})
+	api.requireStatus(status, http.StatusForbidden, response)
+
+	status, response = api.request(http.MethodPost, "/rooms/"+roomID+"/join", applicant.Token, map[string]any{
+		"reason": "please",
+	})
+	api.requireStatus(status, http.StatusAccepted, response)
+	joinRequestID := response["join_request"].(map[string]any)["id"].(string)
+	status, response = api.request(http.MethodGet, "/rooms/"+roomID+"/join-requests?status=pending", owner.Token, nil)
+	api.requireStatus(status, http.StatusOK, response)
+	if requests := response["requests"].([]any); len(requests) != 1 {
+		t.Fatalf("pending join request should be visible before block: %v", response)
+	}
+	status, response = api.request(http.MethodPost, "/rooms/"+roomID+"/blacklist", owner.Token, map[string]any{
+		"user_id": applicant.User["id"].(string),
+	})
+	api.requireStatus(status, http.StatusCreated, response)
+	status, response = api.request(http.MethodGet, "/rooms/"+roomID+"/join-requests?status=pending", owner.Token, nil)
+	api.requireStatus(status, http.StatusOK, response)
+	if requests := response["requests"].([]any); len(requests) != 0 {
+		t.Fatalf("blocked applicant should disappear from join requests: %v", response)
+	}
+	status, response = api.request(http.MethodPatch, "/rooms/"+roomID+"/join-requests/"+joinRequestID, owner.Token, map[string]any{
+		"decision": "approve",
+	})
+	api.requireStatus(status, http.StatusConflict, response)
+	status, response = api.request(http.MethodDelete, "/rooms/"+roomID+"/blacklist/"+applicant.User["id"].(string), owner.Token, nil)
+	api.requireStatus(status, http.StatusOK, response)
+	status, response = api.request(http.MethodGet, "/rooms/"+roomID+"/join-requests?status=pending", owner.Token, nil)
+	api.requireStatus(status, http.StatusOK, response)
+	if requests := response["requests"].([]any); len(requests) != 1 {
+		t.Fatalf("unblocked applicant's pending request should reappear: %v", response)
+	}
+
+	status, response = api.request(http.MethodPost, "/rooms/"+roomID+"/invites", owner.Token, map[string]any{
+		"user_id": target.User["id"].(string),
+	})
+	api.requireStatus(status, http.StatusCreated, response)
+	inviteID := response["invite"].(map[string]any)["id"].(string)
+	status, response = api.request(http.MethodGet, "/room-invites?status=pending", target.Token, nil)
+	api.requireStatus(status, http.StatusOK, response)
+	if invites := response["invites"].([]any); len(invites) != 1 || invites[0].(map[string]any)["id"] != inviteID {
+		t.Fatalf("pending invite should be visible before block: %v", response)
+	}
+
+	status, response = api.request(http.MethodPost, "/rooms/"+roomID+"/blacklist", owner.Token, map[string]any{
+		"user_id": target.User["id"].(string),
+	})
+	api.requireStatus(status, http.StatusCreated, response)
+	entry := response["entry"].(map[string]any)
+	if entry["user"].(map[string]any)["id"] != target.User["id"] {
+		t.Fatalf("block response should include blocked user entry: %v", response)
+	}
+	status, response = api.request(http.MethodGet, "/rooms/"+roomID+"/blacklist", owner.Token, nil)
+	api.requireStatus(status, http.StatusOK, response)
+	if items := response["blacklist"].([]any); len(items) != 1 || items[0].(map[string]any)["user"].(map[string]any)["id"] != target.User["id"] {
+		t.Fatalf("blacklist should include target: %v", response)
+	}
+	status, response = api.request(http.MethodGet, "/room-invites?status=all", target.Token, nil)
+	api.requireStatus(status, http.StatusOK, response)
+	if invites := response["invites"].([]any); len(invites) != 0 {
+		t.Fatalf("blocked target should not see pending invite notifications: %v", response)
+	}
+	status, response = api.request(http.MethodPatch, "/room-invites/"+inviteID, target.Token, map[string]any{
+		"decision": "accept",
+	})
+	api.requireStatus(status, http.StatusConflict, response)
+	status, response = api.request(http.MethodPost, "/rooms/"+roomID+"/invites", owner.Token, map[string]any{
+		"user_id": target.User["id"].(string),
+	})
+	api.requireStatus(status, http.StatusForbidden, response)
+	status, response = api.request(http.MethodGet, "/rooms/search?q=BlacklistNeedle&limit=20", target.Token, nil)
+	api.requireStatus(status, http.StatusOK, response)
+	if rooms := response["rooms"].([]any); len(rooms) != 0 {
+		t.Fatalf("blocked target should not find the room in room search: %v", response)
+	}
+	status, response = api.request(http.MethodGet, "/search?q=BlacklistNeedle&categories=public_rooms&limit=20", target.Token, nil)
+	api.requireStatus(status, http.StatusOK, response)
+	if rooms := response["public_rooms"].([]any); len(rooms) != 0 {
+		t.Fatalf("blocked target should not find the room in global public search: %v", response)
+	}
+	status, response = api.request(http.MethodPost, "/rooms/"+roomID+"/join", target.Token, nil)
+	api.requireStatus(status, http.StatusNotFound, response)
+
+	otherRoom := api.createRoom(owner.Token, map[string]any{
+		"name":        "OtherBlacklistNeedle",
+		"visibility":  "public",
+		"join_policy": "open",
+	})
+	status, response = api.request(http.MethodGet, "/rooms/search?q=OtherBlacklistNeedle&limit=20", target.Token, nil)
+	api.requireStatus(status, http.StatusOK, response)
+	if rooms := response["rooms"].([]any); len(rooms) != 1 || rooms[0].(map[string]any)["id"] != otherRoom["id"] {
+		t.Fatalf("blacklist should be room scoped: %v", response)
+	}
+
+	status, response = api.request(http.MethodDelete, "/rooms/"+roomID+"/blacklist/"+target.User["id"].(string), owner.Token, nil)
+	api.requireStatus(status, http.StatusOK, response)
+	status, response = api.request(http.MethodGet, "/room-invites?status=pending", target.Token, nil)
+	api.requireStatus(status, http.StatusOK, response)
+	if invites := response["invites"].([]any); len(invites) != 1 || invites[0].(map[string]any)["id"] != inviteID {
+		t.Fatalf("unblocked target should see the original pending invite again: %v", response)
+	}
+	status, response = api.request(http.MethodPatch, "/room-invites/"+inviteID, target.Token, map[string]any{
+		"decision": "accept",
+	})
+	api.requireStatus(status, http.StatusOK, response)
+}
+
 func TestRoomInviteFlow(t *testing.T) {
 	api := newAPIHarness(t)
 	assertRoomInvitesKeepDeletedRooms(t, api.db)

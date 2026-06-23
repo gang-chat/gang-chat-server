@@ -328,6 +328,10 @@ func (h *Handler) inviteMember(c *gin.Context) {
 		h.jsonError(c, http.StatusConflict, "already_member", "user is already a room member")
 		return
 	}
+	if h.isRoomBlacklisted(roomID, req.UserID) {
+		h.jsonError(c, http.StatusForbidden, "blocked", "user is blocked from this room")
+		return
+	}
 	var existingPendingInviteID string
 	err := h.DB.QueryRow(
 		`SELECT id
@@ -379,6 +383,110 @@ func (h *Handler) inviteMember(c *gin.Context) {
 	c.JSON(http.StatusCreated, gin.H{"invite": h.roomInvitePayload(inviteID, req.UserID)})
 }
 
+func (h *Handler) listRoomBlacklist(c *gin.Context) {
+	roomID := c.Param("room_id")
+	if !h.isAdmin(roomID, currentUserID(c)) {
+		h.jsonError(c, http.StatusForbidden, "forbidden", "admin required")
+		return
+	}
+	rows, err := h.DB.Query(
+		`SELECT rb.user_id, rb.blocked_by_user_id, rb.created_at,
+		        u.id, u.uid, u.username, u.display_name, u.avatar_url, u.default_avatar_key,
+		        bu.id, bu.uid, bu.username, bu.display_name, bu.avatar_url, bu.default_avatar_key
+		 FROM room_blacklist rb
+		 JOIN users u ON u.id = rb.user_id
+		 LEFT JOIN users bu ON bu.id = rb.blocked_by_user_id
+		 WHERE rb.room_id = ?
+		 ORDER BY rb.created_at DESC, lower(u.username) ASC`,
+		roomID,
+	)
+	if err != nil {
+		h.jsonError(c, http.StatusInternalServerError, "internal_error", "list room blacklist failed")
+		return
+	}
+	defer rows.Close()
+
+	items := make([]gin.H, 0)
+	for rows.Next() {
+		entry, err := scanRoomBlacklistEntry(rows)
+		if err != nil {
+			h.jsonError(c, http.StatusInternalServerError, "internal_error", "read room blacklist failed")
+			return
+		}
+		items = append(items, entry)
+	}
+	c.JSON(http.StatusOK, gin.H{"blacklist": items, "items": items, "next_cursor": nil})
+}
+
+func (h *Handler) blockRoomUser(c *gin.Context) {
+	roomID := c.Param("room_id")
+	actorID := currentUserID(c)
+	if !h.isAdmin(roomID, actorID) {
+		h.jsonError(c, http.StatusForbidden, "forbidden", "admin required")
+		return
+	}
+	var req userIDRequest
+	if err := c.ShouldBindJSON(&req); err != nil || req.UserID == "" {
+		h.jsonError(c, http.StatusBadRequest, "validation_failed", "user_id is required")
+		return
+	}
+	var isSuperuser int
+	if err := h.DB.QueryRow(`SELECT is_superuser FROM users WHERE id = ? AND status = 'active'`, req.UserID).Scan(&isSuperuser); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			h.jsonError(c, http.StatusNotFound, "not_found", "user not found")
+			return
+		}
+		h.jsonError(c, http.StatusInternalServerError, "internal_error", "failed to read user")
+		return
+	}
+	if isSuperuser != 0 {
+		h.jsonError(c, http.StatusForbidden, "protected_user", "super user cannot be blocked")
+		return
+	}
+	if h.isRoomMember(roomID, req.UserID) {
+		h.jsonError(c, http.StatusConflict, "room_member", "room members cannot be blocked")
+		return
+	}
+
+	now := nowMillis()
+	_, err := h.DB.Exec(
+		`INSERT INTO room_blacklist (room_id, user_id, blocked_by_user_id, created_at)
+		 VALUES (?, ?, ?, ?)
+		 ON CONFLICT(room_id, user_id) DO UPDATE SET
+		   blocked_by_user_id = excluded.blocked_by_user_id,
+		   created_at = excluded.created_at`,
+		roomID, req.UserID, actorID, now,
+	)
+	if err != nil {
+		h.jsonError(c, http.StatusInternalServerError, "internal_error", "block room user failed")
+		return
+	}
+	entry, err := h.roomBlacklistEntryPayload(roomID, req.UserID)
+	if err != nil {
+		h.jsonError(c, http.StatusInternalServerError, "internal_error", "read room blacklist failed")
+		return
+	}
+	h.publishRoomInvitesUpdated(req.UserID)
+	h.publishRoomJoinRequestsUpdated(roomID)
+	c.JSON(http.StatusCreated, gin.H{"entry": entry})
+}
+
+func (h *Handler) unblockRoomUser(c *gin.Context) {
+	roomID := c.Param("room_id")
+	userID := c.Param("user_id")
+	if !h.isAdmin(roomID, currentUserID(c)) {
+		h.jsonError(c, http.StatusForbidden, "forbidden", "admin required")
+		return
+	}
+	if _, err := h.DB.Exec(`DELETE FROM room_blacklist WHERE room_id = ? AND user_id = ?`, roomID, userID); err != nil {
+		h.jsonError(c, http.StatusInternalServerError, "internal_error", "unblock room user failed")
+		return
+	}
+	h.publishRoomInvitesUpdated(userID)
+	h.publishRoomJoinRequestsUpdated(roomID)
+	c.JSON(http.StatusOK, gin.H{"ok": true})
+}
+
 func (h *Handler) listRoomInvites(c *gin.Context) {
 	userID := currentUserID(c)
 	status := c.Query("status")
@@ -397,6 +505,15 @@ func (h *Handler) listRoomInvites(c *gin.Context) {
 		query += ` AND status = ?`
 		args = append(args, status)
 	}
+	query += ` AND NOT (
+		status = 'pending'
+		AND EXISTS (
+			SELECT 1
+			FROM room_blacklist rb
+			WHERE rb.room_id = room_invites.room_id
+			  AND rb.user_id = room_invites.target_user_id
+		)
+	)`
 	query += ` ORDER BY CASE WHEN status = 'pending' THEN 0 ELSE 1 END, created_at DESC`
 	rows, err := h.DB.Query(query, args...)
 	if err != nil {
@@ -509,7 +626,7 @@ func (h *Handler) reviewRoomInvite(c *gin.Context) {
 		h.jsonError(c, http.StatusConflict, "not_pending", "room invite is not pending")
 		return
 	}
-	if reason := h.roomInviteInvalidReason(roomID, inviterID); reason != "" {
+	if reason := h.roomInviteInvalidReason(roomID, inviterID, userID); reason != "" {
 		h.jsonError(c, http.StatusConflict, "invalid_invite", "room invite is no longer valid")
 		return
 	}
@@ -1004,6 +1121,12 @@ func (h *Handler) listJoinRequests(c *gin.Context) {
 		`SELECT jr.id, jr.status, jr.reason, jr.created_at, u.id, u.uid, u.username, u.display_name, u.avatar_url, u.default_avatar_key
 		 FROM join_requests jr JOIN users u ON u.id = jr.user_id
 		 WHERE jr.room_id = ? AND jr.status = ?
+		   AND NOT EXISTS (
+		     SELECT 1
+		     FROM room_blacklist rb
+		     WHERE rb.room_id = jr.room_id
+		       AND rb.user_id = jr.user_id
+		   )
 		 ORDER BY jr.created_at ASC`,
 		roomID, status,
 	)
@@ -1049,6 +1172,10 @@ func (h *Handler) reviewJoinRequest(c *gin.Context) {
 	newStatus := "rejected"
 	if req.Decision == "approve" {
 		newStatus = "approved"
+		if h.isRoomBlacklisted(roomID, userID) {
+			h.jsonError(c, http.StatusConflict, "blocked", "user is blocked from this room")
+			return
+		}
 		if !h.isSuperuser(userID) {
 			var alreadyMember int
 			_ = h.DB.QueryRow(`SELECT COUNT(*) FROM room_memberships WHERE room_id = ? AND user_id = ?`, roomID, userID).Scan(&alreadyMember)
@@ -1223,6 +1350,57 @@ func (h *Handler) deleteRoomInviteHistoryForTargetTx(tx *sql.Tx, roomID, targetU
 	return err
 }
 
+type blacklistEntryScanner interface {
+	Scan(dest ...any) error
+}
+
+func (h *Handler) roomBlacklistEntryPayload(roomID, userID string) (gin.H, error) {
+	return scanRoomBlacklistEntry(h.DB.QueryRow(
+		`SELECT rb.user_id, rb.blocked_by_user_id, rb.created_at,
+		        u.id, u.uid, u.username, u.display_name, u.avatar_url, u.default_avatar_key,
+		        bu.id, bu.uid, bu.username, bu.display_name, bu.avatar_url, bu.default_avatar_key
+		 FROM room_blacklist rb
+		 JOIN users u ON u.id = rb.user_id
+		 LEFT JOIN users bu ON bu.id = rb.blocked_by_user_id
+		 WHERE rb.room_id = ? AND rb.user_id = ?`,
+		roomID, userID,
+	))
+}
+
+func scanRoomBlacklistEntry(scanner blacklistEntryScanner) (gin.H, error) {
+	var userID string
+	var blockedByUserID, blockedByID, blockedByUID, blockedByUsername sql.NullString
+	var id, uid, username string
+	var displayName, avatarURL, defaultAvatar, blockedByDisplayName, blockedByAvatarURL, blockedByDefaultAvatar sql.NullString
+	var createdAt int64
+	if err := scanner.Scan(
+		&userID, &blockedByUserID, &createdAt,
+		&id, &uid, &username, &displayName, &avatarURL, &defaultAvatar,
+		&blockedByID, &blockedByUID, &blockedByUsername, &blockedByDisplayName, &blockedByAvatarURL, &blockedByDefaultAvatar,
+	); err != nil {
+		return nil, err
+	}
+	entry := gin.H{
+		"user":       summaryFromUserFields(id, uid, username, displayName, avatarURL, defaultAvatar),
+		"created_at": formatMillis(createdAt),
+	}
+	if blockedByID.Valid && blockedByUsername.Valid {
+		entry["blocked_by"] = summaryFromUserFields(
+			blockedByID.String,
+			blockedByUID.String,
+			blockedByUsername.String,
+			blockedByDisplayName,
+			blockedByAvatarURL,
+			blockedByDefaultAvatar,
+		)
+	} else {
+		entry["blocked_by"] = nil
+	}
+	_ = userID
+	_ = blockedByUserID
+	return entry, nil
+}
+
 func scanJoinRequest(rows *sql.Rows) (gin.H, string, int64, error) {
 	var requestID, status, reason, id, uid, username string
 	var displayName, avatarURL, defaultAvatar sql.NullString
@@ -1346,7 +1524,7 @@ func (h *Handler) roomInvitePayload(inviteID, viewerID string) gin.H {
 	}
 	invalidReason := ""
 	if status == "pending" {
-		invalidReason = h.roomInviteInvalidReason(roomID, inviterID)
+		invalidReason = h.roomInviteInvalidReason(roomID, inviterID, viewerID)
 	}
 	return gin.H{
 		"id": id, "status": status, "created_at": formatMillis(createdAt), "updated_at": formatMillis(updatedAt),
@@ -1360,9 +1538,12 @@ func (h *Handler) roomInvitePayload(inviteID, viewerID string) gin.H {
 	}
 }
 
-func (h *Handler) roomInviteInvalidReason(roomID, inviterID string) string {
+func (h *Handler) roomInviteInvalidReason(roomID, inviterID, targetUserID string) string {
 	if !h.roomIDExists(roomID) {
 		return "room_missing"
+	}
+	if targetUserID != "" && h.isRoomBlacklisted(roomID, targetUserID) {
+		return "target_blocked"
 	}
 	if h.isSuperuser(inviterID) {
 		return ""
@@ -1379,6 +1560,9 @@ func (h *Handler) roomInviteInvalidReason(roomID, inviterID string) string {
 }
 
 func (h *Handler) hasPrivilegedPendingRoomInvite(roomID, targetUserID string) bool {
+	if h.isRoomBlacklisted(roomID, targetUserID) {
+		return false
+	}
 	rows, err := h.DB.Query(
 		`SELECT inviter_user_id
 		 FROM room_invites

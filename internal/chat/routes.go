@@ -107,6 +107,9 @@ func RegisterRoutes(g *gin.RouterGroup, db *sql.DB, cfg *config.Config, bus *eve
 	// Alias of PATCH /rooms/:room_id above (room-level settings).
 	g.PATCH("/rooms/:room_id/settings", h.updateRoomSettings)
 	g.POST("/rooms/:room_id/invites", h.inviteMember)
+	g.GET("/rooms/:room_id/blacklist", h.listRoomBlacklist)
+	g.POST("/rooms/:room_id/blacklist", h.blockRoomUser)
+	g.DELETE("/rooms/:room_id/blacklist/:user_id", h.unblockRoomUser)
 	g.DELETE("/rooms/:room_id/members/:user_id", h.removeMember)
 	g.PATCH("/rooms/:room_id/members/:user_id", h.updateMemberRole)
 	// Alias of PATCH /rooms/:room_id/members/:user_id (role change). Kept for

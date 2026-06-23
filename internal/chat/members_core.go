@@ -134,6 +134,10 @@ func (h *Handler) joinRoom(c *gin.Context) {
 	}
 	userID := currentUserID(c)
 	isSuperuser := h.isSuperuser(userID)
+	if !isSuperuser && h.isRoomBlacklisted(roomID, userID) {
+		h.jsonError(c, http.StatusNotFound, "not_found", "room not found")
+		return
+	}
 	var policy string
 	if err := h.DB.QueryRow(`SELECT join_policy FROM rooms WHERE id = ?`, roomID).Scan(&policy); err != nil {
 		h.jsonError(c, http.StatusInternalServerError, "internal_error", "failed to read room")

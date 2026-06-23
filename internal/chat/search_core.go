@@ -236,17 +236,31 @@ func (h *Handler) searchPublicRooms(userID, query string, limit, offset int) ([]
 	if superuser {
 		visibilityFilter = `(r.rid = ? OR instr(lower(r.name), lower(?)) > 0)`
 	}
+	blacklistFilter := ``
+	countArgs := []any{userID, query, query}
+	if !superuser {
+		blacklistFilter = ` AND NOT EXISTS (
+		     SELECT 1
+		     FROM room_blacklist rb
+		     WHERE rb.room_id = r.id
+		       AND rb.user_id = ?
+		   )`
+		countArgs = append(countArgs, userID)
+	}
 	var total int
 	if err := h.DB.QueryRow(
 		`SELECT COUNT(*)
 		 FROM rooms r
 		 LEFT JOIN room_memberships rm ON rm.room_id = r.id AND rm.user_id = ?
 		 WHERE `+visibilityFilter+`
-		   AND rm.user_id IS NULL`,
-		userID, query, query,
+		   AND rm.user_id IS NULL
+		   `+blacklistFilter,
+		countArgs...,
 	).Scan(&total); err != nil {
 		return nil, nil, 0, err
 	}
+	rowArgs := append([]any{}, countArgs...)
+	rowArgs = append(rowArgs, fetch, offset)
 	rows, err := h.DB.Query(
 		`SELECT r.id, r.rid, r.name, r.avatar_url, r.default_avatar_key, r.created_by_user_id,
 		        r.visibility, r.join_policy, r.ai_voice_announce_enabled,
@@ -257,9 +271,10 @@ func (h *Handler) searchPublicRooms(userID, query string, limit, offset int) ([]
 		 LEFT JOIN room_memberships rm ON rm.room_id = r.id AND rm.user_id = ?
 		 WHERE `+visibilityFilter+`
 		   AND rm.user_id IS NULL
+		   `+blacklistFilter+`
 		 ORDER BY r.updated_at DESC, r.name ASC, r.id DESC
 		 LIMIT ? OFFSET ?`,
-		userID, query, query, fetch, offset,
+		rowArgs...,
 	)
 	if err != nil {
 		return nil, nil, 0, err

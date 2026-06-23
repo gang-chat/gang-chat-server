@@ -37,6 +37,15 @@ func (h *Handler) isRoomMember(roomID, userID string) bool {
 	return exists != 0
 }
 
+func (h *Handler) isRoomBlacklisted(roomID, userID string) bool {
+	var exists int
+	_ = h.DB.QueryRow(
+		`SELECT COUNT(*) FROM room_blacklist WHERE room_id = ? AND user_id = ?`,
+		roomID, userID,
+	).Scan(&exists)
+	return exists != 0
+}
+
 func (h *Handler) roomExists(c *gin.Context, roomID string) bool {
 	if h.roomIDExists(roomID) {
 		return true
