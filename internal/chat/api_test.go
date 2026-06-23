@@ -1963,6 +1963,94 @@ func TestLiveHeadphonesAndVoiceBlock(t *testing.T) {
 	}
 }
 
+func TestLiveModerationPersistsOnlyWithinRoom(t *testing.T) {
+	api := newAPIHarness(t)
+	owner := api.register("voice_scope_owner")
+	member := api.register("voice_scope_member")
+	roomA := api.createRoom(owner.Token, map[string]any{"name": "Voice Scope A", "join_policy": "open"})
+	roomB := api.createRoom(owner.Token, map[string]any{"name": "Voice Scope B", "join_policy": "open"})
+	roomAID := roomA["id"].(string)
+	roomBID := roomB["id"].(string)
+	memberID := member.User["id"].(string)
+
+	status, response := api.request(http.MethodPost, "/rooms/"+roomAID+"/join", member.Token, nil)
+	api.requireStatus(status, http.StatusOK, response)
+	status, response = api.request(http.MethodPost, "/rooms/"+roomBID+"/join", member.Token, nil)
+	api.requireStatus(status, http.StatusOK, response)
+
+	status, response = api.request(http.MethodPost, "/rooms/"+roomAID+"/live/join", member.Token, map[string]any{
+		"client_live_session_id": "clive_scope_a_initial",
+		"source":                 "live_panel",
+	})
+	api.requireStatus(status, http.StatusOK, response)
+
+	status, response = api.request(http.MethodPost, "/rooms/"+roomAID+"/live/participants/"+memberID+"/moderation", owner.Token, map[string]any{
+		"action": "mute_mic",
+		"reason": "room scoped mute",
+	})
+	api.requireStatus(status, http.StatusOK, response)
+
+	if _, err := api.db.Exec(`DELETE FROM live_participants WHERE room_id = ? AND user_id = ?`, roomAID, memberID); err != nil {
+		t.Fatalf("failed to clear room A live participant after mute: %v", err)
+	}
+	status, response = api.request(http.MethodPost, "/rooms/"+roomAID+"/live/join", member.Token, map[string]any{
+		"client_live_session_id": "clive_scope_a_after_mute",
+		"source":                 "live_panel",
+	})
+	api.requireStatus(status, http.StatusOK, response)
+	participant := response["participant"].(map[string]any)
+	if participant["mic_blocked"] != true || participant["mic_muted"] != true ||
+		participant["voice_blocked"] != true || participant["headphones_blocked"] != false {
+		t.Fatalf("mic mute should persist only as a microphone block in the same room: %v", participant)
+	}
+
+	status, response = api.request(http.MethodPost, "/rooms/"+roomBID+"/live/join", member.Token, map[string]any{
+		"client_live_session_id": "clive_scope_b_after_room_a_mute",
+		"source":                 "live_panel",
+	})
+	api.requireStatus(status, http.StatusOK, response)
+	participant = response["participant"].(map[string]any)
+	if participant["mic_blocked"] != false || participant["voice_blocked"] != false ||
+		participant["headphones_blocked"] != false {
+		t.Fatalf("room A mic mute should not affect room B: %v", participant)
+	}
+
+	status, response = api.request(http.MethodPost, "/rooms/"+roomAID+"/live/participants/"+memberID+"/moderation", owner.Token, map[string]any{
+		"action": "block_voice",
+		"reason": "room scoped isolation",
+	})
+	api.requireStatus(status, http.StatusOK, response)
+
+	if _, err := api.db.Exec(`DELETE FROM live_participants WHERE room_id = ? AND user_id = ?`, roomAID, memberID); err != nil {
+		t.Fatalf("failed to clear room A live participant after isolation: %v", err)
+	}
+	status, response = api.request(http.MethodPost, "/rooms/"+roomAID+"/live/join", member.Token, map[string]any{
+		"client_live_session_id": "clive_scope_a_after_isolation",
+		"source":                 "live_panel",
+	})
+	api.requireStatus(status, http.StatusOK, response)
+	participant = response["participant"].(map[string]any)
+	if participant["mic_blocked"] != true || participant["mic_muted"] != true ||
+		participant["headphones_blocked"] != true || participant["headphones_muted"] != true ||
+		participant["voice_blocked"] != true {
+		t.Fatalf("isolation should persist in the same room: %v", participant)
+	}
+
+	if _, err := api.db.Exec(`DELETE FROM live_participants WHERE room_id = ? AND user_id = ?`, roomBID, memberID); err != nil {
+		t.Fatalf("failed to clear room B live participant: %v", err)
+	}
+	status, response = api.request(http.MethodPost, "/rooms/"+roomBID+"/live/join", member.Token, map[string]any{
+		"client_live_session_id": "clive_scope_b_after_room_a_isolation",
+		"source":                 "live_panel",
+	})
+	api.requireStatus(status, http.StatusOK, response)
+	participant = response["participant"].(map[string]any)
+	if participant["mic_blocked"] != false || participant["voice_blocked"] != false ||
+		participant["headphones_blocked"] != false || participant["headphones_muted"] != false {
+		t.Fatalf("room A isolation should not affect room B: %v", participant)
+	}
+}
+
 func contains(haystack []string, needle string) bool {
 	for _, s := range haystack {
 		if s == needle {

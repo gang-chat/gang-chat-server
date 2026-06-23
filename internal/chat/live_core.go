@@ -71,17 +71,24 @@ func (h *Handler) joinLive(c *gin.Context) {
 		h.jsonError(c, http.StatusInternalServerError, "internal_error", "failed to join live")
 		return
 	}
-	// Re-apply any persistent voice ban onto the fresh participant row so a
-	// banned user who rejoins comes back muted/blocked. The token issued below
-	// already reflects the ban (canPublish=false) via liveKitMediaPermissions.
-	if h.isVoiceBanned(roomID, userID) {
+	// Re-apply any persistent room-scoped moderation onto the fresh participant
+	// row so a user who rejoins the same room comes back muted/isolated. The
+	// token issued below already reflects the same policy via
+	// liveKitMediaPermissions.
+	policy := h.liveVoicePolicy(roomID, userID)
+	if policy.MicBlocked || policy.HeadphonesBlocked {
+		sets := []string{"updated_at = ?"}
+		args := []any{now}
+		if policy.MicBlocked {
+			sets = append(sets, "mic_muted = 1", "mic_blocked = 1", "voice_blocked = 1")
+		}
+		if policy.HeadphonesBlocked {
+			sets = append(sets, "headphones_muted = 1", "headphones_blocked = 1")
+		}
+		args = append(args, roomID, userID)
 		_, _ = h.DB.Exec(
-			`UPDATE live_participants
-			 SET mic_muted = 1, mic_blocked = 1,
-			     headphones_muted = 1, headphones_blocked = 1,
-			     voice_blocked = 1, updated_at = ?
-			 WHERE room_id = ? AND user_id = ?`,
-			now, roomID, userID,
+			`UPDATE live_participants SET `+strings.Join(sets, ", ")+` WHERE room_id = ? AND user_id = ?`,
+			args...,
 		)
 	}
 	_, _ = h.DB.Exec(`UPDATE rooms SET updated_at = ? WHERE id = ?`, now, roomID)
@@ -169,8 +176,12 @@ func (h *Handler) updateMyLiveState(c *gin.Context) {
 		roomID,
 		userID,
 	).Scan(&micBlocked, &headphonesBlocked)
-	if h.isVoiceBanned(roomID, userID) {
+	policy := h.liveVoicePolicy(roomID, userID)
+	if policy.MicBlocked {
 		micBlocked = 1
+	}
+	if policy.HeadphonesBlocked {
+		headphonesBlocked = 1
 	}
 
 	sets := []string{"updated_at = ?"}
@@ -320,11 +331,16 @@ func (h *Handler) liveKitMediaPermissions(roomID, userID string) (bool, bool) {
 		 FROM live_participants WHERE room_id = ? AND user_id = ?`,
 		roomID, userID,
 	).Scan(&micBlocked, &headphonesMuted, &headphonesBlocked)
-	// A voice ban is persistent and room-scoped (room_voice_bans), so it's the
-	// authority on whether this user may publish — not the easily-reset
-	// participant row.
-	voiceBlocked := h.isVoiceBanned(roomID, userID)
-	canPublish := !voiceBlocked && micBlocked == 0
+	// Persistent voice moderation is room-scoped (room_voice_bans), so it must
+	// also constrain fresh tokens rather than relying only on the live row.
+	policy := h.liveVoicePolicy(roomID, userID)
+	if policy.MicBlocked {
+		micBlocked = 1
+	}
+	if policy.HeadphonesBlocked {
+		headphonesBlocked = 1
+	}
+	canPublish := micBlocked == 0
 	canSubscribe := headphonesBlocked == 0 && headphonesMuted == 0
 	return canPublish, canSubscribe
 }
@@ -381,11 +397,30 @@ func (h *Handler) screenAudioToken(roomID, ownerUserID, identity string, canPubl
 	return token, expiresAt, err
 }
 
-// isVoiceBanned reports whether the user has a persistent voice ban in the
-// room. This survives leave/rejoin, unlike the live_participants.voice_blocked
-// projection.
+type liveVoicePolicy struct {
+	MicBlocked        bool
+	HeadphonesBlocked bool
+}
+
+// liveVoicePolicy reports the room-scoped persistent live moderation for a
+// user. This survives leave/rejoin in the same room but is keyed by room_id, so
+// it never follows the user into another room's voice channel.
+func (h *Handler) liveVoicePolicy(roomID, userID string) liveVoicePolicy {
+	var micBlocked, headphonesBlocked int
+	_ = h.DB.QueryRow(
+		`SELECT mic_blocked, headphones_blocked
+		 FROM room_voice_bans WHERE room_id = ? AND user_id = ?`,
+		roomID, userID,
+	).Scan(&micBlocked, &headphonesBlocked)
+	return liveVoicePolicy{
+		MicBlocked:        micBlocked != 0,
+		HeadphonesBlocked: headphonesBlocked != 0,
+	}
+}
+
+// isVoiceBanned reports whether the user has a persistent microphone publish
+// block in the room. This survives leave/rejoin, unlike the
+// live_participants.voice_blocked projection.
 func (h *Handler) isVoiceBanned(roomID, userID string) bool {
-	var count int
-	_ = h.DB.QueryRow(`SELECT COUNT(*) FROM room_voice_bans WHERE room_id = ? AND user_id = ?`, roomID, userID).Scan(&count)
-	return count > 0
+	return h.liveVoicePolicy(roomID, userID).MicBlocked
 }

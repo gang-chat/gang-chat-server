@@ -10,7 +10,7 @@ import (
 // participant. Each action now drives the LiveKit media session through
 // h.Live so it takes effect immediately, instead of only flipping a DB flag
 // and waiting for the client to comply or the token to expire. The DB writes
-// remain as the projection clients read over SSE, plus, for voice bans, a
+// remain as the projection clients read over SSE, plus a room-scoped
 // persistent policy that outlives the live session (see room_voice_bans).
 //
 // When h.Live is nil (dev mode without LiveKit credentials, or tests) the SDK
@@ -62,11 +62,25 @@ func (h *Handler) moderateLiveParticipant(c *gin.Context) {
 			h.jsonError(c, http.StatusBadGateway, "livekit_error", "failed to mute microphone")
 			return
 		}
+		now := nowMillis()
+		_, _ = h.DB.Exec(
+			`INSERT INTO room_voice_bans (
+			   room_id, user_id, created_by_user_id, reason, created_at,
+			   mic_blocked, headphones_blocked
+			 )
+			 VALUES (?, ?, ?, ?, ?, 1, 0)
+			 ON CONFLICT(room_id, user_id) DO UPDATE SET
+			   created_by_user_id = excluded.created_by_user_id,
+			   reason = excluded.reason,
+			   created_at = excluded.created_at,
+			   mic_blocked = 1`,
+			roomID, targetID, actorID, req.Reason, now,
+		)
 		_, _ = h.DB.Exec(
 			`UPDATE live_participants
 			 SET mic_muted = 1, mic_blocked = 1, voice_blocked = 1, updated_at = ?
 			 WHERE room_id = ? AND user_id = ?`,
-			nowMillis(), roomID, targetID,
+			now, roomID, targetID,
 		)
 
 	case "block_voice":
@@ -84,12 +98,17 @@ func (h *Handler) moderateLiveParticipant(c *gin.Context) {
 		_ = h.Live.MuteMicrophone(roomID, targetID, true)
 		now := nowMillis()
 		_, _ = h.DB.Exec(
-			`INSERT INTO room_voice_bans (room_id, user_id, created_by_user_id, reason, created_at)
-			 VALUES (?, ?, ?, ?, ?)
+			`INSERT INTO room_voice_bans (
+			   room_id, user_id, created_by_user_id, reason, created_at,
+			   mic_blocked, headphones_blocked
+			 )
+			 VALUES (?, ?, ?, ?, ?, 1, 1)
 			 ON CONFLICT(room_id, user_id) DO UPDATE SET
 			   created_by_user_id = excluded.created_by_user_id,
 			   reason = excluded.reason,
-			   created_at = excluded.created_at`,
+			   created_at = excluded.created_at,
+			   mic_blocked = 1,
+			   headphones_blocked = 1`,
 			roomID, targetID, actorID, req.Reason, now,
 		)
 		_, _ = h.DB.Exec(
@@ -129,6 +148,18 @@ func (h *Handler) moderateLiveParticipant(c *gin.Context) {
 			h.jsonError(c, http.StatusBadGateway, "livekit_error", "failed to restore headphones")
 			return
 		}
+		_, _ = h.DB.Exec(
+			`UPDATE room_voice_bans
+			 SET headphones_blocked = 0
+			 WHERE room_id = ? AND user_id = ?`,
+			roomID, targetID,
+		)
+		_, _ = h.DB.Exec(
+			`DELETE FROM room_voice_bans
+			 WHERE room_id = ? AND user_id = ?
+			   AND mic_blocked = 0 AND headphones_blocked = 0`,
+			roomID, targetID,
+		)
 		_, _ = h.DB.Exec(
 			`UPDATE live_participants
 			 SET headphones_muted = 0, headphones_blocked = 0, updated_at = ?
