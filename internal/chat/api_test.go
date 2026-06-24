@@ -2991,11 +2991,22 @@ func TestRoomEventNotifications(t *testing.T) {
 	if promotion["type"] != roomNotificationRolePromoted || promotion["to_role"] != "admin" {
 		t.Fatalf("promotion notification mismatch: %v", promotion)
 	}
+	if promotion["read_at"] != nil {
+		t.Fatalf("new promotion notification should be unread: %v", promotion)
+	}
 	if promotion["actor"].(map[string]any)["room_role"] != "owner" {
 		t.Fatalf("promotion actor should include room role: %v", promotion)
 	}
 	if roomPayload := promotion["room"].(map[string]any); roomPayload["name"] != "Event Room" || roomPayload["description"] != "Room event bio" {
 		t.Fatalf("promotion should include room payload: %v", promotion)
+	}
+	status, response = api.request(http.MethodPost, "/room-notifications/read", member.Token, nil)
+	api.requireStatus(status, http.StatusOK, response)
+	status, response = api.request(http.MethodGet, "/room-notifications", member.Token, nil)
+	api.requireStatus(status, http.StatusOK, response)
+	promotion = response["notifications"].([]any)[0].(map[string]any)
+	if promotion["read_at"] == nil {
+		t.Fatalf("mark read should stamp room notification: %v", promotion)
 	}
 
 	status, response = api.request(http.MethodPatch, "/rooms/"+roomID+"/members/"+member.User["id"].(string), owner.Token, map[string]any{

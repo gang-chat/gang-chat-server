@@ -148,9 +148,24 @@ func (h *Handler) listRoomNotifications(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"notifications": items, "next_cursor": nil})
 }
 
+func (h *Handler) markRoomNotificationsRead(c *gin.Context) {
+	userID := currentUserID(c)
+	if _, err := h.DB.Exec(
+		`UPDATE room_notifications
+		 SET read_at = ?
+		 WHERE recipient_user_id = ? AND read_at IS NULL`,
+		nowMillis(), userID,
+	); err != nil {
+		h.jsonError(c, http.StatusInternalServerError, "internal_error", "mark room notifications read failed")
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"ok": true})
+}
+
 func (h *Handler) roomEventNotificationPayload(notificationID, viewerID string) gin.H {
 	var id, eventType, roomID string
 	var actorRefID, fromRole, toRole sql.NullString
+	var readAt sql.NullInt64
 	var createdAt int64
 	var rid, roomName, roomDefaultAvatar, roomVisibility, roomJoinPolicy, roomDescription string
 	var roomAvatarURL, roomCreatedByUserID sql.NullString
@@ -159,7 +174,8 @@ func (h *Handler) roomEventNotificationPayload(notificationID, viewerID string) 
 	var actorDisplayName, actorAvatarURL, actorDefaultAvatar sql.NullString
 	var actorRoomDisplayName, actorRoomRole sql.NullString
 	err := h.DB.QueryRow(
-		`SELECT rn.id, rn.type, rn.room_id, rn.actor_user_id, rn.from_role, rn.to_role, rn.created_at,
+		`SELECT rn.id, rn.type, rn.room_id, rn.actor_user_id, rn.from_role, rn.to_role,
+		        rn.created_at, rn.read_at,
 		        COALESCE(r.rid, rn.room_rid),
 		        COALESCE(r.name, rn.room_name),
 		        COALESCE(r.avatar_url, rn.room_avatar_url),
@@ -179,7 +195,7 @@ func (h *Handler) roomEventNotificationPayload(notificationID, viewerID string) 
 		 WHERE rn.id = ? AND rn.recipient_user_id = ?`,
 		notificationID, viewerID,
 	).Scan(
-		&id, &eventType, &roomID, &actorRefID, &fromRole, &toRole, &createdAt,
+		&id, &eventType, &roomID, &actorRefID, &fromRole, &toRole, &createdAt, &readAt,
 		&rid, &roomName, &roomAvatarURL, &roomDefaultAvatar, &roomVisibility,
 		&roomJoinPolicy, &roomDescription, &roomCreatedByUserID, &roomExists,
 		&actorID, &actorUID, &actorUsername, &actorDisplayName, &actorAvatarURL,
@@ -226,6 +242,7 @@ func (h *Handler) roomEventNotificationPayload(notificationID, viewerID string) 
 		"id":           id,
 		"type":         eventType,
 		"created_at":   formatMillis(createdAt),
+		"read_at":      nullableMillis(readAt),
 		"from_role":    nullableString(fromRole),
 		"to_role":      nullableString(toRole),
 		"room_exists":  roomExists != 0,
