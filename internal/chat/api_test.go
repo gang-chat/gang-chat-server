@@ -2956,6 +2956,105 @@ func TestRoomApplicationNotifications(t *testing.T) {
 	}
 }
 
+func TestRoomEventNotifications(t *testing.T) {
+	api := newAPIHarness(t)
+	owner := api.register("room_event_owner")
+	member := api.register("room_event_member")
+	nextOwner := api.register("room_event_next_owner")
+	room := api.createRoom(owner.Token, map[string]any{"name": "Event Room", "description": "Room event bio"})
+	roomID := room["id"].(string)
+
+	inviteAndAccept := func(user testSession) {
+		t.Helper()
+		status, response := api.request(http.MethodPost, "/rooms/"+roomID+"/invites", owner.Token, map[string]any{
+			"user_id": user.User["id"].(string),
+		})
+		api.requireStatus(status, http.StatusCreated, response)
+		inviteID := response["invite"].(map[string]any)["id"].(string)
+		status, response = api.request(http.MethodPatch, "/room-invites/"+inviteID, user.Token, map[string]any{"decision": "accept"})
+		api.requireStatus(status, http.StatusOK, response)
+	}
+	inviteAndAccept(member)
+	inviteAndAccept(nextOwner)
+
+	status, response := api.request(http.MethodPatch, "/rooms/"+roomID+"/members/"+member.User["id"].(string), owner.Token, map[string]any{
+		"role": "admin",
+	})
+	api.requireStatus(status, http.StatusOK, response)
+	status, response = api.request(http.MethodGet, "/room-notifications", member.Token, nil)
+	api.requireStatus(status, http.StatusOK, response)
+	notifications := response["notifications"].([]any)
+	if len(notifications) != 1 {
+		t.Fatalf("promotion should create one room notification: %v", response)
+	}
+	promotion := notifications[0].(map[string]any)
+	if promotion["type"] != roomNotificationRolePromoted || promotion["to_role"] != "admin" {
+		t.Fatalf("promotion notification mismatch: %v", promotion)
+	}
+	if promotion["actor"].(map[string]any)["room_role"] != "owner" {
+		t.Fatalf("promotion actor should include room role: %v", promotion)
+	}
+	if roomPayload := promotion["room"].(map[string]any); roomPayload["name"] != "Event Room" || roomPayload["description"] != "Room event bio" {
+		t.Fatalf("promotion should include room payload: %v", promotion)
+	}
+
+	status, response = api.request(http.MethodPatch, "/rooms/"+roomID+"/members/"+member.User["id"].(string), owner.Token, map[string]any{
+		"role": "member",
+	})
+	api.requireStatus(status, http.StatusOK, response)
+	status, response = api.request(http.MethodDelete, "/rooms/"+roomID+"/members/"+member.User["id"].(string), owner.Token, nil)
+	api.requireStatus(status, http.StatusOK, response)
+	status, response = api.request(http.MethodGet, "/room-notifications", member.Token, nil)
+	api.requireStatus(status, http.StatusOK, response)
+	notifications = response["notifications"].([]any)
+	if len(notifications) != 3 {
+		t.Fatalf("member should retain role and removal notifications: %v", response)
+	}
+	notificationByType := func(items []any, notificationType string) map[string]any {
+		t.Helper()
+		for _, item := range items {
+			notification := item.(map[string]any)
+			if notification["type"] == notificationType {
+				return notification
+			}
+		}
+		t.Fatalf("missing notification type %s in %v", notificationType, items)
+		return nil
+	}
+	removed := notificationByType(notifications, roomNotificationMemberRemoved)
+	if removed["type"] != roomNotificationMemberRemoved || removed["room_exists"] != true {
+		t.Fatalf("removal notification mismatch: %v", removed)
+	}
+	if removed["room"].(map[string]any)["joined"] != false {
+		t.Fatalf("removed member should not be joined in notification room payload: %v", removed)
+	}
+	demotion := notificationByType(notifications, roomNotificationRoleDemoted)
+	if demotion["type"] != roomNotificationRoleDemoted || demotion["from_role"] != "admin" || demotion["to_role"] != "member" {
+		t.Fatalf("demotion notification mismatch: %v", demotion)
+	}
+
+	status, response = api.request(http.MethodPatch, "/rooms/"+roomID+"/creator", owner.Token, map[string]any{
+		"user_id": nextOwner.User["id"].(string),
+	})
+	api.requireStatus(status, http.StatusOK, response)
+	status, response = api.request(http.MethodGet, "/room-notifications", nextOwner.Token, nil)
+	api.requireStatus(status, http.StatusOK, response)
+	notifications = response["notifications"].([]any)
+	if len(notifications) != 1 || notifications[0].(map[string]any)["type"] != roomNotificationRolePromoted {
+		t.Fatalf("new creator should receive promotion notification: %v", response)
+	}
+	status, response = api.request(http.MethodGet, "/room-notifications", owner.Token, nil)
+	api.requireStatus(status, http.StatusOK, response)
+	notifications = response["notifications"].([]any)
+	if len(notifications) != 1 {
+		t.Fatalf("previous creator should receive self demotion notification: %v", response)
+	}
+	selfDemotion := notifications[0].(map[string]any)
+	if selfDemotion["type"] != roomNotificationCreatorTransferDemoted || selfDemotion["actor"] != nil || selfDemotion["to_role"] != "admin" {
+		t.Fatalf("creator transfer demotion notification mismatch: %v", selfDemotion)
+	}
+}
+
 func TestRoomBlacklistFlow(t *testing.T) {
 	api := newAPIHarness(t)
 	super := api.login("GANG", "64n9-Ch47")

@@ -53,7 +53,7 @@ func (h *Handler) appendSystemMessageTx(tx *sql.Tx, roomID string, spec systemMe
 	if spec.Event == "" || subjectID == "" {
 		return nil
 	}
-	subject, err := userSummaryByIDTx(tx, subjectID)
+	subject, err := userSummaryByRoomIDTx(tx, roomID, subjectID)
 	if err != nil {
 		return err
 	}
@@ -69,7 +69,7 @@ func (h *Handler) appendSystemMessageTx(tx *sql.Tx, roomID string, spec systemMe
 
 	actorName := ""
 	if spec.ActorID != "" {
-		actor, err := userSummaryByIDTx(tx, spec.ActorID)
+		actor, err := userSummaryByRoomIDTx(tx, roomID, spec.ActorID)
 		if err != nil {
 			return err
 		}
@@ -104,17 +104,30 @@ func (h *Handler) appendSystemMessageTx(tx *sql.Tx, roomID string, spec systemMe
 	return err
 }
 
-func userSummaryByIDTx(tx *sql.Tx, userID string) (userSummary, error) {
+func userSummaryByRoomIDTx(tx *sql.Tx, roomID, userID string) (userSummary, error) {
 	var id, uid, username string
-	var displayName, avatarURL, defaultAvatar sql.NullString
+	var displayName, avatarURL, defaultAvatar, roomDisplayName, roomRole sql.NullString
+	var isSuperuser int
 	err := tx.QueryRow(
-		`SELECT id, uid, username, display_name, avatar_url, default_avatar_key FROM users WHERE id = ?`,
-		userID,
-	).Scan(&id, &uid, &username, &displayName, &avatarURL, &defaultAvatar)
+		`SELECT u.id, u.uid, u.username, u.display_name, u.avatar_url,
+		        u.default_avatar_key, u.is_superuser, rm.room_display_name, rm.role
+		 FROM users u
+		 LEFT JOIN room_memberships rm ON rm.room_id = ? AND rm.user_id = u.id
+		 WHERE u.id = ?`,
+		roomID, userID,
+	).Scan(&id, &uid, &username, &displayName, &avatarURL, &defaultAvatar, &isSuperuser, &roomDisplayName, &roomRole)
 	if err != nil {
 		return userSummary{}, err
 	}
-	return summaryFromUserFields(id, uid, username, displayName, avatarURL, defaultAvatar), nil
+	summary := summaryFromUserFields(id, uid, username, displayName, avatarURL, defaultAvatar)
+	summary.RoomDisplayName = nullableString(roomDisplayName)
+	if roomRole.Valid && roomRole.String != "" {
+		summary.RoomRole = roomRole.String
+	} else if isSuperuser != 0 {
+		summary.RoomRole = "superuser"
+	}
+	summary.IsSuperuser = isSuperuser != 0
+	return summary, nil
 }
 
 func systemMessageBody(spec systemMessageSpec, actorName string) string {

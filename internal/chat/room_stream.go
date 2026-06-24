@@ -297,6 +297,16 @@ func (h *Handler) publishRoomApplicationsUpdated(userID string) {
 	})
 }
 
+func (h *Handler) publishRoomNotificationsUpdated(userID string) {
+	if h == nil || h.Bus == nil || userID == "" {
+		return
+	}
+	h.Bus.PublishUser(userID, eventbus.Event{
+		Type: "room_notifications_updated",
+		Data: map[string]any{"has_changes": true},
+	})
+}
+
 func (h *Handler) publishRoomJoinRequestsUpdated(roomID string) {
 	if h == nil || h.Bus == nil || roomID == "" {
 		return

@@ -91,6 +91,7 @@ func RegisterRoutes(g *gin.RouterGroup, db *sql.DB, cfg *config.Config, bus *eve
 	g.PATCH("/room-invites/:invite_id", h.reviewRoomInvite)
 	g.GET("/room-applications", h.listRoomApplications)
 	g.PATCH("/room-applications/:request_id", h.withdrawRoomApplication)
+	g.GET("/room-notifications", h.listRoomNotifications)
 	g.GET("/rooms/:room_id", h.getRoom)
 	g.PATCH("/rooms/:room_id", h.updateRoomSettings)
 	g.GET("/rooms/:room_id/members", h.listMembers)

@@ -875,6 +875,15 @@ func (h *Handler) removeMember(c *gin.Context) {
 			h.jsonError(c, http.StatusInternalServerError, "internal_error", "remove member failed")
 			return
 		}
+		if err := h.appendRoomNotificationTx(tx, roomNotificationSpec{
+			Type:        roomNotificationMemberRemoved,
+			RecipientID: targetID,
+			RoomID:      roomID,
+			ActorID:     actorID,
+		}); err != nil {
+			h.jsonError(c, http.StatusInternalServerError, "internal_error", "remove member failed")
+			return
+		}
 	}
 	if err := tx.Commit(); err != nil {
 		h.jsonError(c, http.StatusInternalServerError, "internal_error", "save membership failed")
@@ -885,6 +894,9 @@ func (h *Handler) removeMember(c *gin.Context) {
 	h.publishRoomDeleted(roomID, targetID)
 	h.publishPendingRoomInvitesUpdatedForInviter(roomID, targetID)
 	h.publishRoomInvitesUpdated(targetID)
+	if !pruned {
+		h.publishRoomNotificationsUpdated(targetID)
+	}
 	if !pruned {
 		h.publishRoomUpdated(roomID)
 		if removedFromLive {
@@ -949,6 +961,17 @@ func (h *Handler) updateMemberRole(c *gin.Context) {
 			h.jsonError(c, http.StatusInternalServerError, "internal_error", "update role failed")
 			return
 		}
+		if err := h.appendRoomNotificationTx(tx, roomNotificationSpec{
+			Type:        roomRoleNotificationType(currentRole, req.Role),
+			RecipientID: targetID,
+			RoomID:      roomID,
+			ActorID:     actorID,
+			FromRole:    currentRole,
+			ToRole:      req.Role,
+		}); err != nil {
+			h.jsonError(c, http.StatusInternalServerError, "internal_error", "update role failed")
+			return
+		}
 	}
 	if err := tx.Commit(); err != nil {
 		h.jsonError(c, http.StatusInternalServerError, "internal_error", "save membership failed")
@@ -960,6 +983,7 @@ func (h *Handler) updateMemberRole(c *gin.Context) {
 	h.publishRoomRole(roomID, targetID)
 	if currentRole != req.Role {
 		h.publishRoomUpdated(roomID)
+		h.publishRoomNotificationsUpdated(targetID)
 	}
 	c.JSON(http.StatusOK, gin.H{"member": h.memberPayload(roomID, targetID, actorID)})
 }
@@ -1016,6 +1040,7 @@ func (h *Handler) transferRoomCreator(c *gin.Context) {
 		return
 	}
 	defer tx.Rollback()
+	roomNotificationRecipients := map[string]bool{}
 	_, _ = tx.Exec(`UPDATE room_memberships SET role = 'admin' WHERE room_id = ? AND role = 'owner' AND user_id != ?`, roomID, targetID)
 	if _, err := tx.Exec(`UPDATE room_memberships SET role = 'owner' WHERE room_id = ? AND user_id = ?`, roomID, targetID); err != nil {
 		h.jsonError(c, http.StatusInternalServerError, "internal_error", "transfer creator failed")
@@ -1036,6 +1061,18 @@ func (h *Handler) transferRoomCreator(c *gin.Context) {
 			h.jsonError(c, http.StatusInternalServerError, "internal_error", "transfer creator failed")
 			return
 		}
+		if err := h.appendRoomNotificationTx(tx, roomNotificationSpec{
+			Type:        roomNotificationRolePromoted,
+			RecipientID: targetID,
+			RoomID:      roomID,
+			ActorID:     actorID,
+			FromRole:    targetRole,
+			ToRole:      "owner",
+		}); err != nil {
+			h.jsonError(c, http.StatusInternalServerError, "internal_error", "transfer creator failed")
+			return
+		}
+		roomNotificationRecipients[targetID] = true
 	}
 	for _, ownerID := range previousOwnerIDs {
 		if ownerID == targetID {
@@ -1051,6 +1088,17 @@ func (h *Handler) transferRoomCreator(c *gin.Context) {
 			h.jsonError(c, http.StatusInternalServerError, "internal_error", "transfer creator failed")
 			return
 		}
+		if err := h.appendRoomNotificationTx(tx, roomNotificationSpec{
+			Type:        roomNotificationCreatorTransferDemoted,
+			RecipientID: ownerID,
+			RoomID:      roomID,
+			FromRole:    "owner",
+			ToRole:      "admin",
+		}); err != nil {
+			h.jsonError(c, http.StatusInternalServerError, "internal_error", "transfer creator failed")
+			return
+		}
+		roomNotificationRecipients[ownerID] = true
 	}
 	if err := tx.Commit(); err != nil {
 		h.jsonError(c, http.StatusInternalServerError, "internal_error", "save creator transfer failed")
@@ -1067,6 +1115,9 @@ func (h *Handler) transferRoomCreator(c *gin.Context) {
 	publishRoleOnce(targetID)
 	for _, ownerID := range previousOwnerIDs {
 		publishRoleOnce(ownerID)
+	}
+	for userID := range roomNotificationRecipients {
+		h.publishRoomNotificationsUpdated(userID)
 	}
 	h.publishRoomUpdated(roomID)
 	detail, err := h.buildRoomDetail(roomID, actorID)
