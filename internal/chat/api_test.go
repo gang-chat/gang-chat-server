@@ -1531,8 +1531,14 @@ func TestRoomInfoManagementEndpoints(t *testing.T) {
 	if personalRoom["remark_name"] != "My Managed Room" || personalRoom["notification_policy"] != "silent" || personalRoom["is_pinned"] != true {
 		t.Fatalf("room personal fields not returned on detail: %v", personalRoom)
 	}
-	if profile["display_name"] != "Local Nick" || profile["default_avatar_key"] != "red-4" {
+	if profile["display_name"] != "Local Nick" {
 		t.Fatalf("room personal profile not returned: %v", profile)
+	}
+	if _, ok := profile["avatar_url"]; ok {
+		t.Fatalf("room personal profile should not expose avatar_url: %v", profile)
+	}
+	if _, ok := profile["default_avatar_key"]; ok {
+		t.Fatalf("room personal profile should not expose default_avatar_key: %v", profile)
 	}
 	settings := response["settings"].(map[string]any)
 	if settings["notification_policy"] != "silent" || settings["is_pinned"] != true {

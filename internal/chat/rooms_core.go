@@ -385,14 +385,14 @@ func (h *Handler) buildRoomDetail(roomID, userID string) (roomDetail, error) {
 	var joinedAt int64
 	var role, notificationLevel string
 	var isPinned int
-	var remarkName, roomDisplayName, roomAvatarURL, roomDefaultAvatarKey sql.NullString
+	var remarkName, roomDisplayName sql.NullString
 	err := h.DB.QueryRow(
 		`SELECT r.id, r.rid, r.name, r.avatar_url, r.default_avatar_key, r.created_by_user_id,
 		        r.visibility, r.join_policy, r.ai_voice_announce_enabled,
 		        r.message_recall_policy, r.message_recall_window_seconds,
 		        r.description, r.created_at, r.updated_at,
-		        rm.role, rm.remark_name, rm.room_display_name, rm.room_avatar_url,
-		        rm.room_default_avatar_key, rm.notification_level, rm.is_pinned, rm.joined_at
+		        rm.role, rm.remark_name, rm.room_display_name,
+		        rm.notification_level, rm.is_pinned, rm.joined_at
 		 FROM rooms r
 		 JOIN room_memberships rm ON rm.room_id = r.id
 		 WHERE r.id = ? AND rm.user_id = ?`,
@@ -401,7 +401,7 @@ func (h *Handler) buildRoomDetail(roomID, userID string) (roomDetail, error) {
 		&rec.ID, &rec.RID, &rec.Name, &rec.AvatarURL, &rec.DefaultAvatarKey, &rec.CreatedByUserID,
 		&rec.Visibility, &rec.JoinPolicy, &rec.AIVoiceAnnounceEnabled, &rec.MessageRecallPolicy,
 		&rec.MessageRecallWindowSeconds, &rec.Description, &rec.CreatedAt, &rec.UpdatedAt,
-		&role, &remarkName, &roomDisplayName, &roomAvatarURL, &roomDefaultAvatarKey, &notificationLevel, &isPinned, &joinedAt,
+		&role, &remarkName, &roomDisplayName, &notificationLevel, &isPinned, &joinedAt,
 	)
 	if err != nil {
 		if !errors.Is(err, sql.ErrNoRows) || !h.isSuperuser(userID) {
@@ -469,20 +469,16 @@ func (h *Handler) buildRoomDetail(roomID, userID string) (roomDetail, error) {
 		NotificationPolicy:          notificationLevel,
 		IsPinned:                    isPinned != 0,
 		PersonalProfile: roomPersonalProfile{
-			DisplayName:      nullableString(roomDisplayName),
-			AvatarURL:        nullableString(roomAvatarURL),
-			DefaultAvatarKey: nullableString(roomDefaultAvatarKey),
+			DisplayName: nullableString(roomDisplayName),
 		},
 		CanDeleteRoom: role == "owner" || role == "superuser" || h.isSuperuser(userID),
 		MyMembership: roomMembership{
-			Role:                 role,
-			JoinedAt:             formatMillis(joinedAt),
-			RemarkName:           nullableString(remarkName),
-			RoomDisplayName:      nullableString(roomDisplayName),
-			RoomAvatarURL:        nullableString(roomAvatarURL),
-			RoomDefaultAvatarKey: nullableString(roomDefaultAvatarKey),
-			NotificationLevel:    notificationLevel,
-			IsPinned:             isPinned != 0,
+			Role:              role,
+			JoinedAt:          formatMillis(joinedAt),
+			RemarkName:        nullableString(remarkName),
+			RoomDisplayName:   nullableString(roomDisplayName),
+			NotificationLevel: notificationLevel,
+			IsPinned:          isPinned != 0,
 		},
 		Live:      live,
 		CreatedAt: formatMillis(rec.CreatedAt),

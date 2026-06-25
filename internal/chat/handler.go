@@ -124,20 +124,16 @@ type messageSearchResult struct {
 }
 
 type roomMembership struct {
-	Role                 string  `json:"role,omitempty"`
-	JoinedAt             string  `json:"joined_at"`
-	RemarkName           *string `json:"remark_name"`
-	RoomDisplayName      *string `json:"room_display_name"`
-	RoomAvatarURL        *string `json:"room_avatar_url"`
-	RoomDefaultAvatarKey *string `json:"room_default_avatar_key"`
-	NotificationLevel    string  `json:"notification_level,omitempty"`
-	IsPinned             bool    `json:"is_pinned"`
+	Role              string  `json:"role,omitempty"`
+	JoinedAt          string  `json:"joined_at"`
+	RemarkName        *string `json:"remark_name"`
+	RoomDisplayName   *string `json:"room_display_name"`
+	NotificationLevel string  `json:"notification_level,omitempty"`
+	IsPinned          bool    `json:"is_pinned"`
 }
 
 type roomPersonalProfile struct {
-	DisplayName      *string `json:"display_name"`
-	AvatarURL        *string `json:"avatar_url"`
-	DefaultAvatarKey *string `json:"default_avatar_key"`
+	DisplayName *string `json:"display_name"`
 }
 
 type roomDetail struct {

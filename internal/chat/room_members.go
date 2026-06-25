@@ -17,17 +17,17 @@ func (h *Handler) getMemberProfile(c *gin.Context) {
 	viewerID := currentUserID(c)
 	targetID := c.Param("user_id")
 	var id, role string
-	var roomDisplayName, roomAvatarURL, roomDefaultAvatar sql.NullString
+	var roomDisplayName sql.NullString
 	var textMutedUntil sql.NullInt64
 	var joinedAt int64
 	err := h.DB.QueryRow(
 		`SELECT u.id,
-		        rm.room_display_name, rm.room_avatar_url, rm.room_default_avatar_key,
+		        rm.room_display_name,
 		        rm.role, rm.text_muted_until, rm.joined_at
 		 FROM room_memberships rm JOIN users u ON u.id = rm.user_id
 		 WHERE rm.room_id = ? AND rm.user_id = ?`,
 		roomID, targetID,
-	).Scan(&id, &roomDisplayName, &roomAvatarURL, &roomDefaultAvatar, &role, &textMutedUntil, &joinedAt)
+	).Scan(&id, &roomDisplayName, &role, &textMutedUntil, &joinedAt)
 	if err != nil {
 		if !errors.Is(err, sql.ErrNoRows) {
 			h.jsonError(c, http.StatusInternalServerError, "internal_error", "failed to read member profile")
@@ -39,13 +39,11 @@ func (h *Handler) getMemberProfile(c *gin.Context) {
 			return
 		}
 		c.JSON(http.StatusOK, gin.H{"profile": gin.H{
-			"user":                    user,
-			"room_display_name":       nil,
-			"room_avatar_url":         nil,
-			"room_default_avatar_key": nil,
-			"role":                    "superuser",
-			"text_muted_until":        nil,
-			"joined_at":               formatMillis(nowMillis()),
+			"user":              user,
+			"room_display_name": nil,
+			"role":              "superuser",
+			"text_muted_until":  nil,
+			"joined_at":         formatMillis(nowMillis()),
 		}})
 		return
 	}
@@ -55,13 +53,11 @@ func (h *Handler) getMemberProfile(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"profile": gin.H{
-		"user":                    user,
-		"room_display_name":       nullableString(roomDisplayName),
-		"room_avatar_url":         nullableString(roomAvatarURL),
-		"room_default_avatar_key": nullableString(roomDefaultAvatar),
-		"role":                    role,
-		"text_muted_until":        nullableMillis(textMutedUntil),
-		"joined_at":               formatMillis(joinedAt),
+		"user":              user,
+		"room_display_name": nullableString(roomDisplayName),
+		"role":              role,
+		"text_muted_until":  nullableMillis(textMutedUntil),
+		"joined_at":         formatMillis(joinedAt),
 	}})
 }
 
@@ -139,32 +135,6 @@ func (h *Handler) updateMyRoomSettings(c *gin.Context) {
 	if isPinned != nil {
 		sets = append(sets, "is_pinned = ?")
 		args = append(args, boolToInt(*isPinned))
-	}
-	avatarAssetID := req.RoomAvatarAssetID
-	if avatarAssetID == nil {
-		avatarAssetID = req.AvatarAssetID
-	}
-	if avatarAssetID != nil {
-		var url sql.NullString
-		assetID := strings.TrimSpace(*avatarAssetID)
-		if assetID != "" {
-			_ = h.DB.QueryRow(`SELECT url FROM assets WHERE id = ? AND owner_user_id = ?`, assetID, userID).Scan(&url)
-		}
-		sets = append(sets, "room_avatar_url = ?", "room_default_avatar_key = ?")
-		if url.Valid {
-			args = append(args, url.String, nil)
-		} else {
-			args = append(args, nil, nil)
-		}
-	}
-	if req.DefaultAvatarKey != nil {
-		key := strings.TrimSpace(*req.DefaultAvatarKey)
-		sets = append(sets, "room_default_avatar_key = ?")
-		args = append(args, emptyToNil(key))
-		if avatarAssetID == nil && key != "" && h.currentRoomProfileAvatarKey(roomID, userID) != key {
-			sets = append(sets, "room_avatar_url = ?")
-			args = append(args, nil)
-		}
 	}
 	if len(sets) == 0 {
 		h.jsonError(c, http.StatusBadRequest, "validation_failed", "at least one setting is required")
@@ -1388,18 +1358,17 @@ func (h *Handler) roomSettingsPayload(roomID string) gin.H {
 }
 
 func (h *Handler) myRoomSettingsPayload(roomID, userID string) gin.H {
-	var remark, display, avatarURL, defaultAvatar sql.NullString
+	var remark, display sql.NullString
 	var notification string
 	var isPinned int
 	_ = h.DB.QueryRow(
-		`SELECT remark_name, room_display_name, room_avatar_url, room_default_avatar_key, notification_level, is_pinned
+		`SELECT remark_name, room_display_name, notification_level, is_pinned
 		 FROM room_memberships WHERE room_id = ? AND user_id = ?`,
 		roomID, userID,
-	).Scan(&remark, &display, &avatarURL, &defaultAvatar, &notification, &isPinned)
+	).Scan(&remark, &display, &notification, &isPinned)
 	return gin.H{
 		"remark_name": nullableString(remark), "room_display_name": nullableString(display),
-		"room_avatar_asset_id": nil, "room_avatar_url": nullableString(avatarURL),
-		"room_default_avatar_key": nullableString(defaultAvatar), "notification_level": notification,
+		"notification_level":  notification,
 		"notification_policy": notification, "is_pinned": isPinned != 0,
 	}
 }
@@ -1825,33 +1794,29 @@ func (h *Handler) roomNotificationRoomPayload(
 
 func (h *Handler) roomViewerMembershipPayload(roomID, userID string) (roomPersonalProfile, roomMembership, bool) {
 	var role, notificationLevel string
-	var remarkName, roomDisplayName, roomAvatarURL, roomDefaultAvatarKey sql.NullString
+	var remarkName, roomDisplayName sql.NullString
 	var joinedAt int64
 	var isPinned int
 	err := h.DB.QueryRow(
-		`SELECT role, notification_level, remark_name, room_display_name, room_avatar_url,
-		        room_default_avatar_key, is_pinned, joined_at
+		`SELECT role, notification_level, remark_name, room_display_name,
+		        is_pinned, joined_at
 		 FROM room_memberships
 		 WHERE room_id = ? AND user_id = ?`,
 		roomID, userID,
-	).Scan(&role, &notificationLevel, &remarkName, &roomDisplayName, &roomAvatarURL, &roomDefaultAvatarKey, &isPinned, &joinedAt)
+	).Scan(&role, &notificationLevel, &remarkName, &roomDisplayName, &isPinned, &joinedAt)
 	if err != nil {
 		return roomPersonalProfile{}, roomMembership{}, false
 	}
 
 	return roomPersonalProfile{
-			DisplayName:      nullableString(roomDisplayName),
-			AvatarURL:        nullableString(roomAvatarURL),
-			DefaultAvatarKey: nullableString(roomDefaultAvatarKey),
+			DisplayName: nullableString(roomDisplayName),
 		}, roomMembership{
-			Role:                 role,
-			JoinedAt:             formatMillis(joinedAt),
-			RemarkName:           nullableString(remarkName),
-			RoomDisplayName:      nullableString(roomDisplayName),
-			RoomAvatarURL:        nullableString(roomAvatarURL),
-			RoomDefaultAvatarKey: nullableString(roomDefaultAvatarKey),
-			NotificationLevel:    notificationLevel,
-			IsPinned:             isPinned != 0,
+			Role:              role,
+			JoinedAt:          formatMillis(joinedAt),
+			RemarkName:        nullableString(remarkName),
+			RoomDisplayName:   nullableString(roomDisplayName),
+			NotificationLevel: notificationLevel,
+			IsPinned:          isPinned != 0,
 		}, true
 }
 
@@ -1889,13 +1854,4 @@ func (h *Handler) currentRoomAvatarKey(roomID string) string {
 	var key string
 	_ = h.DB.QueryRow(`SELECT default_avatar_key FROM rooms WHERE id = ?`, roomID).Scan(&key)
 	return key
-}
-
-func (h *Handler) currentRoomProfileAvatarKey(roomID, userID string) string {
-	var key sql.NullString
-	_ = h.DB.QueryRow(`SELECT room_default_avatar_key FROM room_memberships WHERE room_id = ? AND user_id = ?`, roomID, userID).Scan(&key)
-	if key.Valid {
-		return key.String
-	}
-	return ""
 }

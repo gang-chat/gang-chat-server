@@ -16,9 +16,6 @@ type roomSettingsRequest struct {
 type myRoomSettingsRequest struct {
 	RemarkName         *string `json:"remark_name"`
 	RoomDisplayName    *string `json:"room_display_name"`
-	RoomAvatarAssetID  *string `json:"room_avatar_asset_id"`
-	AvatarAssetID      *string `json:"avatar_asset_id"`
-	DefaultAvatarKey   *string `json:"default_avatar_key"`
 	NotificationLevel  *string `json:"notification_level"`
 	NotificationPolicy *string `json:"notification_policy"`
 	IsPinned           *bool   `json:"is_pinned"`
