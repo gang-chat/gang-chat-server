@@ -30,14 +30,15 @@ func visibleMessageSQL(alias string) string {
 }
 
 type systemMessageSpec struct {
-	Event    string
-	UserID   string
-	ActorID  string
-	TargetID string
-	FromRole string
-	ToRole   string
-	OldValue string
-	NewValue string
+	Event     string
+	UserID    string
+	ActorID   string
+	TargetID  string
+	FromRole  string
+	ToRole    string
+	OldValue  string
+	NewValue  string
+	CreatedAt int64
 }
 
 func (h *Handler) appendSystemMessage(roomID string, spec systemMessageSpec) error {
@@ -93,7 +94,10 @@ func (h *Handler) appendSystemMessageTx(tx *sql.Tx, roomID string, spec systemMe
 		attachment["new_value"] = spec.NewValue
 	}
 
-	now := nowMillis()
+	now := spec.CreatedAt
+	if now <= 0 {
+		now = nowMillis()
+	}
 	_, err = tx.Exec(
 		`INSERT INTO messages (id, room_id, sender_user_id, client_message_id, type, body, mentions_json, attachments_json, created_at)
 		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
@@ -165,15 +169,9 @@ func systemMessageBody(spec systemMessageSpec, actorName string) string {
 		}
 		return "被 " + actorName + " " + body
 	case systemEventRoomNameChanged:
-		if actorName == "" {
-			return "房间名称修改为" + spec.NewValue
-		}
-		return "房间名称被" + actorName + "修改为" + spec.NewValue
+		return "房间名称修改为" + spec.NewValue
 	case systemEventRoomBioChanged:
-		if actorName == "" {
-			return "房间简介修改为\n" + spec.NewValue
-		}
-		return "房间简介被" + actorName + "修改为\n" + spec.NewValue
+		return "房间简介修改为\n" + spec.NewValue
 	default:
 		return ""
 	}

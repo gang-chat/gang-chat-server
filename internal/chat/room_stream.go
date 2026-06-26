@@ -25,11 +25,9 @@ import (
 // members simply have no connections and heal on reconnect (liveStream
 // re-derives their rooms from the DB), so we never persist any of this.
 //
-// The snapshot is user-agnostic: personal fields (my_role, unread_count,
-// remark_name) are deliberately excluded because one payload fans out to many
-// users. Clients maintain those locally — e.g. last_message is included so a
-// client can bump its own unread counter, but the count itself is never on
-// the wire.
+// The base snapshot is user-agnostic. Just before delivery we copy it and add
+// per-recipient fields such as unread_count, notification_policy, is_pinned and
+// remark_name.
 
 // roomSnapshot is the shared, user-agnostic view of a room pushed over SSE.
 // It mirrors roomCard minus the per-viewer fields.
@@ -54,6 +52,7 @@ type roomSnapshot struct {
 	LiveParticipantCount        int                 `json:"live_participant_count"`
 	LiveAvatarPreview           []userSummary       `json:"live_avatar_preview"`
 	LastMessage                 *lastMessagePreview `json:"last_message"`
+	UnreadCount                 int                 `json:"unread_count"`
 	CreatedAt                   string              `json:"created_at"`
 	UpdatedAt                   string              `json:"updated_at"`
 }
@@ -175,8 +174,10 @@ func (h *Handler) applyRoomSnapshotPersonalFields(snapshot *roomSnapshot, roomID
 	snapshot.RemarkName = nullableString(remarkName)
 	snapshot.NotificationPolicy = notificationPolicy
 	snapshot.IsPinned = isPinned != 0
+	snapshot.UnreadCount = h.unreadCount(roomID, userID)
 	if notificationPolicy == "blocked" {
 		snapshot.LastMessage = nil
+		snapshot.UnreadCount = 0
 	}
 }
 
@@ -210,13 +211,19 @@ func (h *Handler) publishRoomUpdatedWithOptions(roomID string, skipBlockedMessag
 	for _, id := range exclude {
 		skip[id] = struct{}{}
 	}
-	ev := eventbus.Event{Type: "room_updated", RoomID: roomID, Data: snapshot}
 	for _, userID := range members {
 		if _, ok := skip[userID]; ok {
 			continue
 		}
 		if skipBlockedMessages && h.roomMessagesBlocked(roomID, userID) {
 			continue
+		}
+		userSnapshot := snapshot
+		h.applyRoomSnapshotPersonalFields(&userSnapshot, roomID, userID)
+		ev := eventbus.Event{
+			Type:   "room_updated",
+			RoomID: roomID,
+			Data:   userSnapshot,
 		}
 		h.Bus.PublishUser(userID, ev)
 	}

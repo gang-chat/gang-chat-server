@@ -186,8 +186,9 @@ func (h *Handler) updateRoomSettings(c *gin.Context) {
 	nameChanged := false
 	descriptionChanged := false
 	joinPolicyClosedStateChanged := false
+	updatedAt := nowMillis()
 	sets := []string{"updated_at = ?"}
-	args := []any{nowMillis()}
+	args := []any{updatedAt}
 	if req.Name != nil {
 		name := strings.TrimSpace(*req.Name)
 		if name == "" {
@@ -287,23 +288,29 @@ func (h *Handler) updateRoomSettings(c *gin.Context) {
 	}
 	if nameChanged {
 		if err := h.appendSystemMessageTx(tx, roomID, systemMessageSpec{
-			Event:    systemEventRoomNameChanged,
-			UserID:   userID,
-			ActorID:  userID,
-			OldValue: oldName,
-			NewValue: newName,
+			Event:     systemEventRoomNameChanged,
+			UserID:    userID,
+			ActorID:   userID,
+			OldValue:  oldName,
+			NewValue:  newName,
+			CreatedAt: updatedAt,
 		}); err != nil {
 			h.jsonError(c, http.StatusInternalServerError, "internal_error", "append system message failed")
 			return
 		}
 	}
 	if descriptionChanged {
+		createdAt := updatedAt
+		if nameChanged {
+			createdAt++
+		}
 		if err := h.appendSystemMessageTx(tx, roomID, systemMessageSpec{
-			Event:    systemEventRoomBioChanged,
-			UserID:   userID,
-			ActorID:  userID,
-			OldValue: oldDescription,
-			NewValue: newDescription,
+			Event:     systemEventRoomBioChanged,
+			UserID:    userID,
+			ActorID:   userID,
+			OldValue:  oldDescription,
+			NewValue:  newDescription,
+			CreatedAt: createdAt,
 		}); err != nil {
 			h.jsonError(c, http.StatusInternalServerError, "internal_error", "append system message failed")
 			return

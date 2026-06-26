@@ -1519,6 +1519,9 @@ func TestRoomInfoManagementEndpoints(t *testing.T) {
 	}
 	messages := listRoomMessages(t, api, member.Token, roomID)
 	nameMessage := requireSystemMessage(t, messages, systemEventRoomNameChanged, owner.User["id"].(string))
+	if nameMessage["body"] != "房间名称修改为Managed" {
+		t.Fatalf("room name system body should omit actor: %v", nameMessage)
+	}
 	nameAttachment := systemAttachment(t, nameMessage)
 	if nameAttachment["old_value"] != "Manage Me" || nameAttachment["new_value"] != "Managed" {
 		t.Fatalf("room name system attachment mismatch: %v", nameAttachment)
@@ -1527,6 +1530,9 @@ func TestRoomInfoManagementEndpoints(t *testing.T) {
 		t.Fatalf("room name system message should include actor: %v", nameAttachment)
 	}
 	descriptionMessage := requireSystemMessage(t, messages, systemEventRoomBioChanged, owner.User["id"].(string))
+	if descriptionMessage["body"] != "房间简介修改为\nRoom bio" {
+		t.Fatalf("room description system body should omit actor: %v", descriptionMessage)
+	}
 	descriptionAttachment := systemAttachment(t, descriptionMessage)
 	if descriptionAttachment["old_value"] != "old intro" || descriptionAttachment["new_value"] != "Room bio" {
 		t.Fatalf("room description system attachment mismatch: %v", descriptionAttachment)

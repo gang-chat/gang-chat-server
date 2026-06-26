@@ -307,6 +307,45 @@ func TestStreamMessageRefreshesLastMessage(t *testing.T) {
 	}
 }
 
+func TestStreamRoomProfileChangesCarryAccurateUnreadCount(t *testing.T) {
+	api := newAPIHarness(t)
+	owner := api.register("owner_profile_stream")
+	member := api.register("member_profile_stream")
+	roomCard := api.createRoom(owner.Token, map[string]any{
+		"name":        "Before Name",
+		"description": "Before bio",
+		"join_policy": "open",
+	})
+	roomID := roomCard["id"].(string)
+
+	status, response := api.request(http.MethodPost, "/rooms/"+roomID+"/join", member.Token, nil)
+	api.requireStatus(status, http.StatusOK, response)
+	messages := listRoomMessages(t, api, member.Token, roomID)
+	if len(messages) == 0 {
+		t.Fatalf("expected join system message before mark-read")
+	}
+	status, response = api.request(http.MethodPost, "/rooms/"+roomID+"/read", member.Token, map[string]any{
+		"last_read_message_id": messages[len(messages)-1]["id"],
+	})
+	api.requireStatus(status, http.StatusOK, response)
+
+	memberStream := api.connectStream(member.User["id"].(string))
+	status, response = api.request(http.MethodPatch, "/rooms/"+roomID, owner.Token, map[string]any{
+		"name":        "After Name",
+		"description": "After bio",
+	})
+	api.requireStatus(status, http.StatusOK, response)
+
+	updated := memberStream.await("room_updated")
+	snap := updated["snapshot"].(roomSnapshot)
+	if snap.UnreadCount != 2 {
+		t.Fatalf("room_updated should carry both profile-change system messages as unread: %+v", snap)
+	}
+	if snap.LastMessage == nil || snap.LastMessage.BodyPreview != "房间简介修改为\nAfter bio" {
+		t.Fatalf("room_updated should carry actor-free profile-change preview: %+v", snap.LastMessage)
+	}
+}
+
 func TestStreamLiveLeaveRefreshesRoomSnapshotWithoutSystemMessage(t *testing.T) {
 	api := newAPIHarness(t)
 	owner := api.register("owner_live_left")
