@@ -42,8 +42,15 @@ func (s *streamClient) await(eventType string) map[string]any {
 			if ev.Type != eventType {
 				continue
 			}
-			data, _ := ev.Data.(roomSnapshot)
-			return map[string]any{"room_id": ev.RoomID, "snapshot": data}
+			payload := map[string]any{"room_id": ev.RoomID}
+			if data, ok := ev.Data.(roomSnapshot); ok {
+				payload["snapshot"] = data
+			} else if data, ok := ev.Data.(map[string]any); ok {
+				for key, value := range data {
+					payload[key] = value
+				}
+			}
+			return payload
 		case <-deadline:
 			s.t.Fatalf("timed out waiting for %q", eventType)
 			return nil
@@ -328,6 +335,7 @@ func TestStreamRoomProfileChangesCarryAccurateUnreadCount(t *testing.T) {
 		"last_read_message_id": messages[len(messages)-1]["id"],
 	})
 	api.requireStatus(status, http.StatusOK, response)
+	time.Sleep(time.Millisecond)
 
 	memberStream := api.connectStream(member.User["id"].(string))
 	status, response = api.request(http.MethodPatch, "/rooms/"+roomID, owner.Token, map[string]any{
@@ -343,6 +351,32 @@ func TestStreamRoomProfileChangesCarryAccurateUnreadCount(t *testing.T) {
 	}
 	if snap.LastMessage == nil || snap.LastMessage.SenderDisplayName != "" || snap.LastMessage.BodyPreview != "房间简介 被 owner_profile_stream 修改为 After bio" {
 		t.Fatalf("room_updated should carry chat-aligned profile-change preview: %+v", snap.LastMessage)
+	}
+}
+
+func TestStreamRoomMemberProfileChangedReloadsMembersPanel(t *testing.T) {
+	api := newAPIHarness(t)
+	owner := api.register("owner_member_profile_changed")
+	member := api.register("member_profile_changed")
+	roomCard := api.createRoom(owner.Token, map[string]any{"name": "Member Profile Changed", "join_policy": "open"})
+	roomID := roomCard["id"].(string)
+	memberID := member.User["id"].(string)
+
+	status, response := api.request(http.MethodPost, "/rooms/"+roomID+"/join", member.Token, nil)
+	api.requireStatus(status, http.StatusOK, response)
+
+	ownerStream := api.connectStream(owner.User["id"].(string))
+	memberStream := api.connectStream(memberID)
+	status, response = api.request(http.MethodPatch, "/rooms/"+roomID+"/members/"+memberID, owner.Token, map[string]any{
+		"room_display_name": "Changed In Room",
+	})
+	api.requireStatus(status, http.StatusOK, response)
+
+	for label, stream := range map[string]*streamClient{"owner": ownerStream, "member": memberStream} {
+		updated := stream.await("room_member_profile_changed")
+		if updated["room_id"] != roomID || updated["user_id"] != memberID {
+			t.Fatalf("%s should receive changed member profile payload: %v", label, updated)
+		}
 	}
 }
 

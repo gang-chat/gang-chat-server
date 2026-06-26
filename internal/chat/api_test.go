@@ -409,6 +409,26 @@ func roomCardByID(t *testing.T, response map[string]any, roomID string) map[stri
 	return nil
 }
 
+func roomMemberByID(t *testing.T, response map[string]any, userID string) map[string]any {
+	t.Helper()
+	items, ok := response["members"].([]any)
+	if !ok {
+		t.Fatalf("members response missing members: %v", response)
+	}
+	for _, item := range items {
+		member, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		user, ok := member["user"].(map[string]any)
+		if ok && user["id"] == userID {
+			return member
+		}
+	}
+	t.Fatalf("member %s not found in response: %v", userID, response)
+	return nil
+}
+
 func listRoomMessages(t *testing.T, api *apiHarness, token, roomID string) []map[string]any {
 	t.Helper()
 	status, response := api.request(http.MethodGet, "/rooms/"+roomID+"/messages?limit=100", token, nil)
@@ -1687,6 +1707,66 @@ func TestOnlyAdminsCanRemoveMembers(t *testing.T) {
 	}
 	if targetMemberships != 0 {
 		t.Fatalf("admin should remove target membership, got %d", targetMemberships)
+	}
+}
+
+func TestAdminsCanEditLowerMemberRoomDisplayName(t *testing.T) {
+	api := newAPIHarness(t)
+	owner := api.register("display_name_owner")
+	admin := api.register("display_name_admin")
+	peerAdmin := api.register("display_name_peer_admin")
+	member := api.register("display_name_member")
+
+	room := api.createRoom(owner.Token, map[string]any{"name": "Display Name Gate", "join_policy": "open"})
+	roomID := room["id"].(string)
+	status, response := api.request(http.MethodPost, "/rooms/"+roomID+"/join", admin.Token, nil)
+	api.requireStatus(status, http.StatusOK, response)
+	status, response = api.request(http.MethodPost, "/rooms/"+roomID+"/join", peerAdmin.Token, nil)
+	api.requireStatus(status, http.StatusOK, response)
+	status, response = api.request(http.MethodPost, "/rooms/"+roomID+"/join", member.Token, nil)
+	api.requireStatus(status, http.StatusOK, response)
+
+	adminID := admin.User["id"].(string)
+	peerAdminID := peerAdmin.User["id"].(string)
+	memberID := member.User["id"].(string)
+	status, response = api.request(http.MethodPatch, "/rooms/"+roomID+"/members/"+adminID, owner.Token, map[string]any{"role": "admin"})
+	api.requireStatus(status, http.StatusOK, response)
+	status, response = api.request(http.MethodPatch, "/rooms/"+roomID+"/members/"+peerAdminID, owner.Token, map[string]any{"role": "admin"})
+	api.requireStatus(status, http.StatusOK, response)
+
+	status, response = api.request(http.MethodPatch, "/rooms/"+roomID+"/members/"+memberID, admin.Token, map[string]any{
+		"room_display_name": "Room Member",
+	})
+	api.requireStatus(status, http.StatusOK, response)
+	updated := response["member"].(map[string]any)
+	if updated["room_display_name"] != "Room Member" {
+		t.Fatalf("member payload should include room_display_name: %v", updated)
+	}
+	user := updated["user"].(map[string]any)
+	if user["room_display_name"] != "Room Member" {
+		t.Fatalf("member user payload should include room_display_name: %v", updated)
+	}
+
+	status, response = api.request(http.MethodGet, "/rooms/"+roomID+"/members?limit=50", owner.Token, nil)
+	api.requireStatus(status, http.StatusOK, response)
+	listed := roomMemberByID(t, response, memberID)
+	listedUser := listed["user"].(map[string]any)
+	if listedUser["room_display_name"] != "Room Member" {
+		t.Fatalf("member list should include updated room_display_name: %v", listed)
+	}
+
+	status, response = api.request(http.MethodPatch, "/rooms/"+roomID+"/members/"+peerAdminID, admin.Token, map[string]any{
+		"room_display_name": "Peer Alias",
+	})
+	api.requireStatus(status, http.StatusForbidden, response)
+
+	status, response = api.request(http.MethodPatch, "/rooms/"+roomID+"/members/"+adminID, owner.Token, map[string]any{
+		"room_display_name": "",
+	})
+	api.requireStatus(status, http.StatusOK, response)
+	updated = response["member"].(map[string]any)
+	if updated["room_display_name"] != nil {
+		t.Fatalf("empty room_display_name should clear alias: %v", updated)
 	}
 }
 

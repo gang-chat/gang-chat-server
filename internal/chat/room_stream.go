@@ -370,6 +370,24 @@ func (h *Handler) publishRoomJoinRequestsUpdated(roomID string) {
 	}
 }
 
+func (h *Handler) publishRoomMemberProfileChanged(roomID, userID string) {
+	if h == nil || h.Bus == nil || roomID == "" || userID == "" {
+		return
+	}
+	members, err := h.roomMemberIDs(roomID)
+	if err != nil {
+		return
+	}
+	ev := eventbus.Event{
+		Type:   "room_member_profile_changed",
+		RoomID: roomID,
+		Data:   map[string]any{"room_id": roomID, "user_id": userID},
+	}
+	for _, memberID := range members {
+		h.Bus.PublishUser(memberID, ev)
+	}
+}
+
 // publishRoomRole tells a single user their role in roomID changed. Role is a
 // per-viewer field (my_role) that the shared snapshot deliberately omits, so a
 // role change has no other way to reach the affected member. The payload reads

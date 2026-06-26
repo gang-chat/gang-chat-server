@@ -943,13 +943,21 @@ func (h *Handler) removeMember(c *gin.Context) {
 func (h *Handler) updateMemberRole(c *gin.Context) {
 	roomID := c.Param("room_id")
 	actorID := currentUserID(c)
-	if !h.canManageRoomRoles(roomID, actorID) {
-		h.jsonError(c, http.StatusForbidden, "forbidden", "owner required")
+	var req memberUpdateRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		h.jsonError(c, http.StatusBadRequest, "bad_request", "invalid JSON body")
 		return
 	}
-	var req roleRequest
-	if err := c.ShouldBindJSON(&req); err != nil || !allowed(req.Role, "admin", "member") {
+	if req.Role == nil && req.RoomDisplayName == nil {
+		h.jsonError(c, http.StatusBadRequest, "validation_failed", "role or room_display_name is required")
+		return
+	}
+	if req.Role != nil && !allowed(*req.Role, "admin", "member") {
 		h.jsonError(c, http.StatusBadRequest, "validation_failed", "role must be admin or member")
+		return
+	}
+	if req.RoomDisplayName != nil && len([]rune(strings.TrimSpace(*req.RoomDisplayName))) > 32 {
+		h.jsonError(c, http.StatusBadRequest, "validation_failed", "room_display_name must be 32 characters or fewer")
 		return
 	}
 	targetID := c.Param("user_id")
@@ -958,52 +966,85 @@ func (h *Handler) updateMemberRole(c *gin.Context) {
 		return
 	}
 	var currentRole string
-	_ = h.DB.QueryRow(`SELECT role FROM room_memberships WHERE room_id = ? AND user_id = ?`, roomID, targetID).Scan(&currentRole)
-	if currentRole == "owner" {
-		h.jsonError(c, http.StatusForbidden, "forbidden", "cannot change owner role")
+	if err := h.DB.QueryRow(`SELECT role FROM room_memberships WHERE room_id = ? AND user_id = ?`, roomID, targetID).Scan(&currentRole); err != nil {
+		h.jsonError(c, http.StatusNotFound, "not_found", "member not found")
+		return
+	}
+	if req.Role != nil {
+		if !h.canManageRoomRoles(roomID, actorID) {
+			h.jsonError(c, http.StatusForbidden, "forbidden", "owner required")
+			return
+		}
+		if currentRole == "owner" {
+			h.jsonError(c, http.StatusForbidden, "forbidden", "cannot change owner role")
+			return
+		}
+	}
+	if req.RoomDisplayName != nil && !h.canEditMemberRoomDisplayName(roomID, actorID, targetID, currentRole) {
+		h.jsonError(c, http.StatusForbidden, "forbidden", "cannot edit this member")
 		return
 	}
 	tx, err := h.DB.Begin()
 	if err != nil {
-		h.jsonError(c, http.StatusInternalServerError, "internal_error", "update role failed")
+		h.jsonError(c, http.StatusInternalServerError, "internal_error", "update member failed")
 		return
 	}
 	defer tx.Rollback()
-	res, err := tx.Exec(`UPDATE room_memberships SET role = ? WHERE room_id = ? AND user_id = ?`, req.Role, roomID, targetID)
-	if err != nil {
-		h.jsonError(c, http.StatusInternalServerError, "internal_error", "update role failed")
-		return
-	}
-	if n, _ := res.RowsAffected(); n == 0 {
-		h.jsonError(c, http.StatusNotFound, "not_found", "member not found")
-		return
-	}
-	if _, err := h.pruneOrRepairRoomTx(tx, roomID); err != nil {
-		h.jsonError(c, http.StatusInternalServerError, "internal_error", "repair room admins failed")
-		return
-	}
-	if currentRole != req.Role {
-		if err := h.appendSystemMessageTx(tx, roomID, systemMessageSpec{
-			Event:    systemEventRoomRoleChanged,
-			ActorID:  actorID,
-			TargetID: targetID,
-			FromRole: currentRole,
-			ToRole:   req.Role,
-		}); err != nil {
+	roleChanged := false
+	if req.Role != nil {
+		res, err := tx.Exec(`UPDATE room_memberships SET role = ? WHERE room_id = ? AND user_id = ?`, *req.Role, roomID, targetID)
+		if err != nil {
 			h.jsonError(c, http.StatusInternalServerError, "internal_error", "update role failed")
 			return
 		}
-		if err := h.appendRoomNotificationTx(tx, roomNotificationSpec{
-			Type:        roomRoleNotificationType(currentRole, req.Role),
-			RecipientID: targetID,
-			RoomID:      roomID,
-			ActorID:     actorID,
-			FromRole:    currentRole,
-			ToRole:      req.Role,
-		}); err != nil {
-			h.jsonError(c, http.StatusInternalServerError, "internal_error", "update role failed")
+		if n, _ := res.RowsAffected(); n == 0 {
+			h.jsonError(c, http.StatusNotFound, "not_found", "member not found")
 			return
 		}
+		if _, err := h.pruneOrRepairRoomTx(tx, roomID); err != nil {
+			h.jsonError(c, http.StatusInternalServerError, "internal_error", "repair room admins failed")
+			return
+		}
+		if currentRole != *req.Role {
+			roleChanged = true
+			if err := h.appendSystemMessageTx(tx, roomID, systemMessageSpec{
+				Event:    systemEventRoomRoleChanged,
+				ActorID:  actorID,
+				TargetID: targetID,
+				FromRole: currentRole,
+				ToRole:   *req.Role,
+			}); err != nil {
+				h.jsonError(c, http.StatusInternalServerError, "internal_error", "update role failed")
+				return
+			}
+			if err := h.appendRoomNotificationTx(tx, roomNotificationSpec{
+				Type:        roomRoleNotificationType(currentRole, *req.Role),
+				RecipientID: targetID,
+				RoomID:      roomID,
+				ActorID:     actorID,
+				FromRole:    currentRole,
+				ToRole:      *req.Role,
+			}); err != nil {
+				h.jsonError(c, http.StatusInternalServerError, "internal_error", "update role failed")
+				return
+			}
+		}
+	}
+	displayNameChanged := false
+	if req.RoomDisplayName != nil {
+		res, err := tx.Exec(
+			`UPDATE room_memberships SET room_display_name = ? WHERE room_id = ? AND user_id = ?`,
+			emptyToNil(*req.RoomDisplayName), roomID, targetID,
+		)
+		if err != nil {
+			h.jsonError(c, http.StatusInternalServerError, "internal_error", "update member failed")
+			return
+		}
+		if n, _ := res.RowsAffected(); n == 0 {
+			h.jsonError(c, http.StatusNotFound, "not_found", "member not found")
+			return
+		}
+		displayNameChanged = true
 	}
 	if err := tx.Commit(); err != nil {
 		h.jsonError(c, http.StatusInternalServerError, "internal_error", "save membership failed")
@@ -1012,12 +1053,42 @@ func (h *Handler) updateMemberRole(c *gin.Context) {
 	// Role is a personal field (my_role), not part of the shared snapshot, so a
 	// room_updated wouldn't carry it. Tell the affected user directly so their
 	// permissions UI reflects the change without a manual refetch.
-	h.publishRoomRole(roomID, targetID)
-	if currentRole != req.Role {
+	if req.Role != nil {
+		h.publishRoomRole(roomID, targetID)
+	}
+	if roleChanged {
 		h.publishRoomUpdated(roomID)
 		h.publishRoomNotificationsUpdated(targetID)
 	}
+	if displayNameChanged {
+		h.publishRoomMemberProfileChanged(roomID, targetID)
+	}
+	if displayNameChanged && !roleChanged {
+		h.publishRoomUpdated(roomID)
+	}
 	c.JSON(http.StatusOK, gin.H{"member": h.memberPayload(roomID, targetID, actorID)})
+}
+
+func (h *Handler) canEditMemberRoomDisplayName(roomID, actorID, targetID, targetRole string) bool {
+	if actorID == targetID {
+		return false
+	}
+	actorRank := roleRank("")
+	if h.isSuperuser(actorID) {
+		if !h.roomIDExists(roomID) {
+			return false
+		}
+		actorRank = 4
+	} else {
+		var actorRole string
+		_ = h.DB.QueryRow(`SELECT role FROM room_memberships WHERE room_id = ? AND user_id = ?`, roomID, actorID).Scan(&actorRole)
+		actorRank = roleRank(actorRole)
+	}
+	targetRank := roleRank(targetRole)
+	if h.isSuperuser(targetID) {
+		targetRank = 4
+	}
+	return actorRank > targetRank
 }
 
 func (h *Handler) transferRoomCreator(c *gin.Context) {
@@ -1427,22 +1498,24 @@ func (h *Handler) myRoomSettingsPayload(roomID, userID string) gin.H {
 
 func (h *Handler) memberPayload(roomID, userID, viewerID string) gin.H {
 	var id, uid, username, role string
-	var displayName, avatarURL, defaultAvatar sql.NullString
+	var displayName, avatarURL, defaultAvatar, roomDisplayName sql.NullString
 	var joinedAt int64
 	_ = h.DB.QueryRow(
-		`SELECT u.id, u.uid, u.username, u.display_name, u.avatar_url, u.default_avatar_key, rm.role, rm.joined_at
+		`SELECT u.id, u.uid, u.username, u.display_name, u.avatar_url, u.default_avatar_key, rm.role, rm.joined_at, rm.room_display_name
 		 FROM room_memberships rm JOIN users u ON u.id = rm.user_id
 		 WHERE rm.room_id = ? AND rm.user_id = ?`,
 		roomID, userID,
-	).Scan(&id, &uid, &username, &displayName, &avatarURL, &defaultAvatar, &role, &joinedAt)
+	).Scan(&id, &uid, &username, &displayName, &avatarURL, &defaultAvatar, &role, &joinedAt, &roomDisplayName)
 	user := summaryFromUserFields(id, uid, username, displayName, avatarURL, defaultAvatar)
+	user.RoomDisplayName = nullableString(roomDisplayName)
 	isOnline := h.isUserOnlineForViewer(id, viewerID)
 	user.IsOnline = &isOnline
 	return gin.H{
-		"user":      user,
-		"role":      role,
-		"is_online": isOnline,
-		"joined_at": formatMillis(joinedAt),
+		"user":              user,
+		"role":              role,
+		"room_display_name": nullableString(roomDisplayName),
+		"is_online":         isOnline,
+		"joined_at":         formatMillis(joinedAt),
 	}
 }
 

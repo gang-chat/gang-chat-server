@@ -37,6 +37,11 @@ type roleRequest struct {
 	Role string `json:"role"`
 }
 
+type memberUpdateRequest struct {
+	Role            *string `json:"role"`
+	RoomDisplayName *string `json:"room_display_name"`
+}
+
 type decisionRequest struct {
 	Decision string `json:"decision"`
 	Reason   string `json:"reason"`
