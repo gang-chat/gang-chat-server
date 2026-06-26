@@ -670,6 +670,30 @@ func TestLastMessagePreviewIncludesSystemType(t *testing.T) {
 	if last["sender_display_name"] != "system_preview_member" || last["body_preview"] != "加入了房间" {
 		t.Fatalf("system last_message should carry subject and detail: %v", last)
 	}
+
+	status, response = api.request(http.MethodPatch, "/rooms/"+roomID, owner.Token, map[string]any{
+		"name": "Renamed Preview",
+	})
+	api.requireStatus(status, http.StatusOK, response)
+	status, response = api.request(http.MethodGet, "/rooms", member.Token, nil)
+	api.requireStatus(status, http.StatusOK, response)
+	card = roomCardByID(t, response, roomID)
+	last = card["last_message"].(map[string]any)
+	if last["sender_display_name"] != "" || last["body_preview"] != "房间名称 被 system_preview_owner 修改为 Renamed Preview" {
+		t.Fatalf("room name system last_message should match chat rendering order: %v", last)
+	}
+
+	status, response = api.request(http.MethodPatch, "/rooms/"+roomID, owner.Token, map[string]any{
+		"description": "Preview bio",
+	})
+	api.requireStatus(status, http.StatusOK, response)
+	status, response = api.request(http.MethodGet, "/rooms", member.Token, nil)
+	api.requireStatus(status, http.StatusOK, response)
+	card = roomCardByID(t, response, roomID)
+	last = card["last_message"].(map[string]any)
+	if last["sender_display_name"] != "" || last["body_preview"] != "房间简介 被 system_preview_owner 修改为 Preview bio" {
+		t.Fatalf("room description system last_message should match chat rendering order: %v", last)
+	}
 }
 
 func TestHistoricalLiveSystemMessagesAreHidden(t *testing.T) {

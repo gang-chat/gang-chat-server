@@ -341,8 +341,8 @@ func TestStreamRoomProfileChangesCarryAccurateUnreadCount(t *testing.T) {
 	if snap.UnreadCount != 2 {
 		t.Fatalf("room_updated should carry both profile-change system messages as unread: %+v", snap)
 	}
-	if snap.LastMessage == nil || snap.LastMessage.BodyPreview != "房间简介修改为\nAfter bio" {
-		t.Fatalf("room_updated should carry actor-free profile-change preview: %+v", snap.LastMessage)
+	if snap.LastMessage == nil || snap.LastMessage.SenderDisplayName != "" || snap.LastMessage.BodyPreview != "房间简介 被 owner_profile_stream 修改为 After bio" {
+		t.Fatalf("room_updated should carry chat-aligned profile-change preview: %+v", snap.LastMessage)
 	}
 }
 

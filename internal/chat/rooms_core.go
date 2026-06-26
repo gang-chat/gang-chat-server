@@ -595,13 +595,68 @@ func (h *Handler) lastMessage(roomID string) (*lastMessagePreview, error) {
 	if err != nil {
 		return nil, err
 	}
+	previewSender := sender
+	bodyPreview := lastMessageBodyPreview(messageType, body, attachmentsJSON)
+	if messageType == systemMessageType {
+		if systemPreview, ok := systemRoomProfileChangeLastMessagePreview(attachmentsJSON); ok {
+			previewSender = ""
+			bodyPreview = systemPreview
+		}
+	}
 	return &lastMessagePreview{
 		ID:                id,
 		Type:              messageType,
-		SenderDisplayName: sender,
-		BodyPreview:       lastMessageBodyPreview(messageType, body, attachmentsJSON),
+		SenderDisplayName: previewSender,
+		BodyPreview:       bodyPreview,
 		CreatedAt:         formatMillis(createdAt),
 	}, nil
+}
+
+func systemRoomProfileChangeLastMessagePreview(attachmentsJSON string) (string, bool) {
+	for _, raw := range decodeJSONArray(attachmentsJSON) {
+		attachment, ok := raw.(map[string]any)
+		if !ok || strings.ToLower(stringFromMap(attachment, "type")) != systemMessageType {
+			continue
+		}
+		event := stringFromMap(attachment, "event")
+		if event != systemEventRoomNameChanged && event != systemEventRoomBioChanged {
+			continue
+		}
+		subject := "房间名称"
+		if event == systemEventRoomBioChanged {
+			subject = "房间简介"
+		}
+		value := systemChangedValuePreview(stringFromMap(attachment, "new_value"))
+		actor := systemAttachmentDisplayName(attachment, "actor")
+		if actor == "" {
+			actor = systemAttachmentDisplayName(attachment, "user")
+		}
+		if actor == "" {
+			return preview(subject+" 修改为 "+value, 80), true
+		}
+		return preview(subject+" 被 "+actor+" 修改为 "+value, 80), true
+	}
+	return "", false
+}
+
+func systemAttachmentDisplayName(attachment map[string]any, key string) string {
+	user, ok := attachment[key].(map[string]any)
+	if !ok {
+		return ""
+	}
+	return firstNonEmptyString(
+		stringFromMap(user, "room_display_name"),
+		stringFromMap(user, "display_name"),
+		stringFromMap(user, "username"),
+	)
+}
+
+func systemChangedValuePreview(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "（空）"
+	}
+	return strings.Join(strings.Fields(value), " ")
 }
 
 func lastMessageBodyPreview(messageType, body, attachmentsJSON string) string {
