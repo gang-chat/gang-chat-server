@@ -158,6 +158,20 @@ func (h *apiHarness) requireStatus(status, want int, response map[string]any) {
 	}
 }
 
+func TestAppVersionEndpoint(t *testing.T) {
+	api := newAPIHarness(t)
+	owner := api.register("version_owner")
+
+	status, response := api.request(http.MethodGet, "/app/version", owner.Token, nil)
+	api.requireStatus(status, http.StatusOK, response)
+	if response["latest_version"] != latestClientVersion {
+		t.Fatalf("latest version mismatch: %v", response)
+	}
+	if response["minimum_supported_version"] != latestClientVersion {
+		t.Fatalf("minimum version mismatch: %v", response)
+	}
+}
+
 func (h *apiHarness) register(username string) testSession {
 	h.t.Helper()
 	status, response := h.request(http.MethodPost, "/auth/register", "", map[string]any{

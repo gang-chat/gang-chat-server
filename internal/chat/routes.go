@@ -68,6 +68,7 @@ func RegisterRoutes(g *gin.RouterGroup, db *sql.DB, cfg *config.Config, bus *eve
 	}
 
 	g.GET("/me/stream", h.liveStream)
+	g.GET("/app/version", h.getAppVersion)
 
 	g.POST("/uploads/images", h.uploadFile)
 	g.POST("/uploads/files", h.uploadFile)
