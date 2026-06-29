@@ -172,6 +172,48 @@ func TestAppVersionEndpoint(t *testing.T) {
 	}
 }
 
+func TestAppVersionEndpointUsesManifest(t *testing.T) {
+	api := newAPIHarness(t)
+	owner := api.register("version_manifest_owner")
+	manifestPath := filepath.Join(t.TempDir(), "app-update.json")
+	manifest := map[string]any{
+		"version":                   "1.2.3",
+		"minimum_supported_version": "1.1.0",
+		"platforms": map[string]any{
+			"windows-x64": map[string]any{
+				"installer": map[string]any{
+					"name":   "GangChat-1.2.3-windows-x64-setup.exe",
+					"url":    "https://example.test/releases/GangChat-1.2.3-windows-x64-setup.exe",
+					"sha256": "abc123",
+				},
+			},
+		},
+	}
+	raw, err := json.Marshal(manifest)
+	if err != nil {
+		t.Fatalf("marshal manifest: %v", err)
+	}
+	if err := os.WriteFile(manifestPath, raw, 0o600); err != nil {
+		t.Fatalf("write manifest: %v", err)
+	}
+	api.cfg.AppVersionManifestPath = manifestPath
+
+	status, response := api.request(http.MethodGet, "/app/version", owner.Token, nil)
+	api.requireStatus(status, http.StatusOK, response)
+	if response["version"] != "1.2.3" || response["latest_version"] != "1.2.3" {
+		t.Fatalf("version mismatch: %v", response)
+	}
+	if response["minimum_supported_version"] != "1.1.0" {
+		t.Fatalf("minimum version mismatch: %v", response)
+	}
+	if response["download_url"] != "https://example.test/releases/GangChat-1.2.3-windows-x64-setup.exe" {
+		t.Fatalf("download url mismatch: %v", response)
+	}
+	if response["sha256"] != "abc123" {
+		t.Fatalf("sha256 mismatch: %v", response)
+	}
+}
+
 func (h *apiHarness) register(username string) testSession {
 	h.t.Helper()
 	status, response := h.request(http.MethodPost, "/auth/register", "", map[string]any{

@@ -38,6 +38,7 @@ type Handler struct {
 	Live     liveMediaController
 	Assets   *storage.AssetStorage
 	MusicBox *musicbox.Manager
+	AppInfo  appVersionCache
 }
 
 // RegisterRoutes wires the chat API onto g and returns the handler so the
