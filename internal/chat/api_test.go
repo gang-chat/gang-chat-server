@@ -952,6 +952,41 @@ func TestListRoomsOrdersLiveFirstThenLatestMessage(t *testing.T) {
 	}
 }
 
+func TestLiveJoinTokenUsesLongLivedRoomToken(t *testing.T) {
+	api := newAPIHarness(t)
+	owner := api.register("live_token_owner")
+	room := api.createRoom(owner.Token, map[string]any{"name": "Live Token Room", "join_policy": "open"})
+	roomID := room["id"].(string)
+
+	before := time.Now().UTC()
+	status, response := api.request(http.MethodPost, "/rooms/"+roomID+"/live/join", owner.Token, map[string]any{
+		"client_live_session_id": "clive_token_owner",
+		"source":                 "live_panel",
+	})
+	api.requireStatus(status, http.StatusOK, response)
+
+	liveKit, ok := response["livekit"].(map[string]any)
+	if !ok {
+		t.Fatalf("live join response missing livekit payload: %v", response)
+	}
+	if liveKit["room_name"] != roomID {
+		t.Fatalf("livekit room_name should match room id: %v", liveKit)
+	}
+	expiresAtRaw, ok := liveKit["token_expires_at"].(string)
+	if !ok || expiresAtRaw == "" {
+		t.Fatalf("livekit payload missing token_expires_at: %v", liveKit)
+	}
+	expiresAt, err := time.Parse(time.RFC3339Nano, expiresAtRaw)
+	if err != nil {
+		t.Fatalf("token_expires_at is not RFC3339Nano: %v", err)
+	}
+	minExpected := before.Add(liveKitJoinTokenTTL - time.Minute)
+	maxExpected := before.Add(liveKitJoinTokenTTL + time.Minute)
+	if expiresAt.Before(minExpected) || expiresAt.After(maxExpected) {
+		t.Fatalf("token expiry got %s, want within [%s, %s]", expiresAt, minExpected, maxExpected)
+	}
+}
+
 func TestAttachmentDispositionUsesUTF8FilenameStar(t *testing.T) {
 	header := attachmentDisposition("表情 包.webp")
 	if strings.Contains(header, "表情") {

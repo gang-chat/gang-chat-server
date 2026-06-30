@@ -9,6 +9,8 @@ import (
 	livekittoken "github.com/zhuangkaiyi/gang-chat/server/internal/livekit"
 )
 
+const liveKitJoinTokenTTL = 24 * time.Hour
+
 func (h *Handler) getLiveState(c *gin.Context) {
 	roomID := c.Param("room_id")
 	if !h.requireRoomAccess(c, roomID) {
@@ -323,7 +325,7 @@ func (h *Handler) liveParticipantForUser(roomID, userID string) (liveParticipant
 }
 
 func (h *Handler) liveKitToken(roomID, userID string) (string, time.Time, error) {
-	expiresAt := time.Now().UTC().Add(10 * time.Minute)
+	expiresAt := time.Now().UTC().Add(liveKitJoinTokenTTL)
 	canPublish, canSubscribe := h.liveKitMediaPermissions(roomID, userID)
 	if h.Cfg.LiveKitAPIKey == "" || h.Cfg.LiveKitAPISecret == "" {
 		return "dev-livekit-token", expiresAt, nil
@@ -336,7 +338,7 @@ func (h *Handler) liveKitToken(roomID, userID string) (string, time.Time, error)
 		Name:         currentUsernameFromDB(h.DB, userID),
 		CanPublish:   canPublish,
 		CanSubscribe: canSubscribe,
-		TTL:          10 * time.Minute,
+		TTL:          liveKitJoinTokenTTL,
 	})
 	return token, expiresAt, err
 }
@@ -397,7 +399,7 @@ func (h *Handler) issueScreenAudioToken(c *gin.Context) {
 // screenAudioToken mints a LiveKit join token for the hidden screen-audio aux
 // participant. canSubscribe is always false (publish-only).
 func (h *Handler) screenAudioToken(roomID, ownerUserID, identity string, canPublish bool) (string, time.Time, error) {
-	expiresAt := time.Now().UTC().Add(10 * time.Minute)
+	expiresAt := time.Now().UTC().Add(liveKitJoinTokenTTL)
 	if h.Cfg.LiveKitAPIKey == "" || h.Cfg.LiveKitAPISecret == "" {
 		return "dev-livekit-token", expiresAt, nil
 	}
@@ -409,7 +411,7 @@ func (h *Handler) screenAudioToken(roomID, ownerUserID, identity string, canPubl
 		Name:         currentUsernameFromDB(h.DB, ownerUserID),
 		CanPublish:   canPublish,
 		CanSubscribe: false,
-		TTL:          10 * time.Minute,
+		TTL:          liveKitJoinTokenTTL,
 	})
 	return token, expiresAt, err
 }
