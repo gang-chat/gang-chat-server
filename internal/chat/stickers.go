@@ -222,18 +222,11 @@ func (h *Handler) addSticker(c *gin.Context) {
 		name = "sticker"
 	}
 	packID := c.Param("pack_id")
-	unlock := h.stickerPackLocks.lock("stickers:" + packID)
-	name = h.uniqueStickerName(packID, name, "")
 	sortOrder := 10
 	if req.SortOrder != nil {
 		sortOrder = *req.SortOrder
 	}
-	id := newID("stk")
-	_, err := h.DB.Exec(
-		`INSERT INTO stickers (id, pack_id, asset_id, name, sort_order, created_at) VALUES (?, ?, ?, ?, ?, ?)`,
-		id, packID, req.AssetID, name, sortOrder, nowMillis(),
-	)
-	unlock()
+	id, err := h.addStickerToPack(packID, req.AssetID, name, sortOrder)
 	if err != nil {
 		h.jsonError(c, http.StatusInternalServerError, "internal_error", "add sticker failed")
 		return
@@ -263,11 +256,7 @@ func (h *Handler) updateSticker(c *gin.Context) {
 
 	name := strings.TrimSpace(req.Name)
 	if name != "" {
-		unlock := h.stickerPackLocks.lock("stickers:" + packID)
-		name = h.uniqueStickerName(packID, name, stickerID)
-		_, err := h.DB.Exec(`UPDATE stickers SET name = ? WHERE id = ? AND pack_id = ?`, name, stickerID, packID)
-		unlock()
-		if err != nil {
+		if err := h.renameStickerInPack(packID, stickerID, name); err != nil {
 			h.jsonError(c, http.StatusInternalServerError, "internal_error", "update sticker failed")
 			return
 		}
@@ -469,18 +458,11 @@ func (h *Handler) saveSticker(c *gin.Context) {
 	if name == "" {
 		name = "sticker"
 	}
-	unlock := h.stickerPackLocks.lock("stickers:" + packID)
-	name = h.uniqueStickerName(packID, name, "")
 	sortOrder := 10
 	if req.SortOrder != nil {
 		sortOrder = *req.SortOrder
 	}
-	stickerID := newID("stk")
-	_, err = h.DB.Exec(
-		`INSERT INTO stickers (id, pack_id, asset_id, name, sort_order, created_at) VALUES (?, ?, ?, ?, ?, ?)`,
-		stickerID, packID, assetID, name, sortOrder, nowMillis(),
-	)
-	unlock()
+	stickerID, err := h.addStickerToPack(packID, assetID, name, sortOrder)
 	if err != nil {
 		h.jsonError(c, http.StatusInternalServerError, "internal_error", "save sticker failed")
 		return
@@ -765,11 +747,48 @@ func (h *Handler) uniqueStickerPackName(scope, ownerUserID, roomID, desired, exc
 	}
 }
 
-func (h *Handler) uniqueStickerName(packID, desired, excludeStickerID string) string {
-	base := strings.TrimSpace(desired)
-	if base == "" {
-		base = "sticker"
+func (h *Handler) addStickerToPack(packID, assetID, desiredName string, sortOrder int) (string, error) {
+	unlock := h.stickerPackLocks.lock("stickers:" + packID)
+	defer unlock()
+
+	base := normalizeStickerName(desiredName)
+	for attempt := 0; attempt < 20; attempt++ {
+		id := newID("stk")
+		name := h.uniqueStickerName(packID, base, "")
+		_, err := h.DB.Exec(
+			`INSERT INTO stickers (id, pack_id, asset_id, name, sort_order, created_at) VALUES (?, ?, ?, ?, ?, ?)`,
+			id, packID, assetID, name, sortOrder, nowMillis(),
+		)
+		if err == nil {
+			return id, nil
+		}
+		if !isStickerNameConflict(err) {
+			return "", err
+		}
 	}
+	return "", fmt.Errorf("sticker name conflict after retries")
+}
+
+func (h *Handler) renameStickerInPack(packID, stickerID, desiredName string) error {
+	unlock := h.stickerPackLocks.lock("stickers:" + packID)
+	defer unlock()
+
+	base := normalizeStickerName(desiredName)
+	for attempt := 0; attempt < 20; attempt++ {
+		name := h.uniqueStickerName(packID, base, stickerID)
+		_, err := h.DB.Exec(`UPDATE stickers SET name = ? WHERE id = ? AND pack_id = ?`, name, stickerID, packID)
+		if err == nil {
+			return nil
+		}
+		if !isStickerNameConflict(err) {
+			return err
+		}
+	}
+	return fmt.Errorf("sticker name conflict after retries")
+}
+
+func (h *Handler) uniqueStickerName(packID, desired, excludeStickerID string) string {
+	base := normalizeStickerName(desired)
 	rows, err := h.DB.Query(`SELECT name FROM stickers WHERE pack_id = ? AND id <> ?`, packID, excludeStickerID)
 	if err != nil {
 		return base
@@ -791,6 +810,23 @@ func (h *Handler) uniqueStickerName(packID, desired, excludeStickerID string) st
 			return candidate
 		}
 	}
+}
+
+func normalizeStickerName(name string) string {
+	trimmed := strings.TrimSpace(name)
+	if trimmed == "" {
+		return "sticker"
+	}
+	return trimmed
+}
+
+func isStickerNameConflict(err error) bool {
+	if err == nil {
+		return false
+	}
+	message := err.Error()
+	return strings.Contains(message, "UNIQUE constraint failed") &&
+		strings.Contains(message, "stickers")
 }
 
 func (h *Handler) touchStickerPack(packID string) {

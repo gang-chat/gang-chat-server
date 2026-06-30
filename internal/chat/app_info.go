@@ -6,7 +6,7 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
-const latestClientVersion = "0.3.1"
+const latestClientVersion = "0.4.0"
 
 func (h *Handler) getAppVersion(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{

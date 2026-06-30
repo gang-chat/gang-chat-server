@@ -2644,6 +2644,14 @@ func TestSaveStickerToPersonalAndRoomPacks(t *testing.T) {
 	if !hasStickerNames(response["pack"].(map[string]any), "ok", "ok (2)") {
 		t.Fatalf("duplicate personal saved sticker should be suffixed: %v", response)
 	}
+	status, response = api.request(http.MethodPost, "/rooms/"+roomID+"/stickers/save", member.Token, map[string]any{
+		"sticker_id":   sourceSticker["id"].(string),
+		"target_scope": "personal",
+	})
+	api.requireStatus(status, http.StatusCreated, response)
+	if !hasStickerNames(response["pack"].(map[string]any), "ok", "ok (2)", "ok (3)") {
+		t.Fatalf("third duplicate personal saved sticker should keep incrementing: %v", response)
+	}
 
 	status, response = api.request(http.MethodPost, "/rooms/"+roomID+"/stickers/save", member.Token, map[string]any{
 		"sticker_id":   sourceSticker["id"].(string),
@@ -2670,6 +2678,14 @@ func TestSaveStickerToPersonalAndRoomPacks(t *testing.T) {
 	api.requireStatus(status, http.StatusCreated, response)
 	if !hasStickerNames(response["pack"].(map[string]any), "ok", "ok (2)") {
 		t.Fatalf("duplicate room saved sticker should be suffixed: %v", response)
+	}
+	status, response = api.request(http.MethodPost, "/rooms/"+roomID+"/stickers/save", owner.Token, map[string]any{
+		"sticker_id":   sourceSticker["id"].(string),
+		"target_scope": "room",
+	})
+	api.requireStatus(status, http.StatusCreated, response)
+	if !hasStickerNames(response["pack"].(map[string]any), "ok", "ok (2)", "ok (3)") {
+		t.Fatalf("third duplicate room saved sticker should keep incrementing: %v", response)
 	}
 }
 
