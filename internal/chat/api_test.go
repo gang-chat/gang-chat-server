@@ -39,11 +39,12 @@ type apiHarness struct {
 // fakeLiveController records the LiveKit media-control calls moderation makes,
 // so tests can assert the server drove the media session (not just the DB).
 type fakeLiveController struct {
-	removed      []string // "room/identity"
-	publishSet   []string // "room/identity=true|false"
-	subscribeSet []string // "room/identity=true|false"
-	micMuted     []string // "room/identity=true|false"
-	removeErr    error
+	removed          []string // "room/identity"
+	mediaPermissions []string // "room/identity publish=true|false subscribe=true|false"
+	publishSet       []string // "room/identity=true|false"
+	subscribeSet     []string // "room/identity=true|false"
+	micMuted         []string // "room/identity=true|false"
+	removeErr        error
 }
 
 func (f *fakeLiveController) RemoveParticipant(room, identity string) error {
@@ -53,6 +54,14 @@ func (f *fakeLiveController) RemoveParticipant(room, identity string) error {
 
 func (f *fakeLiveController) SetCanPublish(room, identity string, canPublish bool) error {
 	f.publishSet = append(f.publishSet, room+"/"+identity+"="+strconv.FormatBool(canPublish))
+	return nil
+}
+
+func (f *fakeLiveController) SetMediaPermissions(room, identity string, canPublish, canSubscribe bool) error {
+	f.mediaPermissions = append(
+		f.mediaPermissions,
+		room+"/"+identity+" publish="+strconv.FormatBool(canPublish)+" subscribe="+strconv.FormatBool(canSubscribe),
+	)
 	return nil
 }
 
@@ -2236,8 +2245,8 @@ func TestLiveHeadphonesAndVoiceBlock(t *testing.T) {
 		"reason": "mic test",
 	})
 	api.requireStatus(status, http.StatusOK, response)
-	if !contains(api.live.publishSet, memberKey+"=false") {
-		t.Fatalf("mute_mic should revoke publish on LiveKit: %v", api.live.publishSet)
+	if !contains(api.live.mediaPermissions, memberKey+" publish=false subscribe=true") {
+		t.Fatalf("mute_mic should revoke publish while preserving subscribe on LiveKit: %v", api.live.mediaPermissions)
 	}
 	if !contains(api.live.micMuted, memberKey+"=true") {
 		t.Fatalf("mute_mic should server-mute the mic on LiveKit: %v", api.live.micMuted)
@@ -2254,8 +2263,8 @@ func TestLiveHeadphonesAndVoiceBlock(t *testing.T) {
 		"action": "restore_voice",
 	})
 	api.requireStatus(status, http.StatusOK, response)
-	if !contains(api.live.publishSet, memberKey+"=true") {
-		t.Fatalf("restore_voice should re-grant publish after mute_mic: %v", api.live.publishSet)
+	if !contains(api.live.mediaPermissions, memberKey+" publish=true subscribe=true") {
+		t.Fatalf("restore_voice should re-grant publish while preserving subscribe on LiveKit: %v", api.live.mediaPermissions)
 	}
 	if !contains(api.live.micMuted, memberKey+"=false") {
 		t.Fatalf("restore_voice should server-unmute the mic on LiveKit: %v", api.live.micMuted)
@@ -2278,7 +2287,7 @@ func TestLiveHeadphonesAndVoiceBlock(t *testing.T) {
 		t.Fatalf("headphones should be muted: %v", participant)
 	}
 
-	publishWritesBeforeHeadphonesMute := len(api.live.publishSet)
+	mediaWritesBeforeHeadphonesMute := len(api.live.mediaPermissions)
 	micWritesBeforeHeadphonesMute := len(api.live.micMuted)
 	status, response = api.request(http.MethodPost, "/rooms/"+roomID+"/live/participants/"+member.User["id"].(string)+"/moderation", owner.Token, map[string]any{
 		"action": "block_voice",
@@ -2288,11 +2297,9 @@ func TestLiveHeadphonesAndVoiceBlock(t *testing.T) {
 
 	// block_voice is now the headphone-mute primitive: it revokes subscribe
 	// without touching microphone publish or server-side mic mute.
-	if len(api.live.publishSet) != publishWritesBeforeHeadphonesMute {
-		t.Fatalf("block_voice should not revoke publish on LiveKit: %v", api.live.publishSet)
-	}
-	if !contains(api.live.subscribeSet, memberKey+"=false") {
-		t.Fatalf("block_voice should revoke subscribe on LiveKit: %v", api.live.subscribeSet)
+	if len(api.live.mediaPermissions) != mediaWritesBeforeHeadphonesMute+1 ||
+		api.live.mediaPermissions[len(api.live.mediaPermissions)-1] != memberKey+" publish=true subscribe=false" {
+		t.Fatalf("block_voice should preserve publish and revoke only subscribe on LiveKit: %v", api.live.mediaPermissions)
 	}
 	if len(api.live.micMuted) != micWritesBeforeHeadphonesMute {
 		t.Fatalf("block_voice should not server-mute the mic on LiveKit: %v", api.live.micMuted)
@@ -2324,8 +2331,8 @@ func TestLiveHeadphonesAndVoiceBlock(t *testing.T) {
 		"action": "restore_headphones",
 	})
 	api.requireStatus(status, http.StatusOK, response)
-	if !contains(api.live.subscribeSet, memberKey+"=true") {
-		t.Fatalf("restore_headphones should re-grant subscribe on LiveKit: %v", api.live.subscribeSet)
+	if !contains(api.live.mediaPermissions, memberKey+" publish=true subscribe=true") {
+		t.Fatalf("restore_headphones should re-grant subscribe while preserving publish on LiveKit: %v", api.live.mediaPermissions)
 	}
 	status, response = api.request(http.MethodGet, "/rooms/"+roomID+"/live", owner.Token, nil)
 	api.requireStatus(status, http.StatusOK, response)
@@ -2340,10 +2347,16 @@ func TestLiveHeadphonesAndVoiceBlock(t *testing.T) {
 		"action": "mute_mic",
 	})
 	api.requireStatus(status, http.StatusOK, response)
+	if api.live.mediaPermissions[len(api.live.mediaPermissions)-1] != memberKey+" publish=false subscribe=true" {
+		t.Fatalf("mute_mic should keep headphones permission while blocking mic: %v", api.live.mediaPermissions)
+	}
 	status, response = api.request(http.MethodPost, "/rooms/"+roomID+"/live/participants/"+member.User["id"].(string)+"/moderation", owner.Token, map[string]any{
 		"action": "block_voice",
 	})
 	api.requireStatus(status, http.StatusOK, response)
+	if api.live.mediaPermissions[len(api.live.mediaPermissions)-1] != memberKey+" publish=false subscribe=false" {
+		t.Fatalf("headphones mute should preserve existing mic block: %v", api.live.mediaPermissions)
+	}
 	status, response = api.request(http.MethodGet, "/rooms/"+roomID+"/live", owner.Token, nil)
 	api.requireStatus(status, http.StatusOK, response)
 	live = response["live"].(map[string]any)
@@ -2357,6 +2370,9 @@ func TestLiveHeadphonesAndVoiceBlock(t *testing.T) {
 		"action": "restore_voice",
 	})
 	api.requireStatus(status, http.StatusOK, response)
+	if api.live.mediaPermissions[len(api.live.mediaPermissions)-1] != memberKey+" publish=true subscribe=false" {
+		t.Fatalf("restore_voice should preserve headphones mute: %v", api.live.mediaPermissions)
+	}
 	status, response = api.request(http.MethodGet, "/rooms/"+roomID+"/live", owner.Token, nil)
 	api.requireStatus(status, http.StatusOK, response)
 	live = response["live"].(map[string]any)
@@ -2370,6 +2386,9 @@ func TestLiveHeadphonesAndVoiceBlock(t *testing.T) {
 		"action": "restore_headphones",
 	})
 	api.requireStatus(status, http.StatusOK, response)
+	if api.live.mediaPermissions[len(api.live.mediaPermissions)-1] != memberKey+" publish=true subscribe=true" {
+		t.Fatalf("restore_headphones should preserve restored mic permission: %v", api.live.mediaPermissions)
+	}
 	status, response = api.request(http.MethodGet, "/rooms/"+roomID+"/live", owner.Token, nil)
 	api.requireStatus(status, http.StatusOK, response)
 	live = response["live"].(map[string]any)

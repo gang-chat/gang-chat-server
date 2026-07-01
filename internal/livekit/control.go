@@ -82,9 +82,40 @@ func (c *Controller) SetCanPublish(room, identity string, canPublish bool) error
 	return err
 }
 
+// SetMediaPermissions writes the complete publish/subscribe permission pair in
+// one LiveKit update. Moderation callers use this when changing either mic or
+// headphones so the untouched permission cannot be reset by an omitted/default
+// protobuf field.
+func (c *Controller) SetMediaPermissions(room, identity string, canPublish, canSubscribe bool) error {
+	if c == nil {
+		return nil
+	}
+	ctx, cancel := c.ctx()
+	defer cancel()
+	info, err := c.rooms.GetParticipant(ctx, &livekit.RoomParticipantIdentity{
+		Room:     room,
+		Identity: identity,
+	})
+	if err != nil {
+		return err
+	}
+	perm := info.GetPermission()
+	if perm == nil {
+		perm = &livekit.ParticipantPermission{}
+	}
+	perm.CanPublish = canPublish
+	perm.CanSubscribe = canSubscribe
+	_, err = c.rooms.UpdateParticipant(ctx, &livekit.UpdateParticipantRequest{
+		Room:       room,
+		Identity:   identity,
+		Permission: perm,
+	})
+	return err
+}
+
 // SetCanSubscribe flips a participant's subscribe permission live. This is the
-// enforcement primitive for admin "isolate headphones": the target stays in
-// the room but cannot receive other participants' media until restored.
+// enforcement primitive for admin "headphone mute": the target stays in the
+// room but cannot receive other participants' media until restored.
 func (c *Controller) SetCanSubscribe(room, identity string, canSubscribe bool) error {
 	if c == nil {
 		return nil

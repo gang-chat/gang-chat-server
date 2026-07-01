@@ -54,7 +54,8 @@ func (h *Handler) moderateLiveParticipant(c *gin.Context) {
 		h.publishRoomUpdated(roomID)
 
 	case "mute_mic":
-		if err := h.Live.SetCanPublish(roomID, targetID, false); err != nil {
+		_, canSubscribe := h.liveKitMediaPermissions(roomID, targetID)
+		if err := h.Live.SetMediaPermissions(roomID, targetID, false, canSubscribe); err != nil {
 			h.jsonError(c, http.StatusBadGateway, "livekit_error", "failed to block microphone publishing")
 			return
 		}
@@ -87,7 +88,8 @@ func (h *Handler) moderateLiveParticipant(c *gin.Context) {
 		// Revoke subscribe on the live session first so headphone mute takes
 		// effect immediately without touching the target's microphone publish
 		// permission. The room-scoped policy below makes it survive reconnects.
-		if err := h.Live.SetCanSubscribe(roomID, targetID, false); err != nil {
+		canPublish, _ := h.liveKitMediaPermissions(roomID, targetID)
+		if err := h.Live.SetMediaPermissions(roomID, targetID, canPublish, false); err != nil {
 			h.jsonError(c, http.StatusBadGateway, "livekit_error", "failed to mute headphones")
 			return
 		}
@@ -113,7 +115,8 @@ func (h *Handler) moderateLiveParticipant(c *gin.Context) {
 		)
 
 	case "restore_voice":
-		if err := h.Live.SetCanPublish(roomID, targetID, true); err != nil {
+		_, canSubscribe := h.liveKitMediaPermissions(roomID, targetID)
+		if err := h.Live.SetMediaPermissions(roomID, targetID, true, canSubscribe); err != nil {
 			h.jsonError(c, http.StatusBadGateway, "livekit_error", "failed to restore voice")
 			return
 		}
@@ -142,7 +145,8 @@ func (h *Handler) moderateLiveParticipant(c *gin.Context) {
 		)
 
 	case "restore_headphones":
-		if err := h.Live.SetCanSubscribe(roomID, targetID, true); err != nil {
+		canPublish, _ := h.liveKitMediaPermissions(roomID, targetID)
+		if err := h.Live.SetMediaPermissions(roomID, targetID, canPublish, true); err != nil {
 			h.jsonError(c, http.StatusBadGateway, "livekit_error", "failed to restore headphones")
 			return
 		}
