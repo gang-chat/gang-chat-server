@@ -15,14 +15,15 @@ permissions:
 jobs:
   build-and-deploy:
     runs-on: ubuntu-latest
-    env:
-      # 国内 Go 代理，避免 proxy.golang.org 被墙；goproxy.cn 同时代理 checksum
-      # 校验，以及 GOTOOLCHAIN 自动下载的 Go 工具链（golang.org/toolchain）。
-      GOPROXY: https://goproxy.cn,direct
-      GOTOOLCHAIN: auto
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: false
 
       - name: Ensure build and deploy tools
         run: |
@@ -32,47 +33,6 @@ jobs:
           fi
           gcc --version
           rsync --version | sed -n '1p'
-
-      - name: Compute Go cache key
-        id: go-cache-key
-        run: |
-          GO_VERSION="$(awk '/^go [0-9]/{print $2; exit}' go.mod)"
-          MOD_HASH="$(sha256sum go.mod go.sum | sha256sum | awk '{print $1}')"
-          echo "version=$GO_VERSION" >> "$GITHUB_OUTPUT"
-          echo "sum=$MOD_HASH" >> "$GITHUB_OUTPUT"
-
-      - name: Configure Go cache dirs
-        run: |
-          mkdir -p .cache/go-build .cache/go-mod
-          echo "GOCACHE=$PWD/.cache/go-build" >> "$GITHUB_ENV"
-          echo "GOMODCACHE=$PWD/.cache/go-mod" >> "$GITHUB_ENV"
-
-      - name: Cache Go
-        id: cache-go
-        uses: actions/cache@v4
-        with:
-          path: |
-            .cache/go-build
-            .cache/go-mod
-          key: go-linux-amd64-${{ steps.go-cache-key.outputs.version }}-${{ steps.go-cache-key.outputs.sum }}
-          restore-keys: |
-            go-linux-amd64-${{ steps.go-cache-key.outputs.version }}-
-            go-linux-amd64-
-
-      # 镜像不自带 Go，从国内镜像 golang.google.cn 装。版本直接读 go.mod，
-      # 以后升级 Go 不用再改这里。
-      - name: Setup Go
-        run: |
-          GO_VERSION="$(awk '/^go [0-9]/{print $2; exit}' go.mod)"
-          echo "installing Go ${GO_VERSION}"
-          sudo rm -rf /usr/local/go
-          wget -qO /tmp/go.tgz "https://golang.google.cn/dl/go${GO_VERSION}.linux-amd64.tar.gz"
-          sudo tar -C /usr/local -xzf /tmp/go.tgz
-          echo "/usr/local/go/bin" >> "$GITHUB_PATH"
-          export PATH="/usr/local/go/bin:$PATH"
-          /usr/local/go/bin/go version
-          go env GOCACHE GOMODCACHE
-          echo "go cache hit: ${{ steps.cache-go.outputs.cache-hit }}"
 
       - name: UTF-8 encoding check
         run: go run ./tools/check_utf8.go
