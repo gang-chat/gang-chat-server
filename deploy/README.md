@@ -35,27 +35,31 @@ Run them on the **server**, from the deploy directory:
    LIVEKIT_API_KEY=<key>
    LIVEKIT_API_SECRET=<secret>
    ```
-4. For production asset storage on Tencent COS, keep the real credentials only
-   in this server-side `.env`:
+4. For production asset storage on S3-compatible storage, keep the real
+   credentials only in this server-side `.env`:
    ```
-   # Optional: COS is selected automatically when the COS bucket/credentials
+   # Optional: S3 is selected automatically when the endpoint/bucket/credentials
    # below are present. Set GANG_STORAGE_BACKEND=local only to force local disk.
-   GANG_STORAGE_BACKEND=
+   GANG_STORAGE_BACKEND=s3
    GANG_ASSET_OBJECT_PREFIX=assets
-   GANG_ASSET_PUBLIC_BASE_URL=https://<bucket-name-with-appid>.cos.<region>.myqcloud.com
+   # Leave empty to serve private bucket assets through the API. Set only for a public bucket/CDN.
+   GANG_ASSET_PUBLIC_BASE_URL=
    # Optional: controls Cache-Control max-age and Expires when GANG_ASSET_CACHE_CONTROL is unset.
    GANG_ASSET_CACHE_TTL_SECONDS=31536000
-   GANG_COS_BUCKET=<bucket-name-with-appid>
-   GANG_COS_REGION=<region, e.g. ap-shanghai>
-   GANG_COS_SECRET_ID=<secret id>
-   GANG_COS_SECRET_KEY=<secret key>
-   GANG_COS_OBJECT_ACL=public-read
+   GANG_S3_ENDPOINT=https://os.ky-z.com:9000
+   GANG_S3_BUCKET=gang-chat
+   GANG_S3_REGION=us-east-1
+   GANG_S3_ACCESS_KEY_ID=gang-chat
+   GANG_S3_SECRET_ACCESS_KEY=<secret key>
+   GANG_S3_SESSION_TOKEN=
+   GANG_S3_FORCE_PATH_STYLE=true
    ```
-   With `GANG_ASSET_PUBLIC_BASE_URL` set, uploads are written to COS and API
-   payloads return COS/CDN URLs. Asset reads do not pass through the backend and
-   no local asset cache is kept. Replace the COS endpoint with a CDN root when
-   CDN is enabled. Asset responses include `Cache-Control`, `Expires`, `ETag`,
-   and `Last-Modified`; set `GANG_ASSET_CACHE_CONTROL` to override the generated
+   With `GANG_ASSET_PUBLIC_BASE_URL` empty, uploads are written to S3 and asset
+   reads pass through the backend using server-side credentials. Set
+   `GANG_ASSET_PUBLIC_BASE_URL` to a public bucket or CDN root only when direct
+   browser reads should bypass the backend. Asset responses include
+   `Cache-Control`, `Expires`, `ETag`, and `Last-Modified`; set
+   `GANG_ASSET_CACHE_CONTROL` to override the generated
    `public, max-age=<ttl>, immutable` policy.
 5. (Optional) `deploy.env` for path overrides — see `deploy.env.example`.
 6. First boot: `./start.sh all`.

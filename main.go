@@ -47,12 +47,13 @@ func main() {
 
 	bus := eventbus.New()
 
-	// QQ音乐 integration is optional: enabled only when a qqmusic.json config is
-	// present. When present, a failed login (service down or wrong password)
-	// aborts startup, so a misconfiguration is loud rather than silently off.
+	// QQ音乐 integration is optional: enabled only when qqmusic_base_url and
+	// qqmusic_password are set in config.json. A failed login (service down or
+	// wrong password) aborts startup, so a misconfiguration is loud rather than
+	// silently off.
 	var qqClient *qqmusic.Client
-	if cfg.QQMusic != nil {
-		qc, err := qqmusic.New(cfg.QQMusic.BaseURL, cfg.QQMusic.Password)
+	if cfg.QQMusicBaseURL != "" && cfg.QQMusicPassword != "" {
+		qc, err := qqmusic.New(cfg.QQMusicBaseURL, cfg.QQMusicPassword)
 		if err != nil {
 			log.Fatalf("qqmusic: init client: %v", err)
 		}
@@ -63,7 +64,7 @@ func main() {
 		}
 		cancel()
 		qqClient = qc
-		log.Printf("qqmusic: connected to %s", cfg.QQMusic.BaseURL)
+		log.Printf("qqmusic: connected to %s", cfg.QQMusicBaseURL)
 	}
 
 	// Music box: server-side download/transcode/broadcast of room music. It

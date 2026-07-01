@@ -4,82 +4,54 @@ import (
 	"encoding/json"
 	"flag"
 	"os"
-	"strconv"
 	"strings"
 )
 
 const (
 	DefaultAssetUploadMaxBytes int64 = 50 * 1024 * 1024
 	DefaultImageUploadMaxBytes int64 = 10 * 1024 * 1024
-	// DefaultMusicBoxMaxBytesPerRoom caps the on-disk size of a single room's
-	// transcoded music queue. The queue is bounded by total bytes, not item
-	// count, so this is the real backpressure knob.
 	DefaultMusicBoxMaxBytesPerRoom int64 = 200 * 1024 * 1024
 )
 
 type Config struct {
-	Bind                     string
-	DatabaseURL              string
-	JWTSecret                string
-	AccessTokenTTLSeconds    int64
-	RefreshTokenTTLSeconds   int64
-	LoginMaxAttempts         int
-	LoginWindowSeconds       int64
-	AssetDir                 string
-	StorageBackend           string
-	AssetPublicBaseURL       string
-	AssetObjectPrefix        string
-	AssetCacheControl        string
-	AssetCacheTTLSeconds     int64
-	AssetUploadMaxBytes      int64
-	ImageUploadMaxBytes      int64
-	COSBucket                string
-	COSRegion                string
-	COSBucketURL             string
-	COSSecretID              string
-	COSSecretKey             string
-	COSSessionToken          string
-	COSObjectACL             string
-	GeoIPDatabasePath        string
-	TrustedProxies           []string
-	AllowedOrigins           []string
-	LiveKitHost              string
-	LiveKitAPIKey            string
-	LiveKitAPISecret         string
-	FFmpegPath               string
-	MusicBoxDir              string
-	MusicBoxMaxBytesPerRoom  int64
-	MusicBoxOpusBitrate      string
-	MusicBoxTranscodeWorkers int
-	MusicBoxSource           string
-	MusicBoxSourceBitrate    string
+	Bind                     string   `json:"bind"`
+	DatabaseURL              string   `json:"database_url"`
+	JWTSecret                string   `json:"jwt_secret"`
+	AccessTokenTTLSeconds    int64    `json:"access_token_ttl_seconds"`
+	RefreshTokenTTLSeconds   int64    `json:"refresh_token_ttl_seconds"`
+	LoginMaxAttempts         int      `json:"login_max_attempts"`
+	LoginWindowSeconds       int64    `json:"login_window_seconds"`
+	AssetDir                 string   `json:"asset_dir"`
+	StorageBackend           string   `json:"storage_backend"`
+	AssetPublicBaseURL       string   `json:"asset_public_base_url"`
+	AssetObjectPrefix        string   `json:"asset_object_prefix"`
+	AssetCacheControl        string   `json:"asset_cache_control"`
+	AssetCacheTTLSeconds     int64    `json:"asset_cache_ttl_seconds"`
+	AssetUploadMaxBytes      int64    `json:"asset_upload_max_bytes"`
+	ImageUploadMaxBytes      int64    `json:"image_upload_max_bytes"`
+	S3Endpoint               string   `json:"s3_endpoint"`
+	S3Bucket                 string   `json:"s3_bucket"`
+	S3Region                 string   `json:"s3_region"`
+	S3AccessKeyID            string   `json:"s3_access_key_id"`
+	S3SecretAccessKey        string   `json:"s3_secret_access_key"`
+	S3SessionToken           string   `json:"s3_session_token"`
+	S3ForcePathStyle         bool     `json:"s3_force_path_style"`
+	GeoIPDatabasePath        string   `json:"geoip_db_path"`
+	TrustedProxies           []string `json:"trusted_proxies"`
+	AllowedOrigins           []string `json:"allowed_origins"`
+	LiveKitHost              string   `json:"livekit_host"`
+	LiveKitAPIKey            string   `json:"livekit_api_key"`
+	LiveKitAPISecret         string   `json:"livekit_api_secret"`
+	FFmpegPath               string   `json:"ffmpeg_path"`
+	MusicBoxDir              string   `json:"music_box_dir"`
+	MusicBoxMaxBytesPerRoom  int64    `json:"music_box_max_bytes_per_room"`
+	MusicBoxOpusBitrate      string   `json:"music_box_opus_bitrate"`
+	MusicBoxTranscodeWorkers int      `json:"music_box_transcode_workers"`
+	MusicBoxSource           string   `json:"music_box_source"`
+	MusicBoxSourceBitrate    string   `json:"music_box_source_bitrate"`
 
-	// QQMusic is the optional self-hosted QQ音乐 API integration. It's nil when
-	// no config file is present (feature off); non-nil and validated when one is.
-	QQMusic *QQMusicConfig
-}
-
-func envOr(key, fallback string) string {
-	if v := os.Getenv(key); v != "" {
-		return v
-	}
-	return fallback
-}
-
-func envIntOr(key string, fallback int64) int64 {
-	if v := os.Getenv(key); v != "" {
-		if n, err := strconv.ParseInt(v, 10, 64); err == nil {
-			return n
-		}
-	}
-	return fallback
-}
-
-func envListOr(key string, fallback []string) []string {
-	if v := os.Getenv(key); v != "" {
-		return parseList(v)
-	}
-	return fallback
+	QQMusicBaseURL string `json:"qqmusic_base_url"`
+	QQMusicPassword string `json:"qqmusic_password"`
 }
 
 func parseList(value string) []string {
@@ -95,42 +67,19 @@ func parseList(value string) []string {
 }
 
 func Load() *Config {
-	cfg := &Config{
-		Bind:                     envOr("GANG_BIND", "127.0.0.1:21116"),
-		DatabaseURL:              envOr("GANG_DATABASE_URL", "gang_chat:password@tcp(127.0.0.1:3306)/gang_chat?parseTime=true&charset=utf8mb4&loc=Local"),
-		JWTSecret:                envOr("GANG_JWT_SECRET", ""),
-		AccessTokenTTLSeconds:    envIntOr("GANG_ACCESS_TOKEN_TTL", 900),
-		RefreshTokenTTLSeconds:   envIntOr("GANG_REFRESH_TOKEN_TTL", 2592000),
-		LoginMaxAttempts:         int(envIntOr("GANG_LOGIN_MAX_ATTEMPTS", 5)),
-		LoginWindowSeconds:       envIntOr("GANG_LOGIN_WINDOW_SECONDS", 900),
-		AssetDir:                 envOr("GANG_ASSET_DIR", "assets"),
-		StorageBackend:           envOr("GANG_STORAGE_BACKEND", ""),
-		AssetPublicBaseURL:       envOr("GANG_ASSET_PUBLIC_BASE_URL", ""),
-		AssetObjectPrefix:        envOr("GANG_ASSET_OBJECT_PREFIX", "assets"),
-		AssetCacheControl:        envOr("GANG_ASSET_CACHE_CONTROL", ""),
-		AssetCacheTTLSeconds:     envIntOr("GANG_ASSET_CACHE_TTL_SECONDS", 31536000),
-		AssetUploadMaxBytes:      envIntOr("GANG_ASSET_UPLOAD_MAX_BYTES", DefaultAssetUploadMaxBytes),
-		ImageUploadMaxBytes:      envIntOr("GANG_IMAGE_UPLOAD_MAX_BYTES", DefaultImageUploadMaxBytes),
-		COSBucket:                envOr("GANG_COS_BUCKET", ""),
-		COSRegion:                envOr("GANG_COS_REGION", ""),
-		COSBucketURL:             envOr("GANG_COS_BUCKET_URL", ""),
-		COSSecretID:              envOr("GANG_COS_SECRET_ID", ""),
-		COSSecretKey:             envOr("GANG_COS_SECRET_KEY", ""),
-		COSSessionToken:          envOr("GANG_COS_SESSION_TOKEN", ""),
-		COSObjectACL:             envOr("GANG_COS_OBJECT_ACL", "public-read"),
-		GeoIPDatabasePath:        envOr("GANG_GEOIP_DB_PATH", ""),
-		TrustedProxies:           envListOr("GANG_TRUSTED_PROXIES", []string{"127.0.0.1", "::1"}),
-		AllowedOrigins:           envListOr("GANG_ALLOWED_ORIGINS", []string{"*"}),
-		LiveKitHost:              envOr("LIVEKIT_HOST", "http://localhost:7880"),
-		LiveKitAPIKey:            envOr("LIVEKIT_API_KEY", ""),
-		LiveKitAPISecret:         envOr("LIVEKIT_API_SECRET", ""),
-		FFmpegPath:               envOr("GANG_FFMPEG_PATH", "ffmpeg"),
-		MusicBoxDir:              envOr("GANG_MUSIC_BOX_DIR", "music-box"),
-		MusicBoxMaxBytesPerRoom:  envIntOr("GANG_MUSIC_BOX_MAX_BYTES_PER_ROOM", DefaultMusicBoxMaxBytesPerRoom),
-		MusicBoxOpusBitrate:      envOr("GANG_MUSIC_BOX_OPUS_BITRATE", "128k"),
-		MusicBoxTranscodeWorkers: int(envIntOr("GANG_MUSIC_BOX_TRANSCODE_WORKERS", 3)),
-		MusicBoxSource:           envOr("GANG_MUSIC_BOX_SOURCE", "netease"),
-		MusicBoxSourceBitrate:    envOr("GANG_MUSIC_BOX_SOURCE_BITRATE", "192"),
+	path := "config.json"
+	if p := os.Getenv("GANG_CONFIG"); p != "" {
+		path = p
+	}
+
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		panic("read config " + path + ": " + err.Error())
+	}
+
+	var cfg Config
+	if err := json.Unmarshal(raw, &cfg); err != nil {
+		panic("parse config " + path + ": " + err.Error())
 	}
 
 	trustedProxies := strings.Join(cfg.TrustedProxies, ",")
@@ -138,20 +87,20 @@ func Load() *Config {
 	flag.StringVar(&cfg.JWTSecret, "jwt-secret", cfg.JWTSecret, "JWT signing secret")
 	flag.StringVar(&cfg.DatabaseURL, "database-url", cfg.DatabaseURL, "MySQL DSN")
 	flag.StringVar(&cfg.AssetDir, "asset-dir", cfg.AssetDir, "local asset cache directory")
-	flag.StringVar(&cfg.StorageBackend, "storage-backend", cfg.StorageBackend, "asset storage backend: local or cos")
-	flag.StringVar(&cfg.AssetPublicBaseURL, "asset-public-base-url", cfg.AssetPublicBaseURL, "optional CDN/COS public base URL for asset URLs")
+	flag.StringVar(&cfg.StorageBackend, "storage-backend", cfg.StorageBackend, "asset storage backend: local or s3")
+	flag.StringVar(&cfg.AssetPublicBaseURL, "asset-public-base-url", cfg.AssetPublicBaseURL, "optional CDN/S3 public base URL for asset URLs")
 	flag.StringVar(&cfg.AssetObjectPrefix, "asset-object-prefix", cfg.AssetObjectPrefix, "object storage prefix for uploaded assets")
 	flag.StringVar(&cfg.AssetCacheControl, "asset-cache-control", cfg.AssetCacheControl, "Cache-Control header for uploaded assets")
 	flag.Int64Var(&cfg.AssetCacheTTLSeconds, "asset-cache-ttl-seconds", cfg.AssetCacheTTLSeconds, "max-age/Expires TTL for asset HTTP caching when asset-cache-control is not set")
 	flag.Int64Var(&cfg.AssetUploadMaxBytes, "asset-upload-max-bytes", cfg.AssetUploadMaxBytes, "maximum uploaded file size in bytes")
 	flag.Int64Var(&cfg.ImageUploadMaxBytes, "image-upload-max-bytes", cfg.ImageUploadMaxBytes, "maximum uploaded image size in bytes")
-	flag.StringVar(&cfg.COSBucket, "cos-bucket", cfg.COSBucket, "Tencent COS bucket name, including appid")
-	flag.StringVar(&cfg.COSRegion, "cos-region", cfg.COSRegion, "Tencent COS bucket region")
-	flag.StringVar(&cfg.COSBucketURL, "cos-bucket-url", cfg.COSBucketURL, "Tencent COS bucket URL; overrides bucket and region")
-	flag.StringVar(&cfg.COSSecretID, "cos-secret-id", cfg.COSSecretID, "Tencent COS secret id")
-	flag.StringVar(&cfg.COSSecretKey, "cos-secret-key", cfg.COSSecretKey, "Tencent COS secret key")
-	flag.StringVar(&cfg.COSSessionToken, "cos-session-token", cfg.COSSessionToken, "Tencent COS session token for temporary credentials")
-	flag.StringVar(&cfg.COSObjectACL, "cos-object-acl", cfg.COSObjectACL, "COS object ACL for uploaded assets; empty keeps bucket default")
+	flag.StringVar(&cfg.S3Endpoint, "s3-endpoint", cfg.S3Endpoint, "S3-compatible endpoint URL")
+	flag.StringVar(&cfg.S3Bucket, "s3-bucket", cfg.S3Bucket, "S3 bucket name")
+	flag.StringVar(&cfg.S3Region, "s3-region", cfg.S3Region, "S3 signing region")
+	flag.StringVar(&cfg.S3AccessKeyID, "s3-access-key-id", cfg.S3AccessKeyID, "S3 access key id")
+	flag.StringVar(&cfg.S3SecretAccessKey, "s3-secret-access-key", cfg.S3SecretAccessKey, "S3 secret access key")
+	flag.StringVar(&cfg.S3SessionToken, "s3-session-token", cfg.S3SessionToken, "S3 session token for temporary credentials")
+	flag.BoolVar(&cfg.S3ForcePathStyle, "s3-force-path-style", cfg.S3ForcePathStyle, "use path-style S3 URLs")
 	flag.StringVar(&cfg.GeoIPDatabasePath, "geoip-db", cfg.GeoIPDatabasePath, "MaxMind GeoIP database path")
 	flag.StringVar(&cfg.FFmpegPath, "ffmpeg-path", cfg.FFmpegPath, "path to the ffmpeg binary used for music transcoding")
 	flag.StringVar(&cfg.MusicBoxDir, "music-box-dir", cfg.MusicBoxDir, "directory for transcoded room music files")
@@ -168,49 +117,8 @@ func Load() *Config {
 	cfg.AllowedOrigins = parseList(allowedOrigins)
 
 	if cfg.JWTSecret == "" {
-		panic("GANG_JWT_SECRET is required")
+		panic("jwt_secret is required in config.json")
 	}
 
-	cfg.QQMusic = loadQQMusicConfig(envOr("GANG_QQMUSIC_CONFIG", "qqmusic.json"))
-
-	return cfg
-}
-
-// QQMusicConfig holds the connection details for the self-hosted QQ音乐 API
-// service. It's loaded from a JSON file (default qqmusic.json) so the password
-// stays out of the environment/process listing and out of version control.
-type QQMusicConfig struct {
-	// BaseURL is the service origin, e.g. "http://103.47.83.189:12345".
-	BaseURL string `json:"base_url"`
-	// Password is the service access password (the config.json "password" on
-	// the service side).
-	Password string `json:"password"`
-}
-
-// loadQQMusicConfig reads the QQ音乐 service config from path. Behavior:
-//   - file absent: returns nil (feature stays off; netease/bilibili unaffected).
-//   - file present but unreadable/invalid/missing fields: panics, so a broken
-//     config fails loudly at startup rather than silently disabling QQ音乐.
-//
-// Reachability and password correctness are verified separately at startup by
-// calling the client's Login; that's where a wrong password or down service
-// aborts the boot.
-func loadQQMusicConfig(path string) *QQMusicConfig {
-	raw, err := os.ReadFile(path)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil
-		}
-		panic("read QQ音乐 config " + path + ": " + err.Error())
-	}
-	var qc QQMusicConfig
-	if err := json.Unmarshal(raw, &qc); err != nil {
-		panic("parse QQ音乐 config " + path + ": " + err.Error())
-	}
-	qc.BaseURL = strings.TrimSpace(qc.BaseURL)
-	qc.Password = strings.TrimSpace(qc.Password)
-	if qc.BaseURL == "" || qc.Password == "" {
-		panic("QQ音乐 config " + path + " must set both base_url and password")
-	}
-	return &qc
+	return &cfg
 }

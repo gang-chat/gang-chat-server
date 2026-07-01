@@ -14,7 +14,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/tencentyun/cos-go-sdk-v5"
+	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/credentials"
+	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/zhuangkaiyi/gang-chat/server/internal/config"
 )
 
@@ -49,8 +51,8 @@ func NewAssetStorage(cfg *config.Config) (*AssetStorage, error) {
 		if cfg.StorageBackend != "" {
 			backend = strings.ToLower(strings.TrimSpace(cfg.StorageBackend))
 		}
-		if backend == "" && hasCOSConfig(cfg) {
-			backend = "cos"
+		if backend == "" && hasS3Config(cfg) {
+			backend = "s3"
 		}
 		if cfg.AssetObjectPrefix != "" {
 			objectPrefix = cfg.AssetObjectPrefix
@@ -76,15 +78,12 @@ func NewAssetStorage(cfg *config.Config) (*AssetStorage, error) {
 	switch backend {
 	case "", "local", "disk":
 		return store, nil
-	case "cos", "tencent-cos", "tencent_cloud_cos":
-		remote, err := newCOSRemote(cfg)
+	case "s3", "s3-compatible", "s3_compatible":
+		remote, err := newS3Remote(cfg)
 		if err != nil {
 			return nil, err
 		}
 		store.remote = remote
-		if store.publicBase == "" {
-			store.publicBase = remote.publicBase
-		}
 		return store, nil
 	default:
 		return nil, fmt.Errorf("unsupported storage backend %q", backend)
@@ -194,92 +193,97 @@ func (s *AssetStorage) Open(ctx context.Context, key, assetID, filename string) 
 	return os.Open(localPath)
 }
 
-type cosRemote struct {
-	client     *cos.Client
-	publicBase string
-	objectACL  string
+type s3Remote struct {
+	client *s3.Client
+	bucket string
 }
 
-func newCOSRemote(cfg *config.Config) (*cosRemote, error) {
+func newS3Remote(cfg *config.Config) (*s3Remote, error) {
 	if cfg == nil {
-		return nil, errors.New("COS storage requires config")
+		return nil, errors.New("S3 storage requires config")
 	}
-	if cfg.COSSecretID == "" || cfg.COSSecretKey == "" {
-		return nil, errors.New("COS storage requires GANG_COS_SECRET_ID and GANG_COS_SECRET_KEY")
+	if strings.TrimSpace(cfg.S3Endpoint) == "" {
+		return nil, errors.New("S3 storage requires GANG_S3_ENDPOINT")
 	}
-	bucketURL, err := cosBucketURL(cfg)
-	if err != nil {
-		return nil, err
+	if strings.TrimSpace(cfg.S3Bucket) == "" {
+		return nil, errors.New("S3 storage requires GANG_S3_BUCKET")
 	}
-	u, err := url.Parse(bucketURL)
-	if err != nil {
-		return nil, fmt.Errorf("parse COS bucket URL: %w", err)
+	if strings.TrimSpace(cfg.S3AccessKeyID) == "" || strings.TrimSpace(cfg.S3SecretAccessKey) == "" {
+		return nil, errors.New("S3 storage requires GANG_S3_ACCESS_KEY_ID and GANG_S3_SECRET_ACCESS_KEY")
 	}
-	client := cos.NewClient(
-		&cos.BaseURL{BucketURL: u},
-		&http.Client{
-			Transport: &cos.AuthorizationTransport{
-				SecretID:     cfg.COSSecretID,
-				SecretKey:    cfg.COSSecretKey,
-				SessionToken: cfg.COSSessionToken,
-			},
-		},
-	)
-	return &cosRemote{
-		client:     client,
-		publicBase: strings.TrimRight(bucketURL, "/"),
-		objectACL:  strings.TrimSpace(cfg.COSObjectACL),
+	endpoint := strings.TrimRight(strings.TrimSpace(cfg.S3Endpoint), "/")
+	if _, err := url.ParseRequestURI(endpoint); err != nil {
+		return nil, fmt.Errorf("parse S3 endpoint: %w", err)
+	}
+	region := strings.TrimSpace(cfg.S3Region)
+	if region == "" {
+		region = "us-east-1"
+	}
+	client := s3.New(s3.Options{
+		Region:       region,
+		BaseEndpoint: aws.String(endpoint),
+		Credentials: aws.NewCredentialsCache(credentials.NewStaticCredentialsProvider(
+			strings.TrimSpace(cfg.S3AccessKeyID),
+			strings.TrimSpace(cfg.S3SecretAccessKey),
+			strings.TrimSpace(cfg.S3SessionToken),
+		)),
+		UsePathStyle: cfg.S3ForcePathStyle,
+	})
+	return &s3Remote{
+		client: client,
+		bucket: strings.TrimSpace(cfg.S3Bucket),
 	}, nil
 }
 
-func (r *cosRemote) PutFile(ctx context.Context, key, filePath, mimeType, cacheControl string) error {
-	options := &cos.ObjectPutOptions{
-		ObjectPutHeaderOptions: &cos.ObjectPutHeaderOptions{
-			ContentType:  mimeType,
-			CacheControl: cacheControl,
-		},
+func (r *s3Remote) PutFile(ctx context.Context, key, filePath, mimeType, cacheControl string) error {
+	file, err := os.Open(filePath)
+	if err != nil {
+		return err
 	}
-	if r.objectACL != "" {
-		options.ACLHeaderOptions = &cos.ACLHeaderOptions{XCosACL: r.objectACL}
+	defer file.Close()
+	input := &s3.PutObjectInput{
+		Bucket: aws.String(r.bucket),
+		Key:    aws.String(key),
+		Body:   file,
 	}
-	_, err := r.client.Object.PutFromFile(ctx, key, filePath, options)
+	if mimeType != "" {
+		input.ContentType = aws.String(mimeType)
+	}
+	if cacheControl != "" {
+		input.CacheControl = aws.String(cacheControl)
+	}
+	_, err = r.client.PutObject(ctx, input)
 	return err
 }
 
-func (r *cosRemote) Get(ctx context.Context, key string) (io.ReadCloser, error) {
-	resp, err := r.client.Object.Get(ctx, key, nil)
+func (r *s3Remote) Get(ctx context.Context, key string) (io.ReadCloser, error) {
+	resp, err := r.client.GetObject(ctx, &s3.GetObjectInput{
+		Bucket: aws.String(r.bucket),
+		Key:    aws.String(key),
+	})
 	if err != nil {
 		return nil, err
 	}
 	return resp.Body, nil
 }
 
-func (r *cosRemote) Delete(ctx context.Context, key string) error {
-	_, err := r.client.Object.Delete(ctx, key)
+func (r *s3Remote) Delete(ctx context.Context, key string) error {
+	_, err := r.client.DeleteObject(ctx, &s3.DeleteObjectInput{
+		Bucket: aws.String(r.bucket),
+		Key:    aws.String(key),
+	})
 	return err
 }
 
-func cosBucketURL(cfg *config.Config) (string, error) {
-	bucketURL := strings.TrimSpace(cfg.COSBucketURL)
-	if bucketURL == "" {
-		if cfg.COSBucket == "" || cfg.COSRegion == "" {
-			return "", errors.New("COS storage requires GANG_COS_BUCKET and GANG_COS_REGION, or GANG_COS_BUCKET_URL")
-		}
-		bucketURL = fmt.Sprintf("https://%s.cos.%s.myqcloud.com", cfg.COSBucket, cfg.COSRegion)
-	}
-	return strings.TrimRight(bucketURL, "/"), nil
-}
-
-func hasCOSConfig(cfg *config.Config) bool {
+func hasS3Config(cfg *config.Config) bool {
 	if cfg == nil {
 		return false
 	}
-	return strings.TrimSpace(cfg.COSBucketURL) != "" ||
-		strings.TrimSpace(cfg.COSBucket) != "" ||
-		strings.TrimSpace(cfg.COSRegion) != "" ||
-		strings.TrimSpace(cfg.COSSecretID) != "" ||
-		strings.TrimSpace(cfg.COSSecretKey) != "" ||
-		strings.TrimSpace(cfg.COSSessionToken) != ""
+	return strings.TrimSpace(cfg.S3Endpoint) != "" ||
+		strings.TrimSpace(cfg.S3Bucket) != "" ||
+		strings.TrimSpace(cfg.S3AccessKeyID) != "" ||
+		strings.TrimSpace(cfg.S3SecretAccessKey) != "" ||
+		strings.TrimSpace(cfg.S3SessionToken) != ""
 }
 
 func cleanObjectKey(value string) string {
