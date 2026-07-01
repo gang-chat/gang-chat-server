@@ -84,38 +84,30 @@ func (h *Handler) moderateLiveParticipant(c *gin.Context) {
 		)
 
 	case "block_voice":
-		// Revoke publish on the live session first so it stops immediately,
-		// then record the persistent ban so it survives reconnects, then
-		// project onto the participant row clients render.
-		if err := h.Live.SetCanPublish(roomID, targetID, false); err != nil {
-			h.jsonError(c, http.StatusBadGateway, "livekit_error", "failed to block voice")
-			return
-		}
+		// Revoke subscribe on the live session first so headphone mute takes
+		// effect immediately without touching the target's microphone publish
+		// permission. The room-scoped policy below makes it survive reconnects.
 		if err := h.Live.SetCanSubscribe(roomID, targetID, false); err != nil {
-			h.jsonError(c, http.StatusBadGateway, "livekit_error", "failed to isolate headphones")
+			h.jsonError(c, http.StatusBadGateway, "livekit_error", "failed to mute headphones")
 			return
 		}
-		_ = h.Live.MuteMicrophone(roomID, targetID, true)
 		now := nowMillis()
 		_, _ = h.DB.Exec(
 			`INSERT INTO room_voice_bans (
 			   room_id, user_id, created_by_user_id, reason, created_at,
 			   mic_blocked, headphones_blocked
 			 )
-			 VALUES (?, ?, ?, ?, ?, 1, 1)
+			 VALUES (?, ?, ?, ?, ?, 0, 1)
 			 ON CONFLICT(room_id, user_id) DO UPDATE SET
 			   created_by_user_id = excluded.created_by_user_id,
 			   reason = excluded.reason,
 			   created_at = excluded.created_at,
-			   mic_blocked = 1,
 			   headphones_blocked = 1`,
 			roomID, targetID, actorID, req.Reason, now,
 		)
 		_, _ = h.DB.Exec(
 			`UPDATE live_participants
-			 SET mic_muted = 1, mic_blocked = 1,
-			     headphones_muted = 1, headphones_blocked = 1,
-			     voice_blocked = 1, updated_at = ?
+			 SET headphones_muted = 1, headphones_blocked = 1, updated_at = ?
 			 WHERE room_id = ? AND user_id = ?`,
 			now, roomID, targetID,
 		)
@@ -125,19 +117,25 @@ func (h *Handler) moderateLiveParticipant(c *gin.Context) {
 			h.jsonError(c, http.StatusBadGateway, "livekit_error", "failed to restore voice")
 			return
 		}
-		if err := h.Live.SetCanSubscribe(roomID, targetID, true); err != nil {
-			h.jsonError(c, http.StatusBadGateway, "livekit_error", "failed to restore headphones")
-			return
-		}
 		if err := h.Live.MuteMicrophone(roomID, targetID, false); err != nil {
 			h.jsonError(c, http.StatusBadGateway, "livekit_error", "failed to unmute microphone")
 			return
 		}
-		_, _ = h.DB.Exec(`DELETE FROM room_voice_bans WHERE room_id = ? AND user_id = ?`, roomID, targetID)
+		_, _ = h.DB.Exec(
+			`UPDATE room_voice_bans
+			 SET mic_blocked = 0
+			 WHERE room_id = ? AND user_id = ?`,
+			roomID, targetID,
+		)
+		_, _ = h.DB.Exec(
+			`DELETE FROM room_voice_bans
+			 WHERE room_id = ? AND user_id = ?
+			   AND mic_blocked = 0 AND headphones_blocked = 0`,
+			roomID, targetID,
+		)
 		_, _ = h.DB.Exec(
 			`UPDATE live_participants
 			 SET mic_muted = 0, mic_blocked = 0,
-			     headphones_muted = 0, headphones_blocked = 0,
 			     voice_blocked = 0, updated_at = ?
 			 WHERE room_id = ? AND user_id = ?`,
 			nowMillis(), roomID, targetID,

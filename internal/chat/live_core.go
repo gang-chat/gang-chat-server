@@ -74,8 +74,8 @@ func (h *Handler) joinLive(c *gin.Context) {
 		return
 	}
 	// Re-apply any persistent room-scoped moderation onto the fresh participant
-	// row so a user who rejoins the same room comes back muted/isolated. The
-	// token issued below already reflects the same policy via
+	// row so a user who rejoins the same room comes back microphone/headphones
+	// muted. The token issued below already reflects the same policy via
 	// liveKitMediaPermissions.
 	policy := h.liveVoicePolicy(roomID, userID)
 	if policy.MicBlocked || policy.HeadphonesBlocked {
@@ -275,9 +275,11 @@ func (h *Handler) buildLiveState(roomID string, fallbackUpdatedAt int64) (liveSt
 		        lp.headphones_muted, lp.headphones_blocked,
 		        lp.voice_blocked, lp.camera_on,
 		        lp.screen_sharing, lp.connection_state, u.id, u.uid, u.username,
-		        u.display_name, u.avatar_url, u.default_avatar_key
+		        u.display_name, u.avatar_url, u.default_avatar_key,
+		        rm.room_display_name, rm.role
 		 FROM live_participants lp
 		 JOIN users u ON u.id = lp.user_id
+		 LEFT JOIN room_memberships rm ON rm.room_id = lp.room_id AND rm.user_id = lp.user_id
 		 WHERE lp.room_id = ? AND lp.connection_state != 'left'
 		 ORDER BY lp.joined_at ASC`,
 		roomID,
@@ -314,9 +316,11 @@ func (h *Handler) liveParticipantForUser(roomID, userID string) (liveParticipant
 		        lp.headphones_muted, lp.headphones_blocked,
 		        lp.voice_blocked, lp.camera_on,
 		        lp.screen_sharing, lp.connection_state, u.id, u.uid, u.username,
-		        u.display_name, u.avatar_url, u.default_avatar_key
+		        u.display_name, u.avatar_url, u.default_avatar_key,
+		        rm.room_display_name, rm.role
 		 FROM live_participants lp
 		 JOIN users u ON u.id = lp.user_id
+		 LEFT JOIN room_memberships rm ON rm.room_id = lp.room_id AND rm.user_id = lp.user_id
 		 WHERE lp.room_id = ? AND lp.user_id = ?`,
 		roomID, userID,
 	)
@@ -370,8 +374,8 @@ func (h *Handler) liveKitMediaPermissions(roomID, userID string) (bool, bool) {
 // client WebRTC factory, so screen audio never shares an AudioState with the
 // mic.
 // It never appears in the roster — no live_participants row is created — and is
-// filtered out of the receiver UI. A voice ban revokes its publish right too,
-// so a banned user cannot broadcast screen audio. canSubscribe is always false:
+// filtered out of the receiver UI. A microphone mute revokes its publish right
+// too, so a muted user cannot broadcast screen audio. canSubscribe is always false:
 // the aux participant is publish-only, so it never receives (and thus never
 // echoes back) other participants' tracks.
 func (h *Handler) issueScreenAudioToken(c *gin.Context) {

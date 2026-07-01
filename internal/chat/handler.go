@@ -577,7 +577,7 @@ func scanMessage(rows *sql.Rows) (message, error) {
 func scanLiveParticipant(row scanner) (liveParticipant, int64, error) {
 	var participant liveParticipant
 	var userID, uid, username string
-	var displayName, avatarURL, defaultAvatar sql.NullString
+	var displayName, avatarURL, defaultAvatar, roomDisplayName, roomRole sql.NullString
 	var joinedAt, updatedAt int64
 	var micMuted, micBlocked, headphonesMuted, headphonesBlocked, voiceBlocked, cameraOn, screenSharing int
 	err := row.Scan(
@@ -598,11 +598,17 @@ func scanLiveParticipant(row scanner) (liveParticipant, int64, error) {
 		&displayName,
 		&avatarURL,
 		&defaultAvatar,
+		&roomDisplayName,
+		&roomRole,
 	)
 	if err != nil {
 		return liveParticipant{}, 0, err
 	}
 	participant.User = summaryFromUserFields(userID, uid, username, displayName, avatarURL, defaultAvatar)
+	participant.User.RoomDisplayName = nullableString(roomDisplayName)
+	if roomRole.Valid {
+		participant.User.RoomRole = roomRole.String
+	}
 	participant.JoinedAt = formatMillis(joinedAt)
 	participant.MicMuted = micMuted != 0
 	participant.MicBlocked = micBlocked != 0

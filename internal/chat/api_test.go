@@ -987,6 +987,52 @@ func TestLiveJoinTokenUsesLongLivedRoomToken(t *testing.T) {
 	}
 }
 
+func TestLiveParticipantsUseRoomDisplayNames(t *testing.T) {
+	api := newAPIHarness(t)
+	owner := api.register("live_alias_owner")
+	member := api.register("live_alias_member")
+	room := api.createRoom(owner.Token, map[string]any{"name": "Live Alias Room", "join_policy": "open"})
+	roomID := room["id"].(string)
+	memberID := member.User["id"].(string)
+
+	status, response := api.request(http.MethodPost, "/rooms/"+roomID+"/join", member.Token, nil)
+	api.requireStatus(status, http.StatusOK, response)
+	if _, err := api.db.Exec(
+		`UPDATE room_memberships SET room_display_name = ? WHERE room_id = ? AND user_id = ?`,
+		"Voice Alias",
+		roomID,
+		memberID,
+	); err != nil {
+		t.Fatalf("set room display name: %v", err)
+	}
+
+	status, response = api.request(http.MethodPost, "/rooms/"+roomID+"/live/join", member.Token, map[string]any{
+		"client_live_session_id": "clive_alias_member",
+		"source":                 "live_panel",
+	})
+	api.requireStatus(status, http.StatusOK, response)
+	participant := response["participant"].(map[string]any)
+	user := participant["user"].(map[string]any)
+	if user["room_display_name"] != "Voice Alias" || user["room_role"] != "member" {
+		t.Fatalf("join participant should include room display fields: %v", participant)
+	}
+	live := response["live"].(map[string]any)
+	participant = participantByUserID(t, live, memberID)
+	user = participant["user"].(map[string]any)
+	if user["room_display_name"] != "Voice Alias" || user["room_role"] != "member" {
+		t.Fatalf("join live snapshot should include room display fields: %v", participant)
+	}
+
+	status, response = api.request(http.MethodGet, "/rooms/"+roomID+"/live", owner.Token, nil)
+	api.requireStatus(status, http.StatusOK, response)
+	live = response["live"].(map[string]any)
+	participant = participantByUserID(t, live, memberID)
+	user = participant["user"].(map[string]any)
+	if user["room_display_name"] != "Voice Alias" || user["room_role"] != "member" {
+		t.Fatalf("live state should include room display fields: %v", participant)
+	}
+}
+
 func TestAttachmentDispositionUsesUTF8FilenameStar(t *testing.T) {
 	header := attachmentDisposition("表情 包.webp")
 	if strings.Contains(header, "表情") {
@@ -2211,6 +2257,17 @@ func TestLiveHeadphonesAndVoiceBlock(t *testing.T) {
 	if !contains(api.live.publishSet, memberKey+"=true") {
 		t.Fatalf("restore_voice should re-grant publish after mute_mic: %v", api.live.publishSet)
 	}
+	if !contains(api.live.micMuted, memberKey+"=false") {
+		t.Fatalf("restore_voice should server-unmute the mic on LiveKit: %v", api.live.micMuted)
+	}
+	status, response = api.request(http.MethodGet, "/rooms/"+roomID+"/live", owner.Token, nil)
+	api.requireStatus(status, http.StatusOK, response)
+	live = response["live"].(map[string]any)
+	participant = participantByUserID(t, live, member.User["id"].(string))
+	if participant["mic_muted"] != false || participant["mic_blocked"] != false ||
+		participant["voice_blocked"] != false || participant["headphones_blocked"] != false {
+		t.Fatalf("restore_voice should restore only the microphone after mute_mic: %v", participant)
+	}
 
 	status, response = api.request(http.MethodPatch, "/rooms/"+roomID+"/live/me", member.Token, map[string]any{
 		"headphones_muted": true,
@@ -2221,32 +2278,34 @@ func TestLiveHeadphonesAndVoiceBlock(t *testing.T) {
 		t.Fatalf("headphones should be muted: %v", participant)
 	}
 
+	publishWritesBeforeHeadphonesMute := len(api.live.publishSet)
+	micWritesBeforeHeadphonesMute := len(api.live.micMuted)
 	status, response = api.request(http.MethodPost, "/rooms/"+roomID+"/live/participants/"+member.User["id"].(string)+"/moderation", owner.Token, map[string]any{
 		"action": "block_voice",
 		"reason": "test",
 	})
 	api.requireStatus(status, http.StatusOK, response)
 
-	// block_voice must drive the LiveKit media session, not just the DB: revoke
-	// publish + subscribe and server-side mute the mic.
-	if !contains(api.live.publishSet, memberKey+"=false") {
-		t.Fatalf("block_voice should revoke publish on LiveKit: %v", api.live.publishSet)
+	// block_voice is now the headphone-mute primitive: it revokes subscribe
+	// without touching microphone publish or server-side mic mute.
+	if len(api.live.publishSet) != publishWritesBeforeHeadphonesMute {
+		t.Fatalf("block_voice should not revoke publish on LiveKit: %v", api.live.publishSet)
 	}
 	if !contains(api.live.subscribeSet, memberKey+"=false") {
 		t.Fatalf("block_voice should revoke subscribe on LiveKit: %v", api.live.subscribeSet)
 	}
-	if !contains(api.live.micMuted, memberKey+"=true") {
-		t.Fatalf("block_voice should server-mute the mic on LiveKit: %v", api.live.micMuted)
+	if len(api.live.micMuted) != micWritesBeforeHeadphonesMute {
+		t.Fatalf("block_voice should not server-mute the mic on LiveKit: %v", api.live.micMuted)
 	}
 
 	status, response = api.request(http.MethodGet, "/rooms/"+roomID+"/live", owner.Token, nil)
 	api.requireStatus(status, http.StatusOK, response)
 	live = response["live"].(map[string]any)
 	participant = participantByUserID(t, live, member.User["id"].(string))
-	if participant["mic_muted"] != true || participant["mic_blocked"] != true ||
+	if participant["mic_muted"] != false || participant["mic_blocked"] != false ||
 		participant["headphones_muted"] != true || participant["headphones_blocked"] != true ||
-		participant["headphones_listening"] != false || participant["voice_blocked"] != true {
-		t.Fatalf("voice block should force mic and headphones off: %v", participant)
+		participant["headphones_listening"] != false || participant["voice_blocked"] != false {
+		t.Fatalf("headphones mute should force only listening off: %v", participant)
 	}
 
 	status, response = api.request(http.MethodPatch, "/rooms/"+roomID+"/live/me", member.Token, map[string]any{
@@ -2255,10 +2314,10 @@ func TestLiveHeadphonesAndVoiceBlock(t *testing.T) {
 	})
 	api.requireStatus(status, http.StatusOK, response)
 	participant = response["participant"].(map[string]any)
-	if participant["mic_muted"] != true || participant["mic_blocked"] != true ||
+	if participant["mic_muted"] != false || participant["mic_blocked"] != false ||
 		participant["headphones_muted"] != true || participant["headphones_blocked"] != true ||
-		participant["voice_blocked"] != true {
-		t.Fatalf("voice blocked user should not be able to unmute: %v", participant)
+		participant["voice_blocked"] != false {
+		t.Fatalf("headphones-muted user should still be allowed to use mic: %v", participant)
 	}
 
 	status, response = api.request(http.MethodPost, "/rooms/"+roomID+"/live/participants/"+member.User["id"].(string)+"/moderation", owner.Token, map[string]any{
@@ -2272,33 +2331,56 @@ func TestLiveHeadphonesAndVoiceBlock(t *testing.T) {
 	api.requireStatus(status, http.StatusOK, response)
 	live = response["live"].(map[string]any)
 	participant = participantByUserID(t, live, member.User["id"].(string))
-	if participant["mic_blocked"] != true || participant["headphones_blocked"] != false ||
+	if participant["mic_blocked"] != false || participant["headphones_blocked"] != false ||
 		participant["headphones_muted"] != false || participant["headphones_listening"] != true {
-		t.Fatalf("restore_headphones should leave mic blocked but restore listening: %v", participant)
+		t.Fatalf("restore_headphones should restore only listening: %v", participant)
+	}
+
+	status, response = api.request(http.MethodPost, "/rooms/"+roomID+"/live/participants/"+member.User["id"].(string)+"/moderation", owner.Token, map[string]any{
+		"action": "mute_mic",
+	})
+	api.requireStatus(status, http.StatusOK, response)
+	status, response = api.request(http.MethodPost, "/rooms/"+roomID+"/live/participants/"+member.User["id"].(string)+"/moderation", owner.Token, map[string]any{
+		"action": "block_voice",
+	})
+	api.requireStatus(status, http.StatusOK, response)
+	status, response = api.request(http.MethodGet, "/rooms/"+roomID+"/live", owner.Token, nil)
+	api.requireStatus(status, http.StatusOK, response)
+	live = response["live"].(map[string]any)
+	participant = participantByUserID(t, live, member.User["id"].(string))
+	if participant["mic_blocked"] != true || participant["headphones_blocked"] != true ||
+		participant["voice_blocked"] != true || participant["headphones_muted"] != true {
+		t.Fatalf("combined mic/headphones mute should mark both independently: %v", participant)
 	}
 
 	status, response = api.request(http.MethodPost, "/rooms/"+roomID+"/live/participants/"+member.User["id"].(string)+"/moderation", owner.Token, map[string]any{
 		"action": "restore_voice",
 	})
 	api.requireStatus(status, http.StatusOK, response)
-	if !contains(api.live.publishSet, memberKey+"=true") {
-		t.Fatalf("restore_voice should re-grant publish on LiveKit: %v", api.live.publishSet)
-	}
-	if !contains(api.live.subscribeSet, memberKey+"=true") {
-		t.Fatalf("restore_voice should re-grant subscribe on LiveKit: %v", api.live.subscribeSet)
-	}
-	status, response = api.request(http.MethodPatch, "/rooms/"+roomID+"/live/me", member.Token, map[string]any{
-		"headphones_muted": false,
-	})
+	status, response = api.request(http.MethodGet, "/rooms/"+roomID+"/live", owner.Token, nil)
 	api.requireStatus(status, http.StatusOK, response)
-	participant = response["participant"].(map[string]any)
-	if participant["voice_blocked"] != false || participant["mic_blocked"] != false ||
-		participant["headphones_blocked"] != false || participant["headphones_muted"] != false {
-		t.Fatalf("voice restore should allow headphones again: %v", participant)
+	live = response["live"].(map[string]any)
+	participant = participantByUserID(t, live, member.User["id"].(string))
+	if participant["mic_blocked"] != false || participant["voice_blocked"] != false ||
+		participant["headphones_blocked"] != true || participant["headphones_muted"] != true {
+		t.Fatalf("restore_voice should leave headphones muted: %v", participant)
 	}
 
-	// A voice ban must outlive the live session: re-block, leave (drop the
-	// participant row), rejoin, and confirm the user comes back blocked.
+	status, response = api.request(http.MethodPost, "/rooms/"+roomID+"/live/participants/"+member.User["id"].(string)+"/moderation", owner.Token, map[string]any{
+		"action": "restore_headphones",
+	})
+	api.requireStatus(status, http.StatusOK, response)
+	status, response = api.request(http.MethodGet, "/rooms/"+roomID+"/live", owner.Token, nil)
+	api.requireStatus(status, http.StatusOK, response)
+	live = response["live"].(map[string]any)
+	participant = participantByUserID(t, live, member.User["id"].(string))
+	if participant["mic_blocked"] != false || participant["voice_blocked"] != false ||
+		participant["headphones_blocked"] != false || participant["headphones_muted"] != false {
+		t.Fatalf("restore_headphones should clear the remaining headphones mute: %v", participant)
+	}
+
+	// A headphones mute must outlive the live session in the same room without
+	// carrying a microphone mute along with it.
 	status, response = api.request(http.MethodPost, "/rooms/"+roomID+"/live/participants/"+member.User["id"].(string)+"/moderation", owner.Token, map[string]any{
 		"action": "block_voice",
 	})
@@ -2313,9 +2395,10 @@ func TestLiveHeadphonesAndVoiceBlock(t *testing.T) {
 	})
 	api.requireStatus(status, http.StatusOK, response)
 	participant = response["participant"].(map[string]any)
-	if participant["voice_blocked"] != true || participant["mic_blocked"] != true ||
-		participant["headphones_blocked"] != true || participant["mic_muted"] != true {
-		t.Fatalf("voice ban should persist across rejoin: %v", participant)
+	if participant["voice_blocked"] != false || participant["mic_blocked"] != false ||
+		participant["headphones_blocked"] != true || participant["headphones_muted"] != true ||
+		participant["mic_muted"] != true {
+		t.Fatalf("headphones mute should persist across rejoin without mic block: %v", participant)
 	}
 }
 
@@ -2413,38 +2496,43 @@ func TestLiveModerationPersistsOnlyWithinRoom(t *testing.T) {
 	}
 
 	status, response = api.request(http.MethodPost, "/rooms/"+roomAID+"/live/participants/"+memberID+"/moderation", owner.Token, map[string]any{
+		"action": "restore_voice",
+	})
+	api.requireStatus(status, http.StatusOK, response)
+
+	status, response = api.request(http.MethodPost, "/rooms/"+roomAID+"/live/participants/"+memberID+"/moderation", owner.Token, map[string]any{
 		"action": "block_voice",
-		"reason": "room scoped isolation",
+		"reason": "room scoped headphones mute",
 	})
 	api.requireStatus(status, http.StatusOK, response)
 
 	if _, err := api.db.Exec(`DELETE FROM live_participants WHERE room_id = ? AND user_id = ?`, roomAID, memberID); err != nil {
-		t.Fatalf("failed to clear room A live participant after isolation: %v", err)
+		t.Fatalf("failed to clear room A live participant after headphones mute: %v", err)
 	}
 	status, response = api.request(http.MethodPost, "/rooms/"+roomAID+"/live/join", member.Token, map[string]any{
-		"client_live_session_id": "clive_scope_a_after_isolation",
+		"client_live_session_id": "clive_scope_a_after_headphones_mute",
 		"source":                 "live_panel",
 	})
 	api.requireStatus(status, http.StatusOK, response)
 	participant = response["participant"].(map[string]any)
-	if participant["mic_blocked"] != true || participant["mic_muted"] != true ||
+	if participant["mic_blocked"] != false || participant["voice_blocked"] != false ||
 		participant["headphones_blocked"] != true || participant["headphones_muted"] != true ||
-		participant["voice_blocked"] != true {
-		t.Fatalf("isolation should persist in the same room: %v", participant)
+		participant["mic_muted"] != true {
+		t.Fatalf("headphones mute should persist in the same room without mic block: %v", participant)
 	}
 
 	if _, err := api.db.Exec(`DELETE FROM live_participants WHERE room_id = ? AND user_id = ?`, roomBID, memberID); err != nil {
 		t.Fatalf("failed to clear room B live participant: %v", err)
 	}
 	status, response = api.request(http.MethodPost, "/rooms/"+roomBID+"/live/join", member.Token, map[string]any{
-		"client_live_session_id": "clive_scope_b_after_room_a_isolation",
+		"client_live_session_id": "clive_scope_b_after_room_a_headphones_mute",
 		"source":                 "live_panel",
 	})
 	api.requireStatus(status, http.StatusOK, response)
 	participant = response["participant"].(map[string]any)
 	if participant["mic_blocked"] != false || participant["voice_blocked"] != false ||
 		participant["headphones_blocked"] != false || participant["headphones_muted"] != false {
-		t.Fatalf("room A isolation should not affect room B: %v", participant)
+		t.Fatalf("room A headphones mute should not affect room B: %v", participant)
 	}
 }
 
