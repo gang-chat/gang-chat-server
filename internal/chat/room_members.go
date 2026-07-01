@@ -242,13 +242,13 @@ func (h *Handler) updateRoomSettings(c *gin.Context) {
 			sets = append(sets, "avatar_asset_id = ?", "avatar_url = ?")
 			args = append(args, nil, nil)
 		} else {
-			var url string
-			if err := h.DB.QueryRow(`SELECT url FROM assets WHERE id = ? AND owner_user_id = ?`, assetID, userID).Scan(&url); err != nil {
+			var filename string
+			if err := h.DB.QueryRow(`SELECT filename FROM assets WHERE id = ? AND owner_user_id = ?`, assetID, userID).Scan(&filename); err != nil {
 				h.jsonError(c, http.StatusBadRequest, "validation_failed", "avatar asset not found")
 				return
 			}
 			sets = append(sets, "avatar_asset_id = ?", "avatar_url = ?")
-			args = append(args, assetID, url)
+			args = append(args, assetID, h.assetStore().PublicURL(h.assetStore().ObjectKey(assetID, filename), assetID, filename))
 		}
 	}
 	if req.DefaultAvatarKey != nil {

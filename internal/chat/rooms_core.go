@@ -172,13 +172,14 @@ func (h *Handler) createRoom(c *gin.Context) {
 	var avatarAssetID any
 	var avatarURL any
 	if req.AvatarAssetID != nil && strings.TrimSpace(*req.AvatarAssetID) != "" {
-		var url string
-		if err := h.DB.QueryRow(`SELECT url FROM assets WHERE id = ? AND owner_user_id = ?`, strings.TrimSpace(*req.AvatarAssetID), userID).Scan(&url); err != nil {
+		assetID := strings.TrimSpace(*req.AvatarAssetID)
+		var filename string
+		if err := h.DB.QueryRow(`SELECT filename FROM assets WHERE id = ? AND owner_user_id = ?`, assetID, userID).Scan(&filename); err != nil {
 			h.jsonError(c, http.StatusBadRequest, "validation_failed", "avatar asset not found")
 			return
 		}
-		avatarAssetID = strings.TrimSpace(*req.AvatarAssetID)
-		avatarURL = url
+		avatarAssetID = assetID
+		avatarURL = h.assetStore().PublicURL(h.assetStore().ObjectKey(assetID, filename), assetID, filename)
 	}
 
 	tx, err := h.DB.Begin()

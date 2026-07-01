@@ -143,6 +143,13 @@ func assetLastModified(metadata assetRouteMetadataResult) time.Time {
 	return time.UnixMilli(metadata.createdAt).UTC().Truncate(time.Second)
 }
 
+func assetThumbnailURL(url, mimeType string) any {
+	if strings.HasPrefix(mimeType, "image/") {
+		return url
+	}
+	return nil
+}
+
 func (h *Handler) assetStore() *storage.AssetStorage {
 	if h != nil && h.Assets != nil {
 		return h.Assets

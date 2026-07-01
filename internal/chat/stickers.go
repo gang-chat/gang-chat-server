@@ -514,24 +514,25 @@ func (h *Handler) stickerPackPayload(id, scope string, roomID *string, name stri
 
 func (h *Handler) stickersForPack(packID string) []gin.H {
 	rows, _ := h.DB.Query(
-		`SELECT s.id, s.name, s.sort_order, a.id, a.url, a.thumbnail_url, a.mime_type, a.width, a.height, a.created_at
+		`SELECT s.id, s.name, s.sort_order, a.id, a.filename, a.mime_type, a.width, a.height, a.created_at
 		 FROM stickers s JOIN assets a ON a.id = s.asset_id
 		 WHERE s.pack_id = ? ORDER BY s.sort_order ASC`,
 		packID,
 	)
+	assetStore := h.assetStore()
 	stickers := make([]gin.H, 0)
 	if rows != nil {
 		defer rows.Close()
 		for rows.Next() {
-			var stickerID, stickerName, assetID, url, mimeType string
-			var thumb sql.NullString
+			var stickerID, stickerName, assetID, filename, mimeType string
 			var stickerSort int
 			var width, height sql.NullInt64
 			var createdAt int64
-			if err := rows.Scan(&stickerID, &stickerName, &stickerSort, &assetID, &url, &thumb, &mimeType, &width, &height, &createdAt); err == nil {
+			if err := rows.Scan(&stickerID, &stickerName, &stickerSort, &assetID, &filename, &mimeType, &width, &height, &createdAt); err == nil {
+				url := assetStore.PublicURL(assetStore.ObjectKey(assetID, filename), assetID, filename)
 				stickers = append(stickers, gin.H{
 					"id": stickerID, "name": stickerName, "sort_order": stickerSort,
-					"asset": gin.H{"id": assetID, "url": url, "thumbnail_url": nullableString(thumb), "mime_type": mimeType, "width": nullableInt64(width), "height": nullableInt64(height), "created_at": formatMillis(createdAt)},
+					"asset": gin.H{"id": assetID, "url": url, "thumbnail_url": assetThumbnailURL(url, mimeType), "mime_type": mimeType, "width": nullableInt64(width), "height": nullableInt64(height), "created_at": formatMillis(createdAt)},
 				})
 			}
 		}
@@ -551,7 +552,7 @@ func (h *Handler) stickersByPackID(packIDs []string) map[string][]gin.H {
 	}
 	rows, err := h.DB.Query(
 		fmt.Sprintf(
-			`SELECT s.pack_id, s.id, s.name, s.sort_order, a.id, a.url, a.thumbnail_url, a.mime_type, a.width, a.height, a.created_at
+			`SELECT s.pack_id, s.id, s.name, s.sort_order, a.id, a.filename, a.mime_type, a.width, a.height, a.created_at
 			 FROM stickers s JOIN assets a ON a.id = s.asset_id
 			 WHERE s.pack_id IN (%s) ORDER BY s.pack_id ASC, s.sort_order ASC`,
 			placeholders,
@@ -562,16 +563,17 @@ func (h *Handler) stickersByPackID(packIDs []string) map[string][]gin.H {
 		return result
 	}
 	defer rows.Close()
+	assetStore := h.assetStore()
 	for rows.Next() {
-		var packID, stickerID, stickerName, assetID, url, mimeType string
-		var thumb sql.NullString
+		var packID, stickerID, stickerName, assetID, filename, mimeType string
 		var stickerSort int
 		var width, height sql.NullInt64
 		var createdAt int64
-		if err := rows.Scan(&packID, &stickerID, &stickerName, &stickerSort, &assetID, &url, &thumb, &mimeType, &width, &height, &createdAt); err == nil {
+		if err := rows.Scan(&packID, &stickerID, &stickerName, &stickerSort, &assetID, &filename, &mimeType, &width, &height, &createdAt); err == nil {
+			url := assetStore.PublicURL(assetStore.ObjectKey(assetID, filename), assetID, filename)
 			result[packID] = append(result[packID], gin.H{
 				"id": stickerID, "name": stickerName, "sort_order": stickerSort,
-				"asset": gin.H{"id": assetID, "url": url, "thumbnail_url": nullableString(thumb), "mime_type": mimeType, "width": nullableInt64(width), "height": nullableInt64(height), "created_at": formatMillis(createdAt)},
+				"asset": gin.H{"id": assetID, "url": url, "thumbnail_url": assetThumbnailURL(url, mimeType), "mime_type": mimeType, "width": nullableInt64(width), "height": nullableInt64(height), "created_at": formatMillis(createdAt)},
 			})
 		}
 	}
@@ -586,23 +588,24 @@ func stickerPackPayloadWithStickers(id, scope string, roomID *string, name strin
 }
 
 func (h *Handler) stickerPayload(id string) gin.H {
-	var stickerID, stickerName, assetID, url, mimeType string
-	var thumb sql.NullString
+	var stickerID, stickerName, assetID, filename, mimeType string
 	var stickerSort int
 	var width, height sql.NullInt64
 	var createdAt int64
 	err := h.DB.QueryRow(
-		`SELECT s.id, s.name, s.sort_order, a.id, a.url, a.thumbnail_url, a.mime_type, a.width, a.height, a.created_at
+		`SELECT s.id, s.name, s.sort_order, a.id, a.filename, a.mime_type, a.width, a.height, a.created_at
 		 FROM stickers s JOIN assets a ON a.id = s.asset_id
 		 WHERE s.id = ?`,
 		id,
-	).Scan(&stickerID, &stickerName, &stickerSort, &assetID, &url, &thumb, &mimeType, &width, &height, &createdAt)
+	).Scan(&stickerID, &stickerName, &stickerSort, &assetID, &filename, &mimeType, &width, &height, &createdAt)
 	if err != nil {
 		return gin.H{"id": id}
 	}
+	assetStore := h.assetStore()
+	url := assetStore.PublicURL(assetStore.ObjectKey(assetID, filename), assetID, filename)
 	return gin.H{
 		"id": stickerID, "name": stickerName, "sort_order": stickerSort,
-		"asset": gin.H{"id": assetID, "url": url, "thumbnail_url": nullableString(thumb), "mime_type": mimeType, "width": nullableInt64(width), "height": nullableInt64(height), "created_at": formatMillis(createdAt)},
+		"asset": gin.H{"id": assetID, "url": url, "thumbnail_url": assetThumbnailURL(url, mimeType), "mime_type": mimeType, "width": nullableInt64(width), "height": nullableInt64(height), "created_at": formatMillis(createdAt)},
 	}
 }
 

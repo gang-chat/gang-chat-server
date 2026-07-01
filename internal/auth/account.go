@@ -159,13 +159,14 @@ func (h *Handler) updateProfile(c *gin.Context) {
 		args = append(args, gender)
 	}
 	if req.AvatarAssetID != nil {
-		var url sql.NullString
-		if *req.AvatarAssetID != "" {
-			_ = h.DB.QueryRow(`SELECT url FROM assets WHERE id = ? AND owner_user_id = ?`, *req.AvatarAssetID, user.ID).Scan(&url)
+		assetID := strings.TrimSpace(*req.AvatarAssetID)
+		var filename sql.NullString
+		if assetID != "" {
+			_ = h.DB.QueryRow(`SELECT filename FROM assets WHERE id = ? AND owner_user_id = ?`, assetID, user.ID).Scan(&filename)
 		}
 		sets = append(sets, "avatar_url = ?")
-		if url.Valid {
-			args = append(args, url.String)
+		if filename.Valid {
+			args = append(args, assetURL(assetID, filename.String))
 		} else {
 			args = append(args, nil)
 		}
@@ -380,13 +381,14 @@ func (h *Handler) forceUpdateUserSettings(c *gin.Context) {
 		args = append(args, gender)
 	}
 	if req.AvatarAssetID != nil {
-		var url sql.NullString
-		if *req.AvatarAssetID != "" {
-			_ = h.DB.QueryRow(`SELECT url FROM assets WHERE id = ?`, *req.AvatarAssetID).Scan(&url)
+		assetID := strings.TrimSpace(*req.AvatarAssetID)
+		var filename sql.NullString
+		if assetID != "" {
+			_ = h.DB.QueryRow(`SELECT filename FROM assets WHERE id = ?`, assetID).Scan(&filename)
 		}
 		sets = append(sets, "avatar_url = ?")
-		if url.Valid {
-			args = append(args, url.String)
+		if filename.Valid {
+			args = append(args, assetURL(assetID, filename.String))
 		} else {
 			args = append(args, nil)
 		}
@@ -507,4 +509,8 @@ func isValidAvatarKey(value string) bool {
 		return false
 	}
 	return true
+}
+
+func assetURL(assetID, filename string) string {
+	return "/assets/" + strings.Trim(strings.TrimSpace(assetID), "/") + "/" + strings.Trim(strings.TrimSpace(filename), "/")
 }

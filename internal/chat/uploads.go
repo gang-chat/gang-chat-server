@@ -132,21 +132,22 @@ func (h *Handler) uploadFile(c *gin.Context) {
 }
 
 func (h *Handler) assetPayload(id string) gin.H {
-	var filename, url, mimeType string
-	var thumb sql.NullString
+	var filename, mimeType string
 	var width, height sql.NullInt64
 	var sizeBytes int64
 	var createdAt int64
-	err := h.DB.QueryRow(`SELECT filename, size_bytes, url, thumbnail_url, mime_type, width, height, created_at FROM assets WHERE id = ?`, id).Scan(&filename, &sizeBytes, &url, &thumb, &mimeType, &width, &height, &createdAt)
+	err := h.DB.QueryRow(`SELECT filename, size_bytes, mime_type, width, height, created_at FROM assets WHERE id = ?`, id).Scan(&filename, &sizeBytes, &mimeType, &width, &height, &createdAt)
 	if err != nil {
 		return gin.H{"id": id}
 	}
+	assetStore := h.assetStore()
+	url := assetStore.PublicURL(assetStore.ObjectKey(id, filename), id, filename)
 	return gin.H{
 		"id":            id,
 		"filename":      filename,
 		"size_bytes":    sizeBytes,
 		"url":           url,
-		"thumbnail_url": nullableString(thumb),
+		"thumbnail_url": assetThumbnailURL(url, mimeType),
 		"mime_type":     mimeType,
 		"width":         nullableInt64(width),
 		"height":        nullableInt64(height),
