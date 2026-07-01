@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -9,9 +10,9 @@ import (
 	"net/url"
 	"os"
 	"path"
-	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -22,13 +23,10 @@ import (
 
 const defaultAssetCacheControl = "public, max-age=31536000, immutable"
 const defaultAssetCacheMaxAgeSeconds int64 = 31536000
+const assetObjectPrefix = "assets"
 
 type AssetStorage struct {
-	cacheDir     string
-	objectPrefix string
-	publicBase   string
-	cacheControl string
-	remote       remoteStore
+	remote remoteStore
 }
 
 type remoteStore interface {
@@ -38,49 +36,15 @@ type remoteStore interface {
 }
 
 func NewAssetStorage(cfg *config.Config) (*AssetStorage, error) {
-	cacheDir := "assets"
-	objectPrefix := "assets"
-	publicBase := ""
-	cacheControl := ""
-	cacheMaxAgeSeconds := defaultAssetCacheMaxAgeSeconds
-	if cfg != nil {
-		if cfg.AssetDir != "" {
-			cacheDir = cfg.AssetDir
-		}
-		if cfg.AssetObjectPrefix != "" {
-			objectPrefix = cfg.AssetObjectPrefix
-		}
-		publicBase = strings.TrimRight(strings.TrimSpace(cfg.AssetPublicBaseURL), "/")
-		if cfg.AssetCacheControl != "" {
-			cacheControl = strings.TrimSpace(cfg.AssetCacheControl)
-		}
-		if cfg.AssetCacheTTLSeconds > 0 {
-			cacheMaxAgeSeconds = cfg.AssetCacheTTLSeconds
-		}
-		if cacheControl == "" {
-			cacheControl = assetCacheControl(cacheMaxAgeSeconds)
-		}
-	}
-
-	store := &AssetStorage{
-		cacheDir:     cacheDir,
-		objectPrefix: cleanObjectKey(objectPrefix),
-		publicBase:   publicBase,
-		cacheControl: cacheControl,
-	}
 	remote, err := newS3Remote(cfg)
 	if err != nil {
 		return nil, err
 	}
-	store.remote = remote
-	return store, nil
+	return &AssetStorage{remote: remote}, nil
 }
 
 func (s *AssetStorage) CacheControl() string {
-	if s == nil || s.cacheControl == "" {
-		return defaultAssetCacheControl
-	}
-	return s.cacheControl
+	return defaultAssetCacheControl
 }
 
 func (s *AssetStorage) ApplyCacheHeaders(header http.Header, now time.Time) {
@@ -93,13 +57,6 @@ func (s *AssetStorage) ApplyCacheHeaders(header http.Header, now time.Time) {
 	if maxAge > 0 {
 		header.Set("Expires", now.UTC().Add(time.Duration(maxAge)*time.Second).Format(http.TimeFormat))
 	}
-}
-
-func assetCacheControl(maxAgeSeconds int64) string {
-	if maxAgeSeconds <= 0 {
-		maxAgeSeconds = defaultAssetCacheMaxAgeSeconds
-	}
-	return "public, max-age=" + strconv.FormatInt(maxAgeSeconds, 10) + ", immutable"
 }
 
 func cacheMaxAge(cacheControl string) int64 {
@@ -116,67 +73,33 @@ func cacheMaxAge(cacheControl string) int64 {
 	return 0
 }
 
-func (s *AssetStorage) RemoteEnabled() bool {
-	return s != nil && s.remote != nil
-}
-
-func (s *AssetStorage) HasPublicBase() bool {
-	return s != nil && s.publicBase != ""
-}
-
 func (s *AssetStorage) ObjectKey(assetID, filename string) string {
-	parts := make([]string, 0, 3)
-	if s != nil && s.objectPrefix != "" {
-		parts = append(parts, s.objectPrefix)
-	}
-	parts = append(parts, assetID, filename)
-	return path.Join(parts...)
+	return path.Join(assetObjectPrefix, assetID, filename)
 }
 
 func (s *AssetStorage) PublicURL(key, assetID, filename string) string {
-	if s != nil && s.publicBase != "" {
-		return s.publicBase + "/" + escapeObjectKey(cleanObjectKey(key))
-	}
 	return "/" + path.Join("assets", assetID, filename)
-}
-
-func (s *AssetStorage) CachePath(assetID, filename string) (string, error) {
-	if assetID == "" || filename == "" {
-		return "", errors.New("asset id and filename are required")
-	}
-	if strings.Contains(assetID, "/") || strings.Contains(assetID, "\\") || strings.Contains(filename, "/") || strings.Contains(filename, "\\") {
-		return "", errors.New("asset path must not contain separators")
-	}
-	cacheDir := "assets"
-	if s != nil && s.cacheDir != "" {
-		cacheDir = s.cacheDir
-	}
-	return filepath.Join(cacheDir, assetID, filename), nil
 }
 
 func (s *AssetStorage) PutFile(ctx context.Context, key, filePath, mimeType string) error {
 	if s == nil || s.remote == nil {
-		return nil
+		return errors.New("S3 storage is not configured")
 	}
 	return s.remote.PutFile(ctx, cleanObjectKey(key), filePath, mimeType, s.CacheControl())
 }
 
 func (s *AssetStorage) Delete(ctx context.Context, key string) error {
 	if s == nil || s.remote == nil {
-		return nil
+		return errors.New("S3 storage is not configured")
 	}
 	return s.remote.Delete(ctx, cleanObjectKey(key))
 }
 
 func (s *AssetStorage) Open(ctx context.Context, key, assetID, filename string) (io.ReadCloser, error) {
-	if s != nil && s.remote != nil {
-		return s.remote.Get(ctx, cleanObjectKey(key))
+	if s == nil || s.remote == nil {
+		return nil, errors.New("S3 storage is not configured")
 	}
-	localPath, err := s.CachePath(assetID, filename)
-	if err != nil {
-		return nil, err
-	}
-	return os.Open(localPath)
+	return s.remote.Get(ctx, cleanObjectKey(key))
 }
 
 type s3Remote struct {
@@ -261,6 +184,44 @@ func (r *s3Remote) Delete(ctx context.Context, key string) error {
 	return err
 }
 
+type memoryRemote struct {
+	mu    sync.Mutex
+	files map[string][]byte
+}
+
+// NewMemoryAssetStorage builds an in-memory S3-like store for tests.
+func NewMemoryAssetStorage() *AssetStorage {
+	return &AssetStorage{remote: &memoryRemote{files: map[string][]byte{}}}
+}
+
+func (r *memoryRemote) PutFile(ctx context.Context, key, filePath, mimeType, cacheControl string) error {
+	raw, err := os.ReadFile(filePath)
+	if err != nil {
+		return err
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.files[cleanObjectKey(key)] = append([]byte(nil), raw...)
+	return nil
+}
+
+func (r *memoryRemote) Get(ctx context.Context, key string) (io.ReadCloser, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	raw, ok := r.files[cleanObjectKey(key)]
+	if !ok {
+		return nil, os.ErrNotExist
+	}
+	return io.NopCloser(bytes.NewReader(append([]byte(nil), raw...))), nil
+}
+
+func (r *memoryRemote) Delete(ctx context.Context, key string) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	delete(r.files, cleanObjectKey(key))
+	return nil
+}
+
 func cleanObjectKey(value string) string {
 	cleaned := path.Clean(strings.ReplaceAll(strings.TrimSpace(value), "\\", "/"))
 	cleaned = strings.Trim(cleaned, "/")
@@ -268,12 +229,4 @@ func cleanObjectKey(value string) string {
 		return ""
 	}
 	return cleaned
-}
-
-func escapeObjectKey(key string) string {
-	parts := strings.Split(cleanObjectKey(key), "/")
-	for i, part := range parts {
-		parts[i] = url.PathEscape(part)
-	}
-	return strings.Join(parts, "/")
 }

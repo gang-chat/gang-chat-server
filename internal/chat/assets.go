@@ -40,10 +40,6 @@ func RegisterAssetRoutes(r gin.IRouter, db *sql.DB, cfg *config.Config, assetSto
 			c.Status(http.StatusNotModified)
 			return
 		}
-		if assetStore.HasPublicBase() {
-			c.Redirect(http.StatusFound, assetStore.PublicURL(metadata.storageKey, assetID, filename))
-			return
-		}
 		body, err := assetStore.Open(c.Request.Context(), metadata.storageKey, assetID, filename)
 		if err != nil {
 			if errors.Is(err, os.ErrNotExist) {

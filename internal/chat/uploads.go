@@ -64,33 +64,18 @@ func (h *Handler) uploadFile(c *gin.Context) {
 		filenameMime = "image/png"
 	}
 	filename := safeAssetFilename(header.Filename, filenameMime)
-	assetPath := ""
-	cleanupUploadTarget := func() {}
-	if assetStore.RemoteEnabled() {
-		tmp, err := os.CreateTemp("", "gang-chat-asset-*"+filepath.Ext(filename))
-		if err != nil {
-			h.jsonError(c, http.StatusInternalServerError, "internal_error", "create upload temp file failed")
-			return
-		}
-		assetPath = tmp.Name()
-		if err := tmp.Close(); err != nil {
-			_ = os.Remove(assetPath)
-			h.jsonError(c, http.StatusInternalServerError, "internal_error", "create upload temp file failed")
-			return
-		}
-		cleanupUploadTarget = func() { _ = os.Remove(assetPath) }
-	} else {
-		assetPath, err = assetStore.CachePath(id, filename)
-		if err != nil {
-			h.jsonError(c, http.StatusBadRequest, "validation_failed", "invalid asset filename")
-			return
-		}
-		if err := os.MkdirAll(filepath.Dir(assetPath), 0o755); err != nil {
-			h.jsonError(c, http.StatusInternalServerError, "internal_error", "create asset directory failed")
-			return
-		}
+	tmp, err := os.CreateTemp("", "gang-chat-asset-*"+filepath.Ext(filename))
+	if err != nil {
+		h.jsonError(c, http.StatusInternalServerError, "internal_error", "create upload temp file failed")
+		return
 	}
-	defer cleanupUploadTarget()
+	assetPath := tmp.Name()
+	if err := tmp.Close(); err != nil {
+		_ = os.Remove(assetPath)
+		h.jsonError(c, http.StatusInternalServerError, "internal_error", "create upload temp file failed")
+		return
+	}
+	defer func() { _ = os.Remove(assetPath) }()
 
 	sizeBytes, detectedMime, err := writeUploadedAsset(assetPath, file, maxFileBytes)
 	if err != nil {

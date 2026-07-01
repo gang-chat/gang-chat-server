@@ -21,11 +21,6 @@ type Config struct {
 	RefreshTokenTTLSeconds   int64    `json:"refresh_token_ttl_seconds"`
 	LoginMaxAttempts         int      `json:"login_max_attempts"`
 	LoginWindowSeconds       int64    `json:"login_window_seconds"`
-	AssetDir                 string   `json:"asset_dir"`
-	AssetPublicBaseURL       string   `json:"asset_public_base_url"`
-	AssetObjectPrefix        string   `json:"asset_object_prefix"`
-	AssetCacheControl        string   `json:"asset_cache_control"`
-	AssetCacheTTLSeconds     int64    `json:"asset_cache_ttl_seconds"`
 	AssetUploadMaxBytes      int64    `json:"asset_upload_max_bytes"`
 	ImageUploadMaxBytes      int64    `json:"image_upload_max_bytes"`
 	S3Endpoint               string   `json:"s3_endpoint"`
@@ -82,11 +77,6 @@ func Load() *Config {
 	flag.StringVar(&cfg.Bind, "bind", cfg.Bind, "listen address")
 	flag.StringVar(&cfg.JWTSecret, "jwt-secret", cfg.JWTSecret, "JWT signing secret")
 	flag.StringVar(&cfg.DatabaseURL, "database-url", cfg.DatabaseURL, "MySQL DSN")
-	flag.StringVar(&cfg.AssetDir, "asset-dir", cfg.AssetDir, "local asset cache directory")
-	flag.StringVar(&cfg.AssetPublicBaseURL, "asset-public-base-url", cfg.AssetPublicBaseURL, "optional CDN/S3 public base URL for asset URLs")
-	flag.StringVar(&cfg.AssetObjectPrefix, "asset-object-prefix", cfg.AssetObjectPrefix, "object storage prefix for uploaded assets")
-	flag.StringVar(&cfg.AssetCacheControl, "asset-cache-control", cfg.AssetCacheControl, "Cache-Control header for uploaded assets")
-	flag.Int64Var(&cfg.AssetCacheTTLSeconds, "asset-cache-ttl-seconds", cfg.AssetCacheTTLSeconds, "max-age/Expires TTL for asset HTTP caching when asset-cache-control is not set")
 	flag.Int64Var(&cfg.AssetUploadMaxBytes, "asset-upload-max-bytes", cfg.AssetUploadMaxBytes, "maximum uploaded file size in bytes")
 	flag.Int64Var(&cfg.ImageUploadMaxBytes, "image-upload-max-bytes", cfg.ImageUploadMaxBytes, "maximum uploaded image size in bytes")
 	flag.StringVar(&cfg.S3Endpoint, "s3-endpoint", cfg.S3Endpoint, "S3-compatible endpoint URL")

@@ -3,15 +3,16 @@ package chat
 import (
 	"archive/zip"
 	"bytes"
+	"context"
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"io"
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
 	"net/textproto"
 	"os"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -24,6 +25,7 @@ import (
 	"github.com/zhuangkaiyi/gang-chat/server/internal/db"
 	"github.com/zhuangkaiyi/gang-chat/server/internal/eventbus"
 	"github.com/zhuangkaiyi/gang-chat/server/internal/idgen"
+	"github.com/zhuangkaiyi/gang-chat/server/internal/storage"
 )
 
 type apiHarness struct {
@@ -32,7 +34,7 @@ type apiHarness struct {
 	db     *sql.DB
 	live   *fakeLiveController
 	bus    *eventbus.Bus
-	assets string
+	assets *storage.AssetStorage
 	cfg    *config.Config
 }
 
@@ -84,14 +86,12 @@ func newAPIHarness(t *testing.T) *apiHarness {
 	t.Helper()
 	gin.SetMode(gin.TestMode)
 
-	root := t.TempDir()
 	cfg := &config.Config{
 		JWTSecret:              "test-secret",
 		AccessTokenTTLSeconds:  900,
 		RefreshTokenTTLSeconds: 2592000,
 		LoginMaxAttempts:       5,
 		LoginWindowSeconds:     900,
-		AssetDir:               filepath.Join(root, "assets"),
 		LiveKitHost:            "http://localhost:7880",
 	}
 	dsn := os.Getenv("GANG_TEST_MYSQL_DSN")
@@ -110,7 +110,8 @@ func newAPIHarness(t *testing.T) *apiHarness {
 	chatGroup.Use(authMW.Handle)
 	live := &fakeLiveController{}
 	bus := eventbus.New()
-	RegisterRoutes(chatGroup, pool, cfg, bus, live, nil)
+	assetStore := storage.NewMemoryAssetStorage()
+	RegisterRoutes(chatGroup, pool, cfg, bus, live, nil, assetStore)
 
 	return &apiHarness{
 		t:      t,
@@ -118,9 +119,43 @@ func newAPIHarness(t *testing.T) *apiHarness {
 		db:     pool,
 		live:   live,
 		bus:    bus,
-		assets: cfg.AssetDir,
+		assets: assetStore,
 		cfg:    cfg,
 	}
+}
+
+func (h *apiHarness) putAsset(id, filename, mimeType string, body []byte) {
+	h.t.Helper()
+	tmp, err := os.CreateTemp("", "gang-chat-test-asset-*")
+	if err != nil {
+		h.t.Fatalf("create temp asset: %v", err)
+	}
+	path := tmp.Name()
+	defer func() { _ = os.Remove(path) }()
+	if _, err := tmp.Write(body); err != nil {
+		_ = tmp.Close()
+		h.t.Fatalf("write temp asset: %v", err)
+	}
+	if err := tmp.Close(); err != nil {
+		h.t.Fatalf("close temp asset: %v", err)
+	}
+	if err := h.assets.PutFile(context.Background(), h.assets.ObjectKey(id, filename), path, mimeType); err != nil {
+		h.t.Fatalf("put asset: %v", err)
+	}
+}
+
+func (h *apiHarness) readAsset(id, filename string) []byte {
+	h.t.Helper()
+	body, err := h.assets.Open(context.Background(), h.assets.ObjectKey(id, filename), id, filename)
+	if err != nil {
+		h.t.Fatalf("open asset: %v", err)
+	}
+	defer body.Close()
+	raw, err := io.ReadAll(body)
+	if err != nil {
+		h.t.Fatalf("read asset: %v", err)
+	}
+	return raw
 }
 
 func (h *apiHarness) request(method, path, token string, body any) (int, map[string]any) {
@@ -3045,12 +3080,7 @@ func TestManageStickersRenameReorderAndDownload(t *testing.T) {
 		{id: "asset_manage_two", filename: "two.png", mimeType: "image/png", body: []byte("two-image")},
 	}
 	for _, asset := range assets {
-		if err := os.MkdirAll(filepath.Join(api.assets, asset.id), 0o755); err != nil {
-			t.Fatalf("create asset dir: %v", err)
-		}
-		if err := os.WriteFile(filepath.Join(api.assets, asset.id, asset.filename), asset.body, 0o644); err != nil {
-			t.Fatalf("write asset: %v", err)
-		}
+		api.putAsset(asset.id, asset.filename, asset.mimeType, asset.body)
 		_, err := api.db.Exec(
 			`INSERT INTO assets (id, owner_user_id, purpose, filename, mime_type, size_bytes, url, created_at)
 			 VALUES (?, ?, 'sticker', ?, ?, ?, ?, ?)`,
@@ -3196,10 +3226,7 @@ func TestUploadImageStoresAssetFile(t *testing.T) {
 	if err := api.db.QueryRow(`SELECT filename FROM assets WHERE id = ?`, assetID).Scan(&filename); err != nil {
 		t.Fatalf("read asset row: %v", err)
 	}
-	saved, err := os.ReadFile(filepath.Join(api.assets, assetID, filename))
-	if err != nil {
-		t.Fatalf("read saved asset: %v", err)
-	}
+	saved := api.readAsset(assetID, filename)
 	if !bytes.Equal(saved, pngBytes) {
 		t.Fatalf("saved asset bytes changed: %v", saved)
 	}
@@ -3238,10 +3265,7 @@ func TestUploadFileStoresAssetFile(t *testing.T) {
 	if storageKey != "assets/"+assetID+"/"+filename {
 		t.Fatalf("storage key mismatch: %q", storageKey)
 	}
-	saved, err := os.ReadFile(filepath.Join(api.assets, assetID, filename))
-	if err != nil {
-		t.Fatalf("read saved asset: %v", err)
-	}
+	saved := api.readAsset(assetID, filename)
 	if !bytes.Equal(saved, fileBytes) {
 		t.Fatalf("saved asset bytes changed: %v", saved)
 	}
@@ -3249,21 +3273,14 @@ func TestUploadFileStoresAssetFile(t *testing.T) {
 
 func TestAssetRouteSendsExpiringCacheValidators(t *testing.T) {
 	api := newAPIHarness(t)
-	api.cfg.AssetCacheControl = ""
-	api.cfg.AssetCacheTTLSeconds = 60
-	RegisterAssetRoutes(api.router, api.db, api.cfg)
+	RegisterAssetRoutes(api.router, api.db, api.cfg, api.assets)
 
 	owner := api.register("asset_cache_owner")
 	assetID := "asset_cache_route"
 	filename := "report.txt"
 	createdAt := time.Date(2026, 6, 18, 10, 0, 0, 0, time.UTC).UnixMilli()
 	body := []byte("cached asset")
-	if err := os.MkdirAll(filepath.Join(api.assets, assetID), 0o755); err != nil {
-		t.Fatalf("create asset dir: %v", err)
-	}
-	if err := os.WriteFile(filepath.Join(api.assets, assetID, filename), body, 0o644); err != nil {
-		t.Fatalf("write asset file: %v", err)
-	}
+	api.putAsset(assetID, filename, "text/plain", body)
 	_, err := api.db.Exec(
 		`INSERT INTO assets (id, owner_user_id, purpose, filename, mime_type, size_bytes, url, created_at)
 		 VALUES (?, ?, 'message_file', ?, 'text/plain', ?, ?, ?)`,
@@ -3283,7 +3300,7 @@ func TestAssetRouteSendsExpiringCacheValidators(t *testing.T) {
 	if got := rec.Body.Bytes(); !bytes.Equal(got, body) {
 		t.Fatalf("asset body mismatch: %q", got)
 	}
-	if got := rec.Header().Get("Cache-Control"); got != "public, max-age=60, immutable" {
+	if got := rec.Header().Get("Cache-Control"); got != "public, max-age=31536000, immutable" {
 		t.Fatalf("unexpected Cache-Control: %q", got)
 	}
 	if rec.Header().Get("Expires") == "" {

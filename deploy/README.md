@@ -45,13 +45,10 @@ Run them on the **server**, from the deploy directory:
      "livekit_api_secret": "<secret>"
    }
    ```
-4. Asset uploads always go to S3-compatible storage. With
-   `asset_public_base_url` empty, asset reads pass through the backend using
-   server-side credentials. Set `asset_public_base_url` to a public bucket or CDN
-   root only when direct browser reads should bypass the backend. Asset responses
-   include `Cache-Control`, `Expires`, `ETag`, and `Last-Modified`; set
-   `asset_cache_control` to override the generated
-   `public, max-age=<ttl>, immutable` policy.
+4. Asset uploads always go to S3-compatible storage. Asset reads pass through
+   the backend using server-side credentials. Object keys are fixed as
+   `assets/<asset_id>/<filename>`, and asset responses include fixed
+   `Cache-Control`, `Expires`, `ETag`, and `Last-Modified` headers.
 5. (Optional) `deploy.env` for path overrides — see `deploy.env.example`.
 6. First boot: `./start.sh all`.
 
