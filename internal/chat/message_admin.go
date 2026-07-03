@@ -36,6 +36,10 @@ func (h *Handler) recallMessage(c *gin.Context) {
 		h.jsonError(c, http.StatusForbidden, "forbidden", "cannot recall another user's message")
 		return
 	}
+	if admin && senderID != userID && !h.canRecallMemberMessage(roomID, userID, senderID) {
+		h.jsonError(c, http.StatusForbidden, "forbidden", "cannot recall a message from a user with equal or higher role")
+		return
+	}
 	if !admin && policy == "disabled" {
 		h.jsonError(c, http.StatusForbidden, "forbidden", "message recall disabled")
 		return
@@ -160,4 +164,37 @@ func (h *Handler) applyRecall(roomID, messageID, userID string) {
 	// refresh every member's list entry. Covers both the immediate-recall and
 	// the admin-approval paths since both funnel through here.
 	h.publishRoomUpdated(roomID)
+}
+
+func (h *Handler) canRecallMemberMessage(roomID, actorID, targetID string) bool {
+	if actorID == targetID {
+		return true
+	}
+	actorRank := roleRank("")
+	if h.isSuperuser(actorID) {
+		if !h.roomIDExists(roomID) {
+			return false
+		}
+		actorRank = 4
+	} else {
+		var actorRole string
+		_ = h.DB.QueryRow(
+			`SELECT role FROM room_memberships WHERE room_id = ? AND user_id = ?`,
+			roomID, actorID,
+		).Scan(&actorRole)
+		actorRank = roleRank(actorRole)
+	}
+
+	targetRank := roleRank("")
+	if h.isSuperuser(targetID) {
+		targetRank = 4
+	} else {
+		var targetRole string
+		_ = h.DB.QueryRow(
+			`SELECT role FROM room_memberships WHERE room_id = ? AND user_id = ?`,
+			roomID, targetID,
+		).Scan(&targetRole)
+		targetRank = roleRank(targetRole)
+	}
+	return actorRank > targetRank
 }
