@@ -40,9 +40,9 @@ func CreateUser(db *sql.DB, id, username, usernameNorm, email, emailNorm, passwo
 	_, err := db.Exec(
 		`INSERT INTO users (
 		   id, uid, username, username_normalized, email, email_normalized, password_hash,
-		   status, display_name, default_avatar_key, email_verified, username_updated_at,
+		   status, display_name, bio, gender, default_avatar_key, email_verified, language, username_updated_at,
 		   created_at, updated_at
-		 ) VALUES (?, ?, ?, ?, ?, ?, ?, 'active', ?, 'blue-3', 1, ?, ?, ?)`,
+		 ) VALUES (?, ?, ?, ?, ?, ?, ?, 'active', ?, '', 'secret', 'blue-3', 1, 'zh-Hans', ?, ?, ?)`,
 		id, uid, username, usernameNorm, email, emailNorm, passwordHash, username, now, now, now,
 	)
 	if err != nil {
