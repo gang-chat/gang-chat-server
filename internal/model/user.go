@@ -176,6 +176,20 @@ func GetUserByIDLoose(db *sql.DB, id string) (*User, error) {
 	return u, err
 }
 
+func DeleteUserByID(db *sql.DB, id string) error {
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	_, _ = tx.Exec(`DELETE FROM user_sessions WHERE user_id = ?`, id)
+	if _, err := tx.Exec(`DELETE FROM users WHERE id = ?`, id); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
 func Normalize(s string) string {
 	return normalize(s)
 }

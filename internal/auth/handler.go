@@ -4,6 +4,7 @@ import (
 	"crypto/rand"
 	"database/sql"
 	"encoding/base64"
+	"errors"
 	"log"
 	"net/http"
 	"regexp"
@@ -11,6 +12,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/go-sql-driver/mysql"
 	"github.com/google/uuid"
 	"github.com/zhuangkaiyi/gang-chat/server/internal/config"
 	"github.com/zhuangkaiyi/gang-chat/server/internal/model"
@@ -78,6 +80,9 @@ func (h *Handler) register(c *gin.Context) {
 		return
 	}
 
+	req.Username = strings.TrimSpace(req.Username)
+	req.Email = strings.TrimSpace(req.Email)
+
 	if !isValidUsername(req.Username) {
 		errorJSON(c, http.StatusBadRequest, "bad_request", "username must be 3-32 chars, alphanumeric/underscore/hyphen")
 		return
@@ -99,16 +104,21 @@ func (h *Handler) register(c *gin.Context) {
 
 	_, err = model.CreateUser(h.DB, id, req.Username, usernameNorm, req.Email, emailNorm, hash)
 	if err != nil {
-		if strings.Contains(err.Error(), "UNIQUE constraint failed") {
+		if isDuplicateEntryError(err) {
 			errorJSON(c, http.StatusConflict, "conflict", "username or email already taken")
 			return
 		}
+		log.Printf("auth register: create user failed username=%q email=%q request_id=%q: %v", req.Username, req.Email, c.GetString("request_id"), err)
 		errorJSON(c, http.StatusInternalServerError, "internal_error", "create user failed")
 		return
 	}
 
 	resp, err := h.issueAuthResponse(id, c)
 	if err != nil {
+		log.Printf("auth register: issue auth response failed user_id=%q username=%q email=%q request_id=%q: %v", id, req.Username, req.Email, c.GetString("request_id"), err)
+		if cleanupErr := model.DeleteUserByID(h.DB, id); cleanupErr != nil {
+			log.Printf("auth register: cleanup after failed registration failed user_id=%q request_id=%q: %v", id, c.GetString("request_id"), cleanupErr)
+		}
 		errorJSON(c, http.StatusInternalServerError, "internal_error", "token issue failed")
 		return
 	}
@@ -325,7 +335,7 @@ func (h *Handler) revokeSession(c *gin.Context) {
 		return
 	}
 	if !ok {
-		// No active session with that id belongs to this user — either it
+		// No active session with that id belongs to this user; either it
 		// doesn't exist or it's someone else's. Don't disclose which.
 		errorJSON(c, http.StatusNotFound, "not_found", "session not found")
 		return
@@ -379,6 +389,18 @@ var usernameRegex = regexp.MustCompile(`^[a-zA-Z0-9_-]{3,32}$`)
 
 func isValidUsername(s string) bool {
 	return usernameRegex.MatchString(s)
+}
+
+func isDuplicateEntryError(err error) bool {
+	if err == nil {
+		return false
+	}
+	var mysqlErr *mysql.MySQLError
+	if errors.As(err, &mysqlErr) && mysqlErr.Number == 1062 {
+		return true
+	}
+	message := err.Error()
+	return strings.Contains(message, "UNIQUE constraint failed") || strings.Contains(message, "Duplicate entry")
 }
 
 func errorJSON(c *gin.Context, status int, code, message string) {
