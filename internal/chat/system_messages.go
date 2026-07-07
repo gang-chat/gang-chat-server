@@ -57,13 +57,18 @@ func (h *Handler) appendSystemMessage(roomID string, spec systemMessageSpec) err
 }
 
 func (h *Handler) appendSystemMessageTx(tx *sql.Tx, roomID string, spec systemMessageSpec) error {
+	_, err := h.appendSystemMessageTxWithID(tx, roomID, spec)
+	return err
+}
+
+func (h *Handler) appendSystemMessageTxWithID(tx *sql.Tx, roomID string, spec systemMessageSpec) (string, error) {
 	subjectID := firstNonEmpty(spec.TargetID, spec.UserID)
 	if spec.Event == "" || subjectID == "" {
-		return nil
+		return "", nil
 	}
 	subject, err := userSummaryByRoomIDTx(tx, roomID, subjectID)
 	if err != nil {
-		return err
+		return "", err
 	}
 
 	attachment := map[string]any{
@@ -79,7 +84,7 @@ func (h *Handler) appendSystemMessageTx(tx *sql.Tx, roomID string, spec systemMe
 	if spec.ActorID != "" {
 		actor, err := userSummaryByRoomIDTx(tx, roomID, spec.ActorID)
 		if err != nil {
-			return err
+			return "", err
 		}
 		attachment["actor"] = actor
 		actorName = actor.DisplayName
@@ -101,13 +106,15 @@ func (h *Handler) appendSystemMessageTx(tx *sql.Tx, roomID string, spec systemMe
 	if now <= 0 {
 		now = nowMillis()
 	}
+	messageID := newID("msg")
+	clientMessageID := newID("sys")
 	_, err = tx.Exec(
 		`INSERT INTO messages (id, room_id, sender_user_id, client_message_id, type, body, mentions_json, attachments_json, created_at)
 		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		newID("msg"),
+		messageID,
 		roomID,
 		subjectID,
-		newID("sys"),
+		clientMessageID,
 		systemMessageType,
 		systemMessageBody(spec, actorName),
 		mustJSON(nil),
@@ -115,10 +122,13 @@ func (h *Handler) appendSystemMessageTx(tx *sql.Tx, roomID string, spec systemMe
 		now,
 	)
 	if err != nil {
-		return err
+		return "", err
 	}
 	_, err = tx.Exec(`UPDATE rooms SET updated_at = ? WHERE id = ?`, now, roomID)
-	return err
+	if err != nil {
+		return "", err
+	}
+	return messageID, nil
 }
 
 func userSummaryByRoomIDTx(tx *sql.Tx, roomID, userID string) (userSummary, error) {

@@ -3,6 +3,7 @@ package chat
 import (
 	"database/sql"
 	"net/http"
+	"strings"
 
 	"github.com/gin-gonic/gin"
 )
@@ -12,18 +13,22 @@ const (
 	roomNotificationRolePromoted            = "role_promoted"
 	roomNotificationRoleDemoted             = "role_demoted"
 	roomNotificationCreatorTransferDemoted  = "creator_transfer_demoted"
+	roomNotificationMentioned               = "mentioned"
 	defaultRoomNotificationListLimit        = 100
 	maxRoomNotificationListLimit            = 200
 	missingRoomNotificationActorDisplayName = "用户不存在"
 )
 
 type roomNotificationSpec struct {
-	Type        string
-	RecipientID string
-	RoomID      string
-	ActorID     string
-	FromRole    string
-	ToRole      string
+	Type              string
+	RecipientID       string
+	RoomID            string
+	ActorID           string
+	FromRole          string
+	ToRole            string
+	MessageID         string
+	MessagePreview    string
+	NotificationLevel string
 }
 
 func roomRoleNotificationType(fromRole, toRole string) string {
@@ -35,6 +40,9 @@ func roomRoleNotificationType(fromRole, toRole string) string {
 
 func (h *Handler) appendRoomNotificationTx(tx *sql.Tx, spec roomNotificationSpec) error {
 	if spec.Type == "" || spec.RecipientID == "" || spec.RoomID == "" {
+		return nil
+	}
+	if !h.roomNotificationAllowedTx(tx, spec) {
 		return nil
 	}
 
@@ -86,8 +94,9 @@ func (h *Handler) appendRoomNotificationTx(tx *sql.Tx, spec roomNotificationSpec
 		   created_at, room_rid, room_name, room_avatar_url, room_default_avatar_key,
 		   room_visibility, room_join_policy, room_description, room_created_by_user_id,
 		   actor_uid, actor_username, actor_display_name, actor_avatar_url,
-		   actor_default_avatar_key, actor_room_display_name, actor_room_role
-		 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		   actor_default_avatar_key, actor_room_display_name, actor_room_role,
+		   message_id, message_body_preview
+		 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		newID("rnot"),
 		spec.RecipientID,
 		spec.RoomID,
@@ -111,7 +120,152 @@ func (h *Handler) appendRoomNotificationTx(tx *sql.Tx, spec roomNotificationSpec
 		actorDefaultAvatarValue,
 		nullableString(actorRoomDisplayName),
 		nullableString(actorRoomRole),
+		emptyToNil(spec.MessageID),
+		emptyToNil(spec.MessagePreview),
 	)
+	return err
+}
+
+func (h *Handler) appendMentionRoomNotifications(roomID, messageID, body, mentionsJSON, actorID string) ([]string, error) {
+	rows, err := h.DB.Query(
+		`SELECT user_id, COALESCE(notification_level, 'all')
+		 FROM room_memberships
+		 WHERE room_id = ? AND user_id != ?`,
+		roomID,
+		actorID,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	type candidate struct {
+		userID string
+		level  string
+	}
+	candidates := make([]candidate, 0)
+	for rows.Next() {
+		var item candidate
+		if err := rows.Scan(&item.userID, &item.level); err != nil {
+			return nil, err
+		}
+		if item.level == "all" {
+			candidates = append(candidates, item)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if len(candidates) == 0 {
+		return nil, nil
+	}
+
+	tx, err := h.DB.Begin()
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+
+	recipients := make([]string, 0, len(candidates))
+	preview := lastMessageBodyPreview("text", body, "[]")
+	for _, item := range candidates {
+		target, ok := h.mentionTarget(roomID, item.userID)
+		if !ok || !mentionMessageTargetsUser(body, mentionsJSON, target) {
+			continue
+		}
+		if err := h.appendRoomNotificationTx(tx, roomNotificationSpec{
+			Type:              roomNotificationMentioned,
+			RecipientID:       item.userID,
+			RoomID:            roomID,
+			ActorID:           actorID,
+			MessageID:         messageID,
+			MessagePreview:    preview,
+			NotificationLevel: item.level,
+		}); err != nil {
+			return nil, err
+		}
+		recipients = append(recipients, item.userID)
+	}
+	if len(recipients) == 0 {
+		return nil, nil
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	return recipients, nil
+}
+
+func (h *Handler) deleteRoomNotificationsForMessage(roomID, messageID string) []string {
+	if roomID == "" || messageID == "" {
+		return nil
+	}
+	rows, err := h.DB.Query(
+		`SELECT DISTINCT recipient_user_id
+		 FROM room_notifications
+		 WHERE room_id = ? AND message_id = ?`,
+		roomID,
+		messageID,
+	)
+	if err != nil {
+		return nil
+	}
+	recipients := make([]string, 0)
+	for rows.Next() {
+		var userID string
+		if err := rows.Scan(&userID); err == nil && userID != "" {
+			recipients = append(recipients, userID)
+		}
+	}
+	_ = rows.Close()
+	_, _ = h.DB.Exec(
+		`DELETE FROM room_notifications
+		 WHERE room_id = ? AND message_id = ?`,
+		roomID,
+		messageID,
+	)
+	return recipients
+}
+
+func (h *Handler) roomNotificationAllowedTx(tx *sql.Tx, spec roomNotificationSpec) bool {
+	level := strings.TrimSpace(spec.NotificationLevel)
+	if level == "" {
+		_ = tx.QueryRow(
+			`SELECT COALESCE(notification_level, 'all')
+			 FROM room_memberships
+			 WHERE room_id = ? AND user_id = ?`,
+			spec.RoomID,
+			spec.RecipientID,
+		).Scan(&level)
+	}
+	return level == "all"
+}
+
+func (h *Handler) ensureRoomNotificationSchema() error {
+	if err := h.ensureRoomNotificationColumn("message_id", "VARCHAR(128) NULL"); err != nil {
+		return err
+	}
+	if err := h.ensureRoomNotificationColumn("message_body_preview", "TEXT NULL"); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (h *Handler) ensureRoomNotificationColumn(name, definition string) error {
+	var count int
+	if err := h.DB.QueryRow(
+		`SELECT COUNT(*)
+		 FROM information_schema.COLUMNS
+		 WHERE TABLE_SCHEMA = DATABASE()
+		   AND TABLE_NAME = 'room_notifications'
+		   AND COLUMN_NAME = ?`,
+		name,
+	).Scan(&count); err != nil {
+		return err
+	}
+	if count > 0 {
+		return nil
+	}
+	_, err := h.DB.Exec(`ALTER TABLE room_notifications ADD COLUMN ` + name + ` ` + definition)
 	return err
 }
 
@@ -165,6 +319,7 @@ func (h *Handler) markRoomNotificationsRead(c *gin.Context) {
 func (h *Handler) roomEventNotificationPayload(notificationID, viewerID string) gin.H {
 	var id, eventType, roomID string
 	var actorRefID, fromRole, toRole sql.NullString
+	var messageID, messagePreview sql.NullString
 	var readAt sql.NullInt64
 	var createdAt int64
 	var rid, roomName, roomDefaultAvatar, roomVisibility, roomJoinPolicy, roomDescription string
@@ -175,6 +330,7 @@ func (h *Handler) roomEventNotificationPayload(notificationID, viewerID string) 
 	var actorRoomDisplayName, actorRoomRole sql.NullString
 	err := h.DB.QueryRow(
 		`SELECT rn.id, rn.type, rn.room_id, rn.actor_user_id, rn.from_role, rn.to_role,
+		        rn.message_id, rn.message_body_preview,
 		        rn.created_at, rn.read_at,
 		        COALESCE(r.rid, rn.room_rid),
 		        COALESCE(r.name, rn.room_name),
@@ -195,7 +351,8 @@ func (h *Handler) roomEventNotificationPayload(notificationID, viewerID string) 
 		 WHERE rn.id = ? AND rn.recipient_user_id = ?`,
 		notificationID, viewerID,
 	).Scan(
-		&id, &eventType, &roomID, &actorRefID, &fromRole, &toRole, &createdAt, &readAt,
+		&id, &eventType, &roomID, &actorRefID, &fromRole, &toRole,
+		&messageID, &messagePreview, &createdAt, &readAt,
 		&rid, &roomName, &roomAvatarURL, &roomDefaultAvatar, &roomVisibility,
 		&roomJoinPolicy, &roomDescription, &roomCreatedByUserID, &roomExists,
 		&actorID, &actorUID, &actorUsername, &actorDisplayName, &actorAvatarURL,
@@ -239,14 +396,16 @@ func (h *Handler) roomEventNotificationPayload(notificationID, viewerID string) 
 	}
 
 	return gin.H{
-		"id":           id,
-		"type":         eventType,
-		"created_at":   formatMillis(createdAt),
-		"read_at":      nullableMillis(readAt),
-		"from_role":    nullableString(fromRole),
-		"to_role":      nullableString(toRole),
-		"room_exists":  roomExists != 0,
-		"actor_exists": actorExists,
+		"id":              id,
+		"type":            eventType,
+		"created_at":      formatMillis(createdAt),
+		"read_at":         nullableMillis(readAt),
+		"from_role":       nullableString(fromRole),
+		"to_role":         nullableString(toRole),
+		"message_id":      nullableString(messageID),
+		"message_preview": nullableString(messagePreview),
+		"room_exists":     roomExists != 0,
+		"actor_exists":    actorExists,
 		"room": h.roomNotificationRoomPayload(
 			roomID, viewerID, rid, roomName, roomDefaultAvatar, roomVisibility,
 			roomJoinPolicy, roomAvatarURL,

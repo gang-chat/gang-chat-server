@@ -183,6 +183,19 @@ func (h *Handler) sendMessage(c *gin.Context) {
 	// own unread counter; the count itself is never on the wire (it's personal).
 	h.publishRoomMessageUpdated(roomID, userID)
 	h.publishRoomToUser(userID, roomID, "room_updated")
+	if len(req.Mentions) > 0 {
+		if recipients, err := h.appendMentionRoomNotifications(
+			roomID,
+			messageID,
+			body,
+			mentionsJSON,
+			userID,
+		); err == nil {
+			for _, recipientID := range recipients {
+				h.publishRoomNotificationsUpdated(recipientID)
+			}
+		}
+	}
 	h.idempotentJSON(c, http.StatusCreated, rawBody, gin.H{"message": msg})
 }
 

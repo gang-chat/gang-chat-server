@@ -2,6 +2,7 @@ package chat
 
 import (
 	"database/sql"
+	"log"
 
 	"github.com/gin-gonic/gin"
 	"github.com/zhuangkaiyi/gang-chat/server/internal/config"
@@ -62,6 +63,9 @@ func RegisterRoutes(g *gin.RouterGroup, db *sql.DB, cfg *config.Config, bus *eve
 		}
 	}
 	h := &Handler{DB: db, Cfg: cfg, Bus: bus, Live: live, Assets: assetStore, MusicBox: mb}
+	if err := h.ensureRoomNotificationSchema(); err != nil {
+		log.Printf("chat: ensure room notification schema: %v", err)
+	}
 
 	// The music box fans out a fresh snapshot whenever a room's queue or
 	// playback changes; route it through the same SSE bus as everything else.

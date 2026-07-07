@@ -859,8 +859,14 @@ func (h *Handler) removeMember(c *gin.Context) {
 		h.jsonError(c, http.StatusForbidden, "forbidden", "cannot manage super user")
 		return
 	}
-	var role string
-	_ = h.DB.QueryRow(`SELECT role FROM room_memberships WHERE room_id = ? AND user_id = ?`, roomID, targetID).Scan(&role)
+	var role, targetNotificationLevel string
+	_ = h.DB.QueryRow(
+		`SELECT role, COALESCE(notification_level, 'all')
+		 FROM room_memberships
+		 WHERE room_id = ? AND user_id = ?`,
+		roomID,
+		targetID,
+	).Scan(&role, &targetNotificationLevel)
 	if role == "owner" {
 		h.jsonError(c, http.StatusForbidden, "forbidden", "cannot remove room owner")
 		return
@@ -899,19 +905,22 @@ func (h *Handler) removeMember(c *gin.Context) {
 		return
 	}
 	if !pruned {
-		if err := h.appendSystemMessageTx(tx, roomID, systemMessageSpec{
+		messageID, err := h.appendSystemMessageTxWithID(tx, roomID, systemMessageSpec{
 			Event:    systemEventRoomMemberRemoved,
 			ActorID:  actorID,
 			TargetID: targetID,
-		}); err != nil {
+		})
+		if err != nil {
 			h.jsonError(c, http.StatusInternalServerError, "internal_error", "remove member failed")
 			return
 		}
 		if err := h.appendRoomNotificationTx(tx, roomNotificationSpec{
-			Type:        roomNotificationMemberRemoved,
-			RecipientID: targetID,
-			RoomID:      roomID,
-			ActorID:     actorID,
+			Type:              roomNotificationMemberRemoved,
+			RecipientID:       targetID,
+			RoomID:            roomID,
+			ActorID:           actorID,
+			MessageID:         messageID,
+			NotificationLevel: targetNotificationLevel,
 		}); err != nil {
 			h.jsonError(c, http.StatusInternalServerError, "internal_error", "remove member failed")
 			return
@@ -1007,13 +1016,14 @@ func (h *Handler) updateMemberRole(c *gin.Context) {
 		}
 		if currentRole != *req.Role {
 			roleChanged = true
-			if err := h.appendSystemMessageTx(tx, roomID, systemMessageSpec{
+			messageID, err := h.appendSystemMessageTxWithID(tx, roomID, systemMessageSpec{
 				Event:    systemEventRoomRoleChanged,
 				ActorID:  actorID,
 				TargetID: targetID,
 				FromRole: currentRole,
 				ToRole:   *req.Role,
-			}); err != nil {
+			})
+			if err != nil {
 				h.jsonError(c, http.StatusInternalServerError, "internal_error", "update role failed")
 				return
 			}
@@ -1024,6 +1034,7 @@ func (h *Handler) updateMemberRole(c *gin.Context) {
 				ActorID:     actorID,
 				FromRole:    currentRole,
 				ToRole:      *req.Role,
+				MessageID:   messageID,
 			}); err != nil {
 				h.jsonError(c, http.StatusInternalServerError, "internal_error", "update role failed")
 				return
@@ -1154,13 +1165,14 @@ func (h *Handler) transferRoomCreator(c *gin.Context) {
 		return
 	}
 	if targetRole != "owner" {
-		if err := h.appendSystemMessageTx(tx, roomID, systemMessageSpec{
+		messageID, err := h.appendSystemMessageTxWithID(tx, roomID, systemMessageSpec{
 			Event:    systemEventRoomRoleChanged,
 			ActorID:  actorID,
 			TargetID: targetID,
 			FromRole: targetRole,
 			ToRole:   "owner",
-		}); err != nil {
+		})
+		if err != nil {
 			h.jsonError(c, http.StatusInternalServerError, "internal_error", "transfer creator failed")
 			return
 		}
@@ -1171,6 +1183,7 @@ func (h *Handler) transferRoomCreator(c *gin.Context) {
 			ActorID:     actorID,
 			FromRole:    targetRole,
 			ToRole:      "owner",
+			MessageID:   messageID,
 		}); err != nil {
 			h.jsonError(c, http.StatusInternalServerError, "internal_error", "transfer creator failed")
 			return
@@ -1181,13 +1194,14 @@ func (h *Handler) transferRoomCreator(c *gin.Context) {
 		if ownerID == targetID {
 			continue
 		}
-		if err := h.appendSystemMessageTx(tx, roomID, systemMessageSpec{
+		messageID, err := h.appendSystemMessageTxWithID(tx, roomID, systemMessageSpec{
 			Event:    systemEventRoomRoleChanged,
 			ActorID:  actorID,
 			TargetID: ownerID,
 			FromRole: "owner",
 			ToRole:   "admin",
-		}); err != nil {
+		})
+		if err != nil {
 			h.jsonError(c, http.StatusInternalServerError, "internal_error", "transfer creator failed")
 			return
 		}
@@ -1197,6 +1211,7 @@ func (h *Handler) transferRoomCreator(c *gin.Context) {
 			RoomID:      roomID,
 			FromRole:    "owner",
 			ToRole:      "admin",
+			MessageID:   messageID,
 		}); err != nil {
 			h.jsonError(c, http.StatusInternalServerError, "internal_error", "transfer creator failed")
 			return

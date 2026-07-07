@@ -148,6 +148,9 @@ func (h *Handler) forceDeleteMessage(c *gin.Context) {
 		return
 	}
 	msg, _ := h.messageByIDForUser(c.Param("message_id"), currentUserID(c))
+	for _, userID := range h.deleteRoomNotificationsForMessage(roomID, c.Param("message_id")) {
+		h.publishRoomNotificationsUpdated(userID)
+	}
 	// Force-deleting the latest message changes the last_message preview.
 	h.publishRoomUpdated(roomID)
 	c.JSON(http.StatusOK, gin.H{"message": msg})
@@ -164,6 +167,9 @@ func (h *Handler) applyRecall(roomID, messageID, userID string) {
 	// Recalling the latest message changes the room's last_message preview, so
 	// refresh every member's list entry. Covers both the immediate-recall and
 	// the admin-approval paths since both funnel through here.
+	for _, recipientID := range h.deleteRoomNotificationsForMessage(roomID, messageID) {
+		h.publishRoomNotificationsUpdated(recipientID)
+	}
 	h.publishRoomUpdated(roomID)
 }
 

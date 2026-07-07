@@ -954,7 +954,9 @@ func (h *Handler) unreadMentionCount(roomID, userID string) int {
 	rows, err := h.DB.Query(
 		`SELECT m.body, m.mentions_json
 		 FROM messages m
-		 WHERE m.room_id = ? AND m.sender_user_id != ? AND m.created_at > ? AND `+visibleMessageSQL("m"),
+		 WHERE m.room_id = ? AND m.sender_user_id != ? AND m.created_at > ?
+		   AND m.is_recalled = 0 AND m.is_force_deleted = 0
+		   AND `+visibleMessageSQL("m"),
 		roomID, userID, readAt,
 	)
 	if err != nil {
