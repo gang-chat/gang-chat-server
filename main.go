@@ -95,6 +95,7 @@ func main() {
 		log.Fatalf("configure trusted proxies: %v", err)
 	}
 	r.Use(middleware.RequestID())
+	r.Use(middleware.ServerTime())
 	r.Use(middleware.CORS(cfg.AllowedOrigins...))
 
 	r.GET("/health", func(c *gin.Context) { c.String(200, "ok") })
