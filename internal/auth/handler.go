@@ -207,7 +207,9 @@ func (h *Handler) refresh(c *gin.Context) {
 		return
 	}
 
-	if err := model.RotateRefreshToken(h.DB, session.ID, newRefresh); err != nil {
+	ua := c.GetHeader("User-Agent")
+	ip := requestClientIP(c.Request, h.Cfg.TrustedProxies)
+	if err := model.RotateRefreshToken(h.DB, session.ID, newRefresh, &ua, &ip); err != nil {
 		errorJSON(c, http.StatusInternalServerError, "internal_error", "token rotation failed")
 		return
 	}
@@ -351,7 +353,7 @@ func (h *Handler) issueAuthResponse(userID string, c *gin.Context) (*AuthRespons
 	}
 
 	ua := c.GetHeader("User-Agent")
-	ip := c.ClientIP()
+	ip := requestClientIP(c.Request, h.Cfg.TrustedProxies)
 	expiresAt := time.Now().Add(time.Duration(h.Cfg.RefreshTokenTTLSeconds) * time.Second).Unix()
 
 	if err := model.CreateSession(h.DB, sessionID, userID, model.HashTokenForCreate(refreshToken), &ua, &ip, expiresAt); err != nil {

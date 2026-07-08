@@ -81,12 +81,14 @@ func RevokeSessionByRefreshToken(db *sql.DB, token string) error {
 	return err
 }
 
-func RotateRefreshToken(db *sql.DB, sessionID, newToken string) error {
+func RotateRefreshToken(db *sql.DB, sessionID, newToken string, userAgent, ip *string) error {
 	newHash := hashToken(newToken)
 	now := time.Now().Unix()
 	_, err := db.Exec(
-		`UPDATE user_sessions SET refresh_token_hash = ?, last_used_at = ? WHERE id = ?`,
-		newHash, now, sessionID,
+		`UPDATE user_sessions
+		 SET refresh_token_hash = ?, user_agent = ?, ip_address = ?, last_used_at = ?
+		 WHERE id = ?`,
+		newHash, userAgent, ip, now, sessionID,
 	)
 	return err
 }
