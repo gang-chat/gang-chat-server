@@ -67,15 +67,18 @@ func (r *SessionLocationResolver) cityLocation(ip net.IP) string {
 		return ""
 	}
 	country := localizedGeoName(record.Country.Names, record.Country.IsoCode)
-	subdivision := ""
-	if len(record.Subdivisions) > 0 {
-		subdivision = localizedGeoName(
-			record.Subdivisions[0].Names,
-			record.Subdivisions[0].IsoCode,
+	parts := []string{country}
+	for _, subdivision := range record.Subdivisions {
+		parts = append(
+			parts,
+			localizedGeoName(subdivision.Names, subdivision.IsoCode),
 		)
 	}
-	city := localizedGeoName(record.City.Names, "")
-	return joinLocationParts(country, subdivision, city)
+	parts = append(parts, localizedGeoName(record.City.Names, ""))
+	if postalCode := strings.TrimSpace(record.Postal.Code); postalCode != "" {
+		parts = append(parts, "邮编 "+postalCode)
+	}
+	return joinLocationParts(parts...)
 }
 
 func (r *SessionLocationResolver) countryLocation(ip net.IP) string {

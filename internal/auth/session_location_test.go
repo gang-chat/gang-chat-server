@@ -49,3 +49,17 @@ func TestJoinLocationPartsDeduplicates(t *testing.T) {
 		t.Fatalf("joinLocationParts() = %q, want %q", got, want)
 	}
 }
+
+func TestJoinLocationPartsKeepsSpecificAdministrativeLevels(t *testing.T) {
+	got := joinLocationParts(
+		"\u4e2d\u56fd",
+		"\u5e7f\u4e1c",
+		"\u6df1\u5733",
+		"\u5357\u5c71",
+		"\u90ae\u7f16 518000",
+	)
+	want := "\u4e2d\u56fd, \u5e7f\u4e1c, \u6df1\u5733, \u5357\u5c71, \u90ae\u7f16 518000"
+	if got != want {
+		t.Fatalf("joinLocationParts() = %q, want %q", got, want)
+	}
+}
