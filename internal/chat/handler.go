@@ -75,27 +75,28 @@ type lastMessagePreview struct {
 }
 
 type roomCard struct {
-	ID                   string              `json:"id"`
-	RID                  string              `json:"rid,omitempty"`
-	Name                 string              `json:"name"`
-	RemarkName           *string             `json:"remark_name"`
-	Description          string              `json:"description"`
-	Visibility           string              `json:"visibility,omitempty"`
-	JoinPolicy           string              `json:"join_policy,omitempty"`
-	AvatarURL            *string             `json:"avatar_url"`
-	DefaultAvatarKey     string              `json:"default_avatar_key"`
-	MemberCount          int                 `json:"member_count"`
-	MyRole               string              `json:"my_role,omitempty"`
-	NotificationLevel    string              `json:"notification_level,omitempty"`
-	NotificationPolicy   string              `json:"notification_policy,omitempty"`
-	IsPinned             bool                `json:"is_pinned"`
-	OnlineMemberCount    int                 `json:"online_member_count"`
-	LiveParticipantCount int                 `json:"live_participant_count"`
-	LiveAvatarPreview    []userSummary       `json:"live_avatar_preview"`
-	LastMessage          *lastMessagePreview `json:"last_message"`
-	UnreadCount          int                 `json:"unread_count"`
-	UnreadMentionCount   int                 `json:"unread_mention_count"`
-	UpdatedAt            string              `json:"updated_at"`
+	ID                     string              `json:"id"`
+	RID                    string              `json:"rid,omitempty"`
+	Name                   string              `json:"name"`
+	RemarkName             *string             `json:"remark_name"`
+	Description            string              `json:"description"`
+	Visibility             string              `json:"visibility,omitempty"`
+	JoinPolicy             string              `json:"join_policy,omitempty"`
+	AvatarURL              *string             `json:"avatar_url"`
+	DefaultAvatarKey       string              `json:"default_avatar_key"`
+	MemberCount            int                 `json:"member_count"`
+	MyRole                 string              `json:"my_role,omitempty"`
+	NotificationLevel      string              `json:"notification_level,omitempty"`
+	NotificationPolicy     string              `json:"notification_policy,omitempty"`
+	IsPinned               bool                `json:"is_pinned"`
+	OnlineMemberCount      int                 `json:"online_member_count"`
+	LiveParticipantCount   int                 `json:"live_participant_count"`
+	LiveAvatarPreview      []userSummary       `json:"live_avatar_preview"`
+	LastMessage            *lastMessagePreview `json:"last_message"`
+	UnreadCount            int                 `json:"unread_count"`
+	UnreadMentionCount     int                 `json:"unread_mention_count"`
+	HasPendingJoinRequests bool                `json:"has_pending_join_requests"`
+	UpdatedAt              string              `json:"updated_at"`
 }
 
 type publicRoom struct {

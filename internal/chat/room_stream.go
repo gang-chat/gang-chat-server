@@ -54,6 +54,7 @@ type roomSnapshot struct {
 	LastMessage                 *lastMessagePreview `json:"last_message"`
 	UnreadCount                 int                 `json:"unread_count"`
 	UnreadMentionCount          int                 `json:"unread_mention_count"`
+	HasPendingJoinRequests      bool                `json:"has_pending_join_requests"`
 	CreatedAt                   string              `json:"created_at"`
 	UpdatedAt                   string              `json:"updated_at"`
 }
@@ -177,6 +178,10 @@ func (h *Handler) applyRoomSnapshotPersonalFields(snapshot *roomSnapshot, roomID
 	snapshot.IsPinned = isPinned != 0
 	snapshot.UnreadCount = h.unreadCount(roomID, userID)
 	snapshot.UnreadMentionCount = h.unreadMentionCount(roomID, userID)
+	snapshot.HasPendingJoinRequests = h.hasPendingJoinRequestsForViewer(
+		roomID,
+		userID,
+	)
 	if notificationPolicy == "blocked" {
 		snapshot.LastMessage = nil
 		snapshot.UnreadCount = 0
@@ -371,6 +376,7 @@ func (h *Handler) publishRoomJoinRequestsUpdated(roomID string) {
 	for _, userID := range members {
 		h.Bus.PublishUser(userID, ev)
 	}
+	h.publishRoomUpdated(roomID)
 }
 
 func (h *Handler) publishRoomMemberProfileChanged(roomID, userID string) {

@@ -379,8 +379,32 @@ func (h *Handler) buildRoomCard(rec roomRecord, userID string) (roomCard, error)
 		LastMessage:          lastMessage,
 		UnreadCount:          h.unreadCount(rec.ID, userID),
 		UnreadMentionCount:   h.unreadMentionCount(rec.ID, userID),
-		UpdatedAt:            formatMillis(rec.UpdatedAt),
+		HasPendingJoinRequests: h.hasPendingJoinRequestsForViewer(
+			rec.ID,
+			userID,
+		),
+		UpdatedAt: formatMillis(rec.UpdatedAt),
 	}, nil
+}
+
+func (h *Handler) hasPendingJoinRequestsForViewer(roomID, userID string) bool {
+	if roomID == "" || userID == "" || !h.isAdmin(roomID, userID) {
+		return false
+	}
+	var count int
+	err := h.DB.QueryRow(
+		`SELECT COUNT(*)
+		 FROM join_requests jr
+		 WHERE jr.room_id = ? AND jr.status = 'pending'
+		   AND NOT EXISTS (
+		     SELECT 1
+		     FROM room_blacklist rb
+		     WHERE rb.room_id = jr.room_id
+		       AND rb.user_id = jr.user_id
+		   )`,
+		roomID,
+	).Scan(&count)
+	return err == nil && count > 0
 }
 
 func (h *Handler) buildRoomDetail(roomID, userID string) (roomDetail, error) {

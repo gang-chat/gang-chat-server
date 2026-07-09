@@ -3497,6 +3497,63 @@ func TestApprovalRequiredJoinFlow(t *testing.T) {
 	}
 }
 
+func TestRoomCardsExposePendingJoinRequestBadgeForAdmins(t *testing.T) {
+	api := newAPIHarness(t)
+	owner := api.register("pending_badge_owner")
+	admin := api.register("pending_badge_admin")
+	member := api.register("pending_badge_member")
+	applicant := api.register("pending_badge_applicant")
+
+	room := api.createRoom(owner.Token, map[string]any{
+		"name":        "Pending Badge",
+		"join_policy": "open",
+	})
+	roomID := room["id"].(string)
+
+	status, response := api.request(http.MethodPost, "/rooms/"+roomID+"/join", admin.Token, nil)
+	api.requireStatus(status, http.StatusOK, response)
+	status, response = api.request(http.MethodPost, "/rooms/"+roomID+"/join", member.Token, nil)
+	api.requireStatus(status, http.StatusOK, response)
+	status, response = api.request(http.MethodPatch, "/rooms/"+roomID+"/members/"+admin.User["id"].(string), owner.Token, map[string]any{
+		"role": "admin",
+	})
+	api.requireStatus(status, http.StatusOK, response)
+	status, response = api.request(http.MethodPatch, "/rooms/"+roomID+"/settings", owner.Token, map[string]any{
+		"join_policy": "approval_required",
+	})
+	api.requireStatus(status, http.StatusOK, response)
+
+	status, response = api.request(http.MethodPost, "/rooms/"+roomID+"/join", applicant.Token, map[string]any{"reason": "let me in"})
+	api.requireStatus(status, http.StatusAccepted, response)
+	requestID := response["join_request"].(map[string]any)["id"].(string)
+
+	status, response = api.request(http.MethodGet, "/rooms", owner.Token, nil)
+	api.requireStatus(status, http.StatusOK, response)
+	if got := roomCardByID(t, response, roomID)["has_pending_join_requests"]; got != true {
+		t.Fatalf("owner room card should expose pending join request, got %v in %v", got, response)
+	}
+	status, response = api.request(http.MethodGet, "/rooms", admin.Token, nil)
+	api.requireStatus(status, http.StatusOK, response)
+	if got := roomCardByID(t, response, roomID)["has_pending_join_requests"]; got != true {
+		t.Fatalf("admin room card should expose pending join request, got %v in %v", got, response)
+	}
+	status, response = api.request(http.MethodGet, "/rooms", member.Token, nil)
+	api.requireStatus(status, http.StatusOK, response)
+	if got := roomCardByID(t, response, roomID)["has_pending_join_requests"]; got != false {
+		t.Fatalf("member room card should not expose pending join request, got %v in %v", got, response)
+	}
+
+	status, response = api.request(http.MethodPatch, "/rooms/"+roomID+"/join-requests/"+requestID, owner.Token, map[string]any{
+		"decision": "reject",
+	})
+	api.requireStatus(status, http.StatusOK, response)
+	status, response = api.request(http.MethodGet, "/rooms", owner.Token, nil)
+	api.requireStatus(status, http.StatusOK, response)
+	if got := roomCardByID(t, response, roomID)["has_pending_join_requests"]; got != false {
+		t.Fatalf("resolved join request should clear room card badge, got %v in %v", got, response)
+	}
+}
+
 func TestRoomJoinPolicyChangeAutoReviewsPendingRequests(t *testing.T) {
 	api := newAPIHarness(t)
 	owner := api.register("policy_review_owner")
