@@ -910,6 +910,30 @@ func TestLastMessagePreviewIncludesSystemType(t *testing.T) {
 	if last["sender_display_name"] != "" || last["body_preview"] != "房间简介 被 system_preview_owner 修改为 Preview bio" {
 		t.Fatalf("room description system last_message should match chat rendering order: %v", last)
 	}
+
+	status, response = api.request(http.MethodPatch, "/rooms/"+roomID, owner.Token, map[string]any{
+		"visibility": "private",
+	})
+	api.requireStatus(status, http.StatusOK, response)
+	status, response = api.request(http.MethodGet, "/rooms", member.Token, nil)
+	api.requireStatus(status, http.StatusOK, response)
+	card = roomCardByID(t, response, roomID)
+	last = card["last_message"].(map[string]any)
+	if last["sender_display_name"] != "" || last["body_preview"] != "房间可见性 被 system_preview_owner 修改为 私密" {
+		t.Fatalf("room visibility system last_message should match chat rendering order: %v", last)
+	}
+
+	status, response = api.request(http.MethodPatch, "/rooms/"+roomID, owner.Token, map[string]any{
+		"join_policy": "closed",
+	})
+	api.requireStatus(status, http.StatusOK, response)
+	status, response = api.request(http.MethodGet, "/rooms", member.Token, nil)
+	api.requireStatus(status, http.StatusOK, response)
+	card = roomCardByID(t, response, roomID)
+	last = card["last_message"].(map[string]any)
+	if last["sender_display_name"] != "" || last["body_preview"] != "房间加入方式 被 system_preview_owner 修改为 关闭" {
+		t.Fatalf("room join policy system last_message should match chat rendering order: %v", last)
+	}
 }
 
 func TestLastMessagePreviewTreatsRemovedLatestMessageAsSystem(t *testing.T) {
@@ -3470,6 +3494,110 @@ func TestApprovalRequiredJoinFlow(t *testing.T) {
 	membership := approvedRoom["my_membership"].(map[string]any)
 	if membership["role"] != "member" {
 		t.Fatalf("approved joiner should become member: %v", membership)
+	}
+}
+
+func TestRoomJoinPolicyChangeAutoReviewsPendingRequests(t *testing.T) {
+	api := newAPIHarness(t)
+	owner := api.register("policy_review_owner")
+	approved := api.register("policy_review_approved")
+	rejected := api.register("policy_review_rejected")
+	ownerID := owner.User["id"].(string)
+	approvedID := approved.User["id"].(string)
+	rejectedID := rejected.User["id"].(string)
+
+	openRoom := api.createRoom(owner.Token, map[string]any{
+		"name":        "Auto Approve",
+		"join_policy": "approval_required",
+	})
+	openRoomID := openRoom["id"].(string)
+	status, response := api.request(http.MethodPost, "/rooms/"+openRoomID+"/join", approved.Token, map[string]any{"reason": "approve me"})
+	api.requireStatus(status, http.StatusAccepted, response)
+
+	status, response = api.request(http.MethodPatch, "/rooms/"+openRoomID+"/settings", owner.Token, map[string]any{
+		"join_policy": "open",
+	})
+	api.requireStatus(status, http.StatusOK, response)
+
+	status, response = api.request(http.MethodGet, "/rooms/"+openRoomID+"/join-requests?status=pending", owner.Token, nil)
+	api.requireStatus(status, http.StatusOK, response)
+	if requests := response["requests"].([]any); len(requests) != 0 {
+		t.Fatalf("opening room should auto-approve pending requests: %v", response)
+	}
+	var approvedStatus, approvedReviewer string
+	if err := api.db.QueryRow(
+		`SELECT status, reviewer_user_id FROM join_requests WHERE room_id = ? AND user_id = ?`,
+		openRoomID,
+		approvedID,
+	).Scan(&approvedStatus, &approvedReviewer); err != nil {
+		t.Fatalf("read approved join request: %v", err)
+	}
+	if approvedStatus != "approved" || approvedReviewer != ownerID {
+		t.Fatalf("join request should be approved by owner, status=%s reviewer=%s", approvedStatus, approvedReviewer)
+	}
+	status, response = api.request(http.MethodGet, "/rooms/"+openRoomID, approved.Token, nil)
+	api.requireStatus(status, http.StatusOK, response)
+	if response["room"].(map[string]any)["my_membership"].(map[string]any)["role"] != "member" {
+		t.Fatalf("auto-approved user should become a member: %v", response)
+	}
+	messages := listRoomMessages(t, api, owner.Token, openRoomID)
+	joinPolicyMessage := requireSystemMessage(t, messages, systemEventRoomJoinPolicyChanged, ownerID)
+	joinPolicyAttachment := systemAttachment(t, joinPolicyMessage)
+	if joinPolicyAttachment["old_value"] != "approval_required" || joinPolicyAttachment["new_value"] != "open" {
+		t.Fatalf("join policy system attachment mismatch: %v", joinPolicyAttachment)
+	}
+	if !hasSystemMessage(t, messages, systemEventRoomMemberJoined, approvedID) {
+		t.Fatalf("auto-approved user should have a member joined system message: %v", messages)
+	}
+
+	closedRoom := api.createRoom(owner.Token, map[string]any{
+		"name":        "Auto Reject",
+		"join_policy": "approval_required",
+	})
+	closedRoomID := closedRoom["id"].(string)
+	status, response = api.request(http.MethodPost, "/rooms/"+closedRoomID+"/join", rejected.Token, map[string]any{"reason": "reject me"})
+	api.requireStatus(status, http.StatusAccepted, response)
+
+	status, response = api.request(http.MethodPatch, "/rooms/"+closedRoomID+"/settings", owner.Token, map[string]any{
+		"join_policy": "closed",
+	})
+	api.requireStatus(status, http.StatusOK, response)
+
+	status, response = api.request(http.MethodGet, "/rooms/"+closedRoomID+"/join-requests?status=pending", owner.Token, nil)
+	api.requireStatus(status, http.StatusOK, response)
+	if requests := response["requests"].([]any); len(requests) != 0 {
+		t.Fatalf("closing room should auto-reject pending requests: %v", response)
+	}
+	var rejectedStatus, rejectedReviewer string
+	if err := api.db.QueryRow(
+		`SELECT status, reviewer_user_id FROM join_requests WHERE room_id = ? AND user_id = ?`,
+		closedRoomID,
+		rejectedID,
+	).Scan(&rejectedStatus, &rejectedReviewer); err != nil {
+		t.Fatalf("read rejected join request: %v", err)
+	}
+	if rejectedStatus != "rejected" || rejectedReviewer != ownerID {
+		t.Fatalf("join request should be rejected by owner, status=%s reviewer=%s", rejectedStatus, rejectedReviewer)
+	}
+	var membershipCount int
+	if err := api.db.QueryRow(
+		`SELECT COUNT(*) FROM room_memberships WHERE room_id = ? AND user_id = ?`,
+		closedRoomID,
+		rejectedID,
+	).Scan(&membershipCount); err != nil {
+		t.Fatalf("count rejected membership: %v", err)
+	}
+	if membershipCount != 0 {
+		t.Fatalf("auto-rejected user should not become a member")
+	}
+	messages = listRoomMessages(t, api, owner.Token, closedRoomID)
+	joinPolicyMessage = requireSystemMessage(t, messages, systemEventRoomJoinPolicyChanged, ownerID)
+	joinPolicyAttachment = systemAttachment(t, joinPolicyMessage)
+	if joinPolicyAttachment["old_value"] != "approval_required" || joinPolicyAttachment["new_value"] != "closed" {
+		t.Fatalf("closed join policy system attachment mismatch: %v", joinPolicyAttachment)
+	}
+	if hasSystemMessage(t, messages, systemEventRoomMemberJoined, rejectedID) {
+		t.Fatalf("auto-rejected user should not have a member joined system message: %v", messages)
 	}
 }
 

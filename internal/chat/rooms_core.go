@@ -707,14 +707,23 @@ func systemRoomProfileChangeLastMessagePreview(attachmentsJSON string) (string, 
 			continue
 		}
 		event := stringFromMap(attachment, "event")
-		if event != systemEventRoomNameChanged && event != systemEventRoomBioChanged {
+		if event != systemEventRoomNameChanged &&
+			event != systemEventRoomBioChanged &&
+			event != systemEventRoomVisibilityChanged &&
+			event != systemEventRoomJoinPolicyChanged {
 			continue
 		}
 		subject := "房间名称"
+		value := systemChangedValuePreview(stringFromMap(attachment, "new_value"))
 		if event == systemEventRoomBioChanged {
 			subject = "房间简介"
+		} else if event == systemEventRoomVisibilityChanged {
+			subject = "房间可见性"
+			value = systemVisibilityLabel(stringFromMap(attachment, "new_value"))
+		} else if event == systemEventRoomJoinPolicyChanged {
+			subject = "房间加入方式"
+			value = systemJoinPolicyLabel(stringFromMap(attachment, "new_value"))
 		}
-		value := systemChangedValuePreview(stringFromMap(attachment, "new_value"))
 		actor := systemAttachmentDisplayName(attachment, "actor")
 		if actor == "" {
 			actor = systemAttachmentDisplayName(attachment, "user")

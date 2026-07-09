@@ -1,17 +1,22 @@
 package chat
 
-import "database/sql"
+import (
+	"database/sql"
+	"strings"
+)
 
 const (
-	systemMessageType            = "system"
-	systemEventRoomMemberJoined  = "room_member_joined"
-	systemEventRoomMemberLeft    = "room_member_left"
-	systemEventRoomMemberRemoved = "room_member_removed"
-	systemEventLiveJoined        = "live_joined"
-	systemEventLiveLeft          = "live_left"
-	systemEventRoomRoleChanged   = "room_role_changed"
-	systemEventRoomNameChanged   = "room_name_changed"
-	systemEventRoomBioChanged    = "room_description_changed"
+	systemMessageType                = "system"
+	systemEventRoomMemberJoined      = "room_member_joined"
+	systemEventRoomMemberLeft        = "room_member_left"
+	systemEventRoomMemberRemoved     = "room_member_removed"
+	systemEventLiveJoined            = "live_joined"
+	systemEventLiveLeft              = "live_left"
+	systemEventRoomRoleChanged       = "room_role_changed"
+	systemEventRoomNameChanged       = "room_name_changed"
+	systemEventRoomBioChanged        = "room_description_changed"
+	systemEventRoomVisibilityChanged = "room_visibility_changed"
+	systemEventRoomJoinPolicyChanged = "room_join_policy_changed"
 )
 
 func visibleMessageSQL(alias string) string {
@@ -185,13 +190,40 @@ func systemMessageBody(spec systemMessageSpec, actorName string) string {
 		return "房间名称修改为" + spec.NewValue
 	case systemEventRoomBioChanged:
 		return "房间简介修改为\n" + spec.NewValue
+	case systemEventRoomVisibilityChanged:
+		return "房间可见性修改为" + systemVisibilityLabel(spec.NewValue)
+	case systemEventRoomJoinPolicyChanged:
+		return "房间加入方式修改为" + systemJoinPolicyLabel(spec.NewValue)
 	default:
 		return ""
 	}
 }
 
 func systemMessageHasValuePatch(event string) bool {
-	return event == systemEventRoomNameChanged || event == systemEventRoomBioChanged
+	return event == systemEventRoomNameChanged ||
+		event == systemEventRoomBioChanged ||
+		event == systemEventRoomVisibilityChanged ||
+		event == systemEventRoomJoinPolicyChanged
+}
+
+func systemVisibilityLabel(visibility string) string {
+	switch strings.ToLower(strings.TrimSpace(visibility)) {
+	case "private":
+		return "私密"
+	default:
+		return "公开"
+	}
+}
+
+func systemJoinPolicyLabel(joinPolicy string) string {
+	switch strings.ToLower(strings.TrimSpace(joinPolicy)) {
+	case "approval_required":
+		return "需审批"
+	case "closed":
+		return "关闭"
+	default:
+		return "开放"
+	}
 }
 
 func systemRoleLabel(role string) string {

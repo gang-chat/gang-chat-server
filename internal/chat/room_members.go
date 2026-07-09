@@ -175,16 +175,18 @@ func (h *Handler) updateRoomSettings(c *gin.Context) {
 		h.jsonError(c, http.StatusBadRequest, "bad_request", "invalid JSON body")
 		return
 	}
-	oldName, oldDescription, oldJoinPolicy := "", "", ""
-	if req.Name != nil || req.Description != nil || req.JoinPolicy != nil {
+	oldName, oldDescription, oldVisibility, oldJoinPolicy := "", "", "", ""
+	if req.Name != nil || req.Description != nil || req.Visibility != nil || req.JoinPolicy != nil {
 		_ = h.DB.QueryRow(
-			`SELECT name, description, join_policy FROM rooms WHERE id = ?`,
+			`SELECT name, description, visibility, join_policy FROM rooms WHERE id = ?`,
 			roomID,
-		).Scan(&oldName, &oldDescription, &oldJoinPolicy)
+		).Scan(&oldName, &oldDescription, &oldVisibility, &oldJoinPolicy)
 	}
-	newName, newDescription := "", ""
+	newName, newDescription, newVisibility, newJoinPolicy := "", "", "", ""
 	nameChanged := false
 	descriptionChanged := false
+	visibilityChanged := false
+	joinPolicyChanged := false
 	joinPolicyClosedStateChanged := false
 	updatedAt := nowMillis()
 	sets := []string{"updated_at = ?"}
@@ -212,21 +214,27 @@ func (h *Handler) updateRoomSettings(c *gin.Context) {
 		args = append(args, description)
 	}
 	if req.Visibility != nil {
-		if !allowed(*req.Visibility, "public", "private") {
+		visibility := strings.TrimSpace(*req.Visibility)
+		if !allowed(visibility, "public", "private") {
 			h.jsonError(c, http.StatusBadRequest, "validation_failed", "invalid visibility")
 			return
 		}
+		newVisibility = visibility
+		visibilityChanged = visibility != oldVisibility
 		sets = append(sets, "visibility = ?")
-		args = append(args, *req.Visibility)
+		args = append(args, visibility)
 	}
 	if req.JoinPolicy != nil {
-		if !allowed(*req.JoinPolicy, "open", "approval_required", "closed") {
+		joinPolicy := strings.TrimSpace(*req.JoinPolicy)
+		if !allowed(joinPolicy, "open", "approval_required", "closed") {
 			h.jsonError(c, http.StatusBadRequest, "validation_failed", "invalid join_policy")
 			return
 		}
-		joinPolicyClosedStateChanged = roomJoinPolicyClosed(oldJoinPolicy) != roomJoinPolicyClosed(*req.JoinPolicy)
+		newJoinPolicy = joinPolicy
+		joinPolicyChanged = joinPolicy != oldJoinPolicy
+		joinPolicyClosedStateChanged = roomJoinPolicyClosed(oldJoinPolicy) != roomJoinPolicyClosed(joinPolicy)
 		sets = append(sets, "join_policy = ?")
-		args = append(args, *req.JoinPolicy)
+		args = append(args, joinPolicy)
 	}
 	aiVoiceAnnounceEnabled := req.AIVoiceAnnounceEnabled
 	if req.AIVoiceAnnouncementsEnabled != nil {
@@ -286,6 +294,12 @@ func (h *Handler) updateRoomSettings(c *gin.Context) {
 		h.jsonError(c, http.StatusInternalServerError, "internal_error", "update room settings failed")
 		return
 	}
+	nextSystemMessageCreatedAt := updatedAt
+	nextCreatedAt := func() int64 {
+		value := nextSystemMessageCreatedAt
+		nextSystemMessageCreatedAt++
+		return value
+	}
 	if nameChanged {
 		if err := h.appendSystemMessageTx(tx, roomID, systemMessageSpec{
 			Event:     systemEventRoomNameChanged,
@@ -293,26 +307,55 @@ func (h *Handler) updateRoomSettings(c *gin.Context) {
 			ActorID:   userID,
 			OldValue:  oldName,
 			NewValue:  newName,
-			CreatedAt: updatedAt,
+			CreatedAt: nextCreatedAt(),
 		}); err != nil {
 			h.jsonError(c, http.StatusInternalServerError, "internal_error", "append system message failed")
 			return
 		}
 	}
 	if descriptionChanged {
-		createdAt := updatedAt
-		if nameChanged {
-			createdAt++
-		}
 		if err := h.appendSystemMessageTx(tx, roomID, systemMessageSpec{
 			Event:     systemEventRoomBioChanged,
 			UserID:    userID,
 			ActorID:   userID,
 			OldValue:  oldDescription,
 			NewValue:  newDescription,
-			CreatedAt: createdAt,
+			CreatedAt: nextCreatedAt(),
 		}); err != nil {
 			h.jsonError(c, http.StatusInternalServerError, "internal_error", "append system message failed")
+			return
+		}
+	}
+	if visibilityChanged {
+		if err := h.appendSystemMessageTx(tx, roomID, systemMessageSpec{
+			Event:     systemEventRoomVisibilityChanged,
+			UserID:    userID,
+			ActorID:   userID,
+			OldValue:  oldVisibility,
+			NewValue:  newVisibility,
+			CreatedAt: nextCreatedAt(),
+		}); err != nil {
+			h.jsonError(c, http.StatusInternalServerError, "internal_error", "append system message failed")
+			return
+		}
+	}
+	autoReview := roomJoinPolicyAutoReviewResult{}
+	if joinPolicyChanged {
+		if err := h.appendSystemMessageTx(tx, roomID, systemMessageSpec{
+			Event:     systemEventRoomJoinPolicyChanged,
+			UserID:    userID,
+			ActorID:   userID,
+			OldValue:  oldJoinPolicy,
+			NewValue:  newJoinPolicy,
+			CreatedAt: nextCreatedAt(),
+		}); err != nil {
+			h.jsonError(c, http.StatusInternalServerError, "internal_error", "append system message failed")
+			return
+		}
+		var err error
+		autoReview, err = h.autoReviewPendingJoinRequestsForJoinPolicyTx(tx, roomID, userID, oldJoinPolicy, newJoinPolicy, nextCreatedAt)
+		if err != nil {
+			h.jsonError(c, http.StatusInternalServerError, "internal_error", "review pending join requests failed")
 			return
 		}
 	}
@@ -322,9 +365,22 @@ func (h *Handler) updateRoomSettings(c *gin.Context) {
 	}
 	// Name / avatar / visibility / join_policy etc. all live in the room-list
 	// snapshot, so every member's list entry needs to be refreshed.
-	h.publishRoomUpdated(roomID)
+	if autoReview.changed() {
+		h.publishRoomUpdated(roomID, autoReview.addedUserIDs...)
+	} else {
+		h.publishRoomUpdated(roomID)
+	}
 	if joinPolicyClosedStateChanged {
 		h.publishPendingRoomInvitesUpdatedForRoom(roomID)
+	}
+	if autoReview.changed() {
+		h.publishRoomJoinRequestsUpdated(roomID)
+		for _, addedUserID := range autoReview.addedUserIDs {
+			h.publishRoomToUser(addedUserID, roomID, "room_added")
+		}
+		for _, userID := range autoReview.applicationUserIDs() {
+			h.publishRoomApplicationsUpdated(userID)
+		}
 	}
 	detail, err := h.buildRoomDetail(roomID, currentUserID(c))
 	if err != nil {
@@ -332,6 +388,125 @@ func (h *Handler) updateRoomSettings(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"settings": h.roomSettingsPayload(roomID), "room": detail})
+}
+
+type roomJoinPolicyAutoReviewResult struct {
+	approvedUserIDs []string
+	rejectedUserIDs []string
+	addedUserIDs    []string
+}
+
+func (r roomJoinPolicyAutoReviewResult) changed() bool {
+	return len(r.approvedUserIDs) > 0 || len(r.rejectedUserIDs) > 0
+}
+
+func (r roomJoinPolicyAutoReviewResult) applicationUserIDs() []string {
+	seen := map[string]bool{}
+	userIDs := make([]string, 0, len(r.approvedUserIDs)+len(r.rejectedUserIDs))
+	for _, list := range [][]string{r.approvedUserIDs, r.rejectedUserIDs} {
+		for _, userID := range list {
+			if userID == "" || seen[userID] {
+				continue
+			}
+			seen[userID] = true
+			userIDs = append(userIDs, userID)
+		}
+	}
+	return userIDs
+}
+
+func (h *Handler) autoReviewPendingJoinRequestsForJoinPolicyTx(
+	tx *sql.Tx,
+	roomID, reviewerID, oldJoinPolicy, newJoinPolicy string,
+	nextCreatedAt func() int64,
+) (roomJoinPolicyAutoReviewResult, error) {
+	if oldJoinPolicy != "approval_required" {
+		return roomJoinPolicyAutoReviewResult{}, nil
+	}
+	if newJoinPolicy != "open" && newJoinPolicy != "closed" {
+		return roomJoinPolicyAutoReviewResult{}, nil
+	}
+
+	rows, err := tx.Query(
+		`SELECT jr.user_id,
+		        COALESCE(u.is_superuser, 0),
+		        CASE WHEN rb.user_id IS NULL THEN 0 ELSE 1 END,
+		        CASE WHEN rm.user_id IS NULL THEN 0 ELSE 1 END
+		 FROM join_requests jr
+		 JOIN users u ON u.id = jr.user_id
+		 LEFT JOIN room_blacklist rb ON rb.room_id = jr.room_id AND rb.user_id = jr.user_id
+		 LEFT JOIN room_memberships rm ON rm.room_id = jr.room_id AND rm.user_id = jr.user_id
+		 WHERE jr.room_id = ? AND jr.status = 'pending'
+		 ORDER BY jr.created_at ASC`,
+		roomID,
+	)
+	if err != nil {
+		return roomJoinPolicyAutoReviewResult{}, err
+	}
+	defer rows.Close()
+
+	type pendingJoinRequest struct {
+		userID        string
+		isSuperuser   bool
+		isBlacklisted bool
+		alreadyMember bool
+	}
+	pending := make([]pendingJoinRequest, 0)
+	for rows.Next() {
+		var userID string
+		var isSuperuser, isBlacklisted, alreadyMember int
+		if err := rows.Scan(&userID, &isSuperuser, &isBlacklisted, &alreadyMember); err != nil {
+			return roomJoinPolicyAutoReviewResult{}, err
+		}
+		pending = append(pending, pendingJoinRequest{
+			userID:        userID,
+			isSuperuser:   isSuperuser != 0,
+			isBlacklisted: isBlacklisted != 0,
+			alreadyMember: alreadyMember != 0,
+		})
+	}
+	if err := rows.Err(); err != nil {
+		return roomJoinPolicyAutoReviewResult{}, err
+	}
+
+	result := roomJoinPolicyAutoReviewResult{}
+	now := nowMillis()
+	for _, request := range pending {
+		status := "approved"
+		if newJoinPolicy == "closed" || request.isBlacklisted {
+			status = "rejected"
+		}
+		if _, err := tx.Exec(
+			`UPDATE join_requests
+			 SET status = ?, updated_at = ?, reviewer_user_id = ?, reviewed_at = ?
+			 WHERE room_id = ? AND user_id = ? AND status = 'pending'`,
+			status, now, reviewerID, now, roomID, request.userID,
+		); err != nil {
+			return roomJoinPolicyAutoReviewResult{}, err
+		}
+		if status == "rejected" {
+			result.rejectedUserIDs = append(result.rejectedUserIDs, request.userID)
+			continue
+		}
+
+		result.approvedUserIDs = append(result.approvedUserIDs, request.userID)
+		if !request.isSuperuser {
+			if _, err := h.addRoomMemberTx(tx, roomID, request.userID, now); err != nil {
+				return roomJoinPolicyAutoReviewResult{}, err
+			}
+			if !request.alreadyMember {
+				if err := h.appendSystemMessageTx(tx, roomID, systemMessageSpec{
+					Event:     systemEventRoomMemberJoined,
+					UserID:    request.userID,
+					CreatedAt: nextCreatedAt(),
+				}); err != nil {
+					return roomJoinPolicyAutoReviewResult{}, err
+				}
+				result.addedUserIDs = append(result.addedUserIDs, request.userID)
+			}
+		}
+	}
+	return result, nil
 }
 
 func (h *Handler) inviteMember(c *gin.Context) {
