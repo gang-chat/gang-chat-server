@@ -4014,6 +4014,139 @@ func TestRoomEventNotifications(t *testing.T) {
 	}
 }
 
+func TestDeleteRoomNotificationsOnlyHidesCurrentUsersFeed(t *testing.T) {
+	api := newAPIHarness(t)
+	owner := api.register("notification_delete_owner")
+	member := api.register("notification_delete_member")
+	room := api.createRoom(owner.Token, map[string]any{"name": "Notification Delete Room"})
+	roomID := room["id"].(string)
+
+	status, response := api.request(http.MethodPost, "/rooms/"+roomID+"/invites", owner.Token, map[string]any{
+		"user_id": member.User["id"].(string),
+	})
+	api.requireStatus(status, http.StatusCreated, response)
+	inviteID := response["invite"].(map[string]any)["id"].(string)
+
+	status, response = api.request(
+		http.MethodDelete,
+		"/room-notifications/"+roomNotificationDeletionInvite+"/"+inviteID,
+		member.Token,
+		nil,
+	)
+	api.requireStatus(status, http.StatusOK, response)
+	status, response = api.request(http.MethodGet, "/room-invites?status=all", member.Token, nil)
+	api.requireStatus(status, http.StatusOK, response)
+	if invites := response["invites"].([]any); len(invites) != 0 {
+		t.Fatalf("deleted invite notification should be hidden: %v", response)
+	}
+	var inviteCount int
+	if err := api.db.QueryRow(`SELECT COUNT(*) FROM room_invites WHERE id = ?`, inviteID).Scan(&inviteCount); err != nil {
+		t.Fatalf("count invite source record: %v", err)
+	}
+	if inviteCount != 1 {
+		t.Fatalf("deleting an invite notification must not delete the invite record, got %d", inviteCount)
+	}
+
+	status, response = api.request(http.MethodPatch, "/room-invites/"+inviteID, member.Token, map[string]any{"decision": "accept"})
+	api.requireStatus(status, http.StatusOK, response)
+	status, response = api.request(http.MethodPatch, "/rooms/"+roomID+"/members/"+member.User["id"].(string), owner.Token, map[string]any{
+		"role": "admin",
+	})
+	api.requireStatus(status, http.StatusOK, response)
+
+	status, response = api.request(http.MethodGet, "/room-notifications", member.Token, nil)
+	api.requireStatus(status, http.StatusOK, response)
+	notifications := response["notifications"].([]any)
+	if len(notifications) != 1 {
+		t.Fatalf("expected one role notification before deletion: %v", response)
+	}
+	notificationID := notifications[0].(map[string]any)["id"].(string)
+	var sourceNotificationCount, messageCountBefore int
+	if err := api.db.QueryRow(`SELECT COUNT(*) FROM room_notifications WHERE id = ?`, notificationID).Scan(&sourceNotificationCount); err != nil {
+		t.Fatalf("count event notification source record: %v", err)
+	}
+	if err := api.db.QueryRow(`SELECT COUNT(*) FROM messages WHERE room_id = ?`, roomID).Scan(&messageCountBefore); err != nil {
+		t.Fatalf("count room system messages before deletion: %v", err)
+	}
+
+	status, response = api.request(
+		http.MethodDelete,
+		"/room-notifications/"+roomNotificationDeletionRoomEvent+"/"+notificationID,
+		member.Token,
+		nil,
+	)
+	api.requireStatus(status, http.StatusOK, response)
+	status, response = api.request(http.MethodGet, "/room-notifications", member.Token, nil)
+	api.requireStatus(status, http.StatusOK, response)
+	if notifications := response["notifications"].([]any); len(notifications) != 0 {
+		t.Fatalf("deleted room event notification should be hidden: %v", response)
+	}
+	if err := api.db.QueryRow(`SELECT COUNT(*) FROM room_notifications WHERE id = ?`, notificationID).Scan(&sourceNotificationCount); err != nil {
+		t.Fatalf("recount event notification source record: %v", err)
+	}
+	if sourceNotificationCount != 1 {
+		t.Fatalf("deleting a notification must not delete its source record, got %d", sourceNotificationCount)
+	}
+	var messageCountAfter int
+	if err := api.db.QueryRow(`SELECT COUNT(*) FROM messages WHERE room_id = ?`, roomID).Scan(&messageCountAfter); err != nil {
+		t.Fatalf("count room system messages after deletion: %v", err)
+	}
+	if messageCountAfter != messageCountBefore {
+		t.Fatalf("deleting a notification must not change room messages: before=%d after=%d", messageCountBefore, messageCountAfter)
+	}
+
+	status, response = api.request(
+		http.MethodDelete,
+		"/room-notifications/"+roomNotificationDeletionRoomEvent+"/"+notificationID,
+		owner.Token,
+		nil,
+	)
+	if status != http.StatusNotFound {
+		t.Fatalf("another user must not delete this notification, got status=%d response=%v", status, response)
+	}
+}
+
+func TestDeleteRoomApplicationNotificationKeepsApplicationRecord(t *testing.T) {
+	api := newAPIHarness(t)
+	owner := api.register("application_notification_delete_owner")
+	applicant := api.register("application_notification_delete_applicant")
+	room := api.createRoom(owner.Token, map[string]any{
+		"name":        "Application Notification Delete Room",
+		"join_policy": "approval_required",
+	})
+	roomID := room["id"].(string)
+
+	status, response := api.request(http.MethodPost, "/rooms/"+roomID+"/join", applicant.Token, nil)
+	api.requireStatus(status, http.StatusAccepted, response)
+	requestID := response["join_request"].(map[string]any)["id"].(string)
+
+	status, response = api.request(
+		http.MethodDelete,
+		"/room-notifications/"+roomNotificationDeletionApplicationRequested+"/"+requestID,
+		applicant.Token,
+		nil,
+	)
+	api.requireStatus(status, http.StatusOK, response)
+	var requestCount int
+	if err := api.db.QueryRow(`SELECT COUNT(*) FROM join_requests WHERE id = ?`, requestID).Scan(&requestCount); err != nil {
+		t.Fatalf("count room application source record: %v", err)
+	}
+	if requestCount != 1 {
+		t.Fatalf("deleting an application notification must not delete the application record, got %d", requestCount)
+	}
+
+	status, response = api.request(http.MethodGet, "/room-applications?status=all", applicant.Token, nil)
+	api.requireStatus(status, http.StatusOK, response)
+	applications := response["applications"].([]any)
+	if len(applications) != 1 {
+		t.Fatalf("application source record should remain available: %v", response)
+	}
+	application := applications[0].(map[string]any)
+	if application["request_notification_deleted"] != true || application["review_notification_deleted"] != false {
+		t.Fatalf("application notification deletion flags mismatch: %v", application)
+	}
+}
+
 func TestRoomBlacklistFlow(t *testing.T) {
 	api := newAPIHarness(t)
 	super := api.login("GANG", "64n9-Ch47")

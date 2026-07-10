@@ -241,6 +241,17 @@ func (h *Handler) roomNotificationAllowedTx(tx *sql.Tx, spec roomNotificationSpe
 }
 
 func (h *Handler) ensureRoomNotificationSchema() error {
+	if _, err := h.DB.Exec(
+		`CREATE TABLE IF NOT EXISTS room_notification_deletions (
+			user_id VARCHAR(128) NOT NULL,
+			notification_type VARCHAR(32) NOT NULL,
+			notification_id VARCHAR(128) NOT NULL,
+			created_at BIGINT NOT NULL,
+			PRIMARY KEY (user_id, notification_type, notification_id)
+		)`,
+	); err != nil {
+		return err
+	}
 	if err := h.ensureRoomNotificationColumn("message_id", "VARCHAR(128) NULL"); err != nil {
 		return err
 	}
@@ -276,6 +287,13 @@ func (h *Handler) listRoomNotifications(c *gin.Context) {
 		`SELECT id
 		 FROM room_notifications
 		 WHERE recipient_user_id = ?
+		   AND NOT EXISTS (
+			   SELECT 1
+			   FROM room_notification_deletions rnd
+			   WHERE rnd.user_id = room_notifications.recipient_user_id
+			     AND rnd.notification_type = 'room_event'
+			     AND rnd.notification_id = room_notifications.id
+		   )
 		 ORDER BY created_at DESC
 		 LIMIT ?`,
 		userID, limit,
@@ -300,6 +318,96 @@ func (h *Handler) listRoomNotifications(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"notifications": items, "next_cursor": nil})
+}
+
+const (
+	roomNotificationDeletionInvite               = "invite"
+	roomNotificationDeletionApplicationRequested = "application_requested"
+	roomNotificationDeletionApplicationReviewed  = "application_reviewed"
+	roomNotificationDeletionRoomEvent            = "room_event"
+)
+
+func (h *Handler) deleteRoomNotification(c *gin.Context) {
+	userID := currentUserID(c)
+	notificationType := strings.TrimSpace(c.Param("notification_type"))
+	notificationID := strings.TrimSpace(c.Param("notification_id"))
+	if notificationID == "" || !allowed(
+		notificationType,
+		roomNotificationDeletionInvite,
+		roomNotificationDeletionApplicationRequested,
+		roomNotificationDeletionApplicationReviewed,
+		roomNotificationDeletionRoomEvent,
+	) {
+		h.jsonError(c, http.StatusBadRequest, "validation_failed", "invalid room notification")
+		return
+	}
+
+	var count int
+	switch notificationType {
+	case roomNotificationDeletionInvite:
+		_ = h.DB.QueryRow(
+			`SELECT COUNT(*) FROM room_invites WHERE id = ? AND target_user_id = ?`,
+			notificationID,
+			userID,
+		).Scan(&count)
+	case roomNotificationDeletionApplicationRequested, roomNotificationDeletionApplicationReviewed:
+		_ = h.DB.QueryRow(
+			`SELECT COUNT(*) FROM join_requests WHERE id = ? AND user_id = ?`,
+			notificationID,
+			userID,
+		).Scan(&count)
+	case roomNotificationDeletionRoomEvent:
+		_ = h.DB.QueryRow(
+			`SELECT COUNT(*) FROM room_notifications WHERE id = ? AND recipient_user_id = ?`,
+			notificationID,
+			userID,
+		).Scan(&count)
+	}
+	if count == 0 {
+		h.jsonError(c, http.StatusNotFound, "not_found", "room notification not found")
+		return
+	}
+
+	if _, err := h.DB.Exec(
+		`INSERT INTO room_notification_deletions (
+			user_id, notification_type, notification_id, created_at
+		 ) VALUES (?, ?, ?, ?)
+		 ON DUPLICATE KEY UPDATE created_at = created_at`,
+		userID,
+		notificationType,
+		notificationID,
+		nowMillis(),
+	); err != nil {
+		h.jsonError(c, http.StatusInternalServerError, "internal_error", "delete room notification failed")
+		return
+	}
+
+	switch notificationType {
+	case roomNotificationDeletionInvite:
+		h.publishRoomInvitesUpdated(userID)
+	case roomNotificationDeletionApplicationRequested, roomNotificationDeletionApplicationReviewed:
+		h.publishRoomApplicationsUpdated(userID)
+	case roomNotificationDeletionRoomEvent:
+		h.publishRoomNotificationsUpdated(userID)
+	}
+	c.JSON(http.StatusOK, gin.H{"ok": true})
+}
+
+func (h *Handler) roomNotificationDeleted(
+	userID, notificationType, notificationID string,
+) bool {
+	var count int
+	if err := h.DB.QueryRow(
+		`SELECT COUNT(*)
+		 FROM room_notification_deletions
+		 WHERE user_id = ? AND notification_type = ? AND notification_id = ?`,
+		userID,
+		notificationType,
+		notificationID,
+	).Scan(&count); err != nil {
+		return false
+	}
+	return count > 0
 }
 
 func (h *Handler) markRoomNotificationsRead(c *gin.Context) {

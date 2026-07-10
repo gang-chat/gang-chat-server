@@ -715,7 +715,14 @@ func (h *Handler) listRoomInvites(c *gin.Context) {
 	}
 	query := `SELECT id
 		 FROM room_invites
-		 WHERE target_user_id = ?`
+		 WHERE target_user_id = ?
+		   AND NOT EXISTS (
+			   SELECT 1
+			   FROM room_notification_deletions rnd
+			   WHERE rnd.user_id = room_invites.target_user_id
+			     AND rnd.notification_type = 'invite'
+			     AND rnd.notification_id = room_invites.id
+		   )`
 	args := []any{userID}
 	if status != "all" {
 		query += ` AND status = ?`
@@ -2052,8 +2059,10 @@ func (h *Handler) roomApplicationPayload(requestID, viewerID string) gin.H {
 
 	return gin.H{
 		"id": id, "status": status, "reason": reason, "created_at": formatMillis(createdAt), "updated_at": formatMillis(updatedAt),
-		"reviewed_at":     nullableMillis(reviewedAt),
-		"reviewer_exists": reviewerExists,
+		"reviewed_at":                  nullableMillis(reviewedAt),
+		"reviewer_exists":              reviewerExists,
+		"request_notification_deleted": h.roomNotificationDeleted(viewerID, roomNotificationDeletionApplicationRequested, id),
+		"review_notification_deleted":  h.roomNotificationDeleted(viewerID, roomNotificationDeletionApplicationReviewed, id),
 		"room": h.roomNotificationRoomPayload(
 			roomID, viewerID, rid, name, defaultAvatar, visibility, joinPolicy,
 			avatarURL, roomDescription, roomCreatedByUserID, true,
