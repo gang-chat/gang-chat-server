@@ -258,6 +258,76 @@ func (h *apiHarness) login(login, password string) testSession {
 	return testSession{Token: token, User: user}
 }
 
+func TestUsernameAvailability(t *testing.T) {
+	api := newAPIHarness(t)
+	api.register("availability_taken")
+
+	status, response := api.request(
+		http.MethodGet,
+		"/auth/username-availability?username=available_name",
+		"",
+		nil,
+	)
+	if status != http.StatusOK || response["available"] != true {
+		t.Fatalf("unused username should be available: status=%d response=%v", status, response)
+	}
+
+	status, response = api.request(
+		http.MethodGet,
+		"/auth/username-availability?username=AVAILABILITY_TAKEN",
+		"",
+		nil,
+	)
+	if status != http.StatusOK || response["available"] != false {
+		t.Fatalf("taken username should be unavailable case-insensitively: status=%d response=%v", status, response)
+	}
+
+	status, response = api.request(
+		http.MethodGet,
+		"/auth/username-availability?username=bad.name",
+		"",
+		nil,
+	)
+	if status != http.StatusBadRequest || response["error"] == nil {
+		t.Fatalf("invalid username should be rejected: status=%d response=%v", status, response)
+	}
+}
+
+func TestEmailAvailability(t *testing.T) {
+	api := newAPIHarness(t)
+	api.register("email_availability_taken")
+
+	status, response := api.request(
+		http.MethodGet,
+		"/auth/email-availability?email=available%40example.com",
+		"",
+		nil,
+	)
+	if status != http.StatusOK || response["available"] != true {
+		t.Fatalf("unused email should be available: status=%d response=%v", status, response)
+	}
+
+	status, response = api.request(
+		http.MethodGet,
+		"/auth/email-availability?email=EMAIL_AVAILABILITY_TAKEN%40EXAMPLE.COM",
+		"",
+		nil,
+	)
+	if status != http.StatusOK || response["available"] != false {
+		t.Fatalf("taken email should be unavailable case-insensitively: status=%d response=%v", status, response)
+	}
+
+	status, response = api.request(
+		http.MethodGet,
+		"/auth/email-availability?email=invalid",
+		"",
+		nil,
+	)
+	if status != http.StatusBadRequest || response["error"] == nil {
+		t.Fatalf("invalid email should be rejected: status=%d response=%v", status, response)
+	}
+}
+
 func (h *apiHarness) createRoom(token string, body map[string]any) map[string]any {
 	h.t.Helper()
 	status, response := h.request(http.MethodPost, "/rooms", token, body)

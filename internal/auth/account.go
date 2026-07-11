@@ -51,7 +51,7 @@ func (h *Handler) updateAccount(c *gin.Context) {
 
 	if req.Email != nil {
 		email := strings.TrimSpace(*req.Email)
-		if !strings.Contains(email, "@") || !strings.Contains(email, ".") || len(email) > 254 {
+		if !isValidEmail(email) {
 			errorJSON(c, http.StatusBadRequest, "validation_failed", "invalid email")
 			return
 		}
@@ -324,7 +324,7 @@ func (h *Handler) forceUpdateUserSettings(c *gin.Context) {
 	}
 	if req.Email != nil {
 		email := strings.TrimSpace(*req.Email)
-		if !strings.Contains(email, "@") || !strings.Contains(email, ".") || len(email) > 254 {
+		if !isValidEmail(email) {
 			errorJSON(c, http.StatusBadRequest, "validation_failed", "invalid email")
 			return
 		}

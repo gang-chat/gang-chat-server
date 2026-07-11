@@ -109,6 +109,24 @@ func GetUserByUsernameOrEmail(db *sql.DB, login string) (*User, error) {
 	return u, nil
 }
 
+func IsUsernameTaken(db *sql.DB, username string) (bool, error) {
+	var taken int
+	err := db.QueryRow(
+		`SELECT EXISTS(SELECT 1 FROM users WHERE username_normalized = ?)`,
+		normalize(username),
+	).Scan(&taken)
+	return taken != 0, err
+}
+
+func IsEmailTaken(db *sql.DB, email string) (bool, error) {
+	var taken int
+	err := db.QueryRow(
+		`SELECT EXISTS(SELECT 1 FROM users WHERE email_normalized = ?)`,
+		normalize(email),
+	).Scan(&taken)
+	return taken != 0, err
+}
+
 func UpdatePassword(db *sql.DB, userID, hash string) error {
 	_, err := db.Exec(`UPDATE users SET password_hash = ?, updated_at = ? WHERE id = ?`, hash, time.Now().Unix(), userID)
 	return err

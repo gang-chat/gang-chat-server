@@ -50,6 +50,8 @@ func RegisterRoutes(g *gin.RouterGroup, db *sql.DB, cfg *config.Config) {
 	auth := g.Group("/auth")
 
 	auth.POST("/register", h.register)
+	auth.GET("/username-availability", h.usernameAvailability)
+	auth.GET("/email-availability", h.emailAvailability)
 	auth.POST("/login", h.login)
 	auth.POST("/refresh", h.refresh)
 	auth.POST("/logout", h.logout)
@@ -66,6 +68,38 @@ func RegisterRoutes(g *gin.RouterGroup, db *sql.DB, cfg *config.Config) {
 	g.DELETE("/users/me/account", h.Authed(), h.deleteAccount)
 	g.PATCH("/users/:user_id/settings", h.Authed(), h.forceUpdateUserSettings)
 	g.GET("/users/search", h.Authed(), h.searchUsers)
+}
+
+func (h *Handler) usernameAvailability(c *gin.Context) {
+	username := strings.TrimSpace(c.Query("username"))
+	if !isValidUsername(username) {
+		errorJSON(c, http.StatusBadRequest, "validation_failed", "invalid username")
+		return
+	}
+
+	taken, err := model.IsUsernameTaken(h.DB, username)
+	if err != nil {
+		log.Printf("auth username availability: query failed username=%q request_id=%q: %v", username, c.GetString("request_id"), err)
+		errorJSON(c, http.StatusInternalServerError, "internal_error", "username availability failed")
+		return
+	}
+	c.JSON(http.StatusOK, AvailabilityResponse{Available: !taken})
+}
+
+func (h *Handler) emailAvailability(c *gin.Context) {
+	email := strings.TrimSpace(c.Query("email"))
+	if !isValidEmail(email) {
+		errorJSON(c, http.StatusBadRequest, "validation_failed", "invalid email")
+		return
+	}
+
+	taken, err := model.IsEmailTaken(h.DB, email)
+	if err != nil {
+		log.Printf("auth email availability: query failed email=%q request_id=%q: %v", email, c.GetString("request_id"), err)
+		errorJSON(c, http.StatusInternalServerError, "internal_error", "email availability failed")
+		return
+	}
+	c.JSON(http.StatusOK, AvailabilityResponse{Available: !taken})
 }
 
 func (h *Handler) Authed() gin.HandlerFunc {
@@ -87,7 +121,7 @@ func (h *Handler) register(c *gin.Context) {
 		errorJSON(c, http.StatusBadRequest, "bad_request", "username must be 3-32 chars, alphanumeric/underscore/hyphen")
 		return
 	}
-	if !strings.Contains(req.Email, "@") || !strings.Contains(req.Email, ".") {
+	if !isValidEmail(req.Email) {
 		errorJSON(c, http.StatusBadRequest, "bad_request", "invalid email")
 		return
 	}
@@ -388,9 +422,14 @@ func generateRefreshToken() (string, error) {
 }
 
 var usernameRegex = regexp.MustCompile(`^[a-zA-Z0-9_-]{3,32}$`)
+var emailRegex = regexp.MustCompile(`^[^\s@]+@[^\s@]+\.[^\s@]+$`)
 
 func isValidUsername(s string) bool {
 	return usernameRegex.MatchString(s)
+}
+
+func isValidEmail(s string) bool {
+	return len(s) <= 254 && emailRegex.MatchString(s)
 }
 
 func isDuplicateEntryError(err error) bool {

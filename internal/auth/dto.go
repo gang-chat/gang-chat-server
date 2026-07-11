@@ -85,6 +85,10 @@ type MessageResponse struct {
 	OK bool `json:"ok"`
 }
 
+type AvailabilityResponse struct {
+	Available bool `json:"available"`
+}
+
 type SessionResponse struct {
 	ID         string  `json:"id"`
 	UserAgent  *string `json:"user_agent"`
