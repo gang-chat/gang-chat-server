@@ -42,13 +42,19 @@ Run them on the **server**, from the deploy directory:
      "s3_force_path_style": true,
      "livekit_host": "http://localhost:7880",
      "livekit_api_key": "<key>",
-     "livekit_api_secret": "<secret>"
+     "livekit_api_secret": "<secret>",
+     "resend_api_base_url": "https://api.resend.com",
+     "resend_api_key": "<Resend API key>",
+     "email_from": "Gang Chat <no-reply@your-verified-domain.example>"
    }
    ```
 4. Asset uploads always go to S3-compatible storage. Asset reads pass through
    the backend using server-side credentials. Object keys are fixed as
    `assets/<asset_id>/<filename>`, and asset responses include fixed
    `Cache-Control`, `Expires`, `ETag`, and `Last-Modified` headers.
+   Password-reset email is enabled only when both `resend_api_key` and
+   `email_from` are configured. Keep the API key only in the server-side
+   deployment config; `email_from` must use a sender/domain accepted by Resend.
 5. (Optional) `deploy.env` for path overrides — see `deploy.env.example`.
 6. First boot: `./start.sh all`.
 

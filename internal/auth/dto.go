@@ -20,9 +20,41 @@ type LogoutRequest struct {
 }
 
 type ChangePasswordRequest struct {
-	CurrentPassword     string `json:"current_password" binding:"required"`
+	CurrentPassword     string `json:"current_password"`
 	NewPassword         string `json:"new_password" binding:"required,min=8,max=256"`
 	RevokeOtherSessions *bool  `json:"revoke_other_sessions"`
+}
+
+type StartPasswordResetRequest struct {
+	Login string `json:"login" binding:"required,max=320"`
+}
+
+type PasswordResetChallengeRequest struct {
+	ChallengeID string `json:"challenge_id" binding:"required"`
+}
+
+type VerifyPasswordResetRequest struct {
+	ChallengeID string `json:"challenge_id" binding:"required"`
+	Code        string `json:"code" binding:"required,len=6"`
+}
+
+type CompletePasswordResetRequest struct {
+	ResetToken  string `json:"reset_token" binding:"required"`
+	NewPassword string `json:"new_password" binding:"required,min=8,max=256"`
+}
+
+type ClaimPasswordResetRequest struct {
+	ResetToken string `json:"reset_token" binding:"required"`
+}
+
+type PasswordResetChallengeResponse struct {
+	ChallengeID string `json:"challenge_id"`
+	MaskedEmail string `json:"masked_email"`
+	RetryAfter  int64  `json:"retry_after"`
+}
+
+type PasswordResetVerificationResponse struct {
+	ResetToken string `json:"reset_token"`
 }
 
 type UpdateAccountRequest struct {

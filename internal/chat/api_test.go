@@ -29,13 +29,28 @@ import (
 )
 
 type apiHarness struct {
-	t      *testing.T
-	router *gin.Engine
-	db     *sql.DB
-	live   *fakeLiveController
-	bus    *eventbus.Bus
-	assets *storage.AssetStorage
-	cfg    *config.Config
+	t                  *testing.T
+	router             *gin.Engine
+	db                 *sql.DB
+	live               *fakeLiveController
+	bus                *eventbus.Bus
+	assets             *storage.AssetStorage
+	cfg                *config.Config
+	passwordResetEmail *fakePasswordResetEmailSender
+}
+
+type sentPasswordResetEmail struct {
+	to   string
+	code string
+}
+
+type fakePasswordResetEmailSender struct {
+	sent []sentPasswordResetEmail
+}
+
+func (f *fakePasswordResetEmailSender) SendPasswordResetCode(_ context.Context, to, code string) error {
+	f.sent = append(f.sent, sentPasswordResetEmail{to: to, code: code})
+	return nil
 }
 
 // fakeLiveController records the LiveKit media-control calls moderation makes,
@@ -103,7 +118,9 @@ func newAPIHarness(t *testing.T) *apiHarness {
 
 	router := gin.New()
 	api := router.Group("/api/v1")
-	auth.RegisterRoutes(api, pool, cfg)
+	authHandler := auth.RegisterRoutes(api, pool, cfg)
+	passwordResetEmail := &fakePasswordResetEmailSender{}
+	authHandler.PasswordResetEmailSender = passwordResetEmail
 
 	authMW := &auth.AuthMiddleware{DB: pool, JWTSecret: cfg.JWTSecret}
 	chatGroup := api.Group("")
@@ -114,13 +131,14 @@ func newAPIHarness(t *testing.T) *apiHarness {
 	RegisterRoutes(chatGroup, pool, cfg, bus, live, nil, assetStore)
 
 	return &apiHarness{
-		t:      t,
-		router: router,
-		db:     pool,
-		live:   live,
-		bus:    bus,
-		assets: assetStore,
-		cfg:    cfg,
+		t:                  t,
+		router:             router,
+		db:                 pool,
+		live:               live,
+		bus:                bus,
+		assets:             assetStore,
+		cfg:                cfg,
+		passwordResetEmail: passwordResetEmail,
 	}
 }
 
@@ -325,6 +343,99 @@ func TestEmailAvailability(t *testing.T) {
 	)
 	if status != http.StatusBadRequest || response["error"] == nil {
 		t.Fatalf("invalid email should be rejected: status=%d response=%v", status, response)
+	}
+}
+
+func TestPasswordResetFlow(t *testing.T) {
+	api := newAPIHarness(t)
+	api.register("password_reset_user")
+
+	status, response := api.request(http.MethodPost, "/auth/password-reset/start", "", map[string]any{
+		"login": "missing_password_reset_user",
+	})
+	if status != http.StatusNotFound || response["error"].(map[string]any)["code"] != "account_not_found" {
+		t.Fatalf("missing account should be explicit: status=%d response=%v", status, response)
+	}
+
+	status, response = api.request(http.MethodPost, "/auth/password-reset/start", "", map[string]any{
+		"login": "password_reset_user",
+	})
+	api.requireStatus(status, http.StatusOK, response)
+	challengeID, _ := response["challenge_id"].(string)
+	if challengeID == "" || response["masked_email"] != "pr***@example.com" {
+		t.Fatalf("unexpected challenge response: %v", response)
+	}
+	if len(api.passwordResetEmail.sent) != 1 {
+		t.Fatalf("want one email, got %d", len(api.passwordResetEmail.sent))
+	}
+
+	status, repeated := api.request(http.MethodPost, "/auth/password-reset/start", "", map[string]any{
+		"login": "password_reset_user@example.com",
+	})
+	api.requireStatus(status, http.StatusOK, repeated)
+	if repeated["challenge_id"] != challengeID || len(api.passwordResetEmail.sent) != 1 {
+		t.Fatalf("cooldown should reuse the sent challenge: response=%v emails=%d", repeated, len(api.passwordResetEmail.sent))
+	}
+
+	status, response = api.request(http.MethodPost, "/auth/password-reset/verify", "", map[string]any{
+		"challenge_id": challengeID,
+		"code":         api.passwordResetEmail.sent[0].code,
+	})
+	api.requireStatus(status, http.StatusOK, response)
+	resetToken, _ := response["reset_token"].(string)
+	if resetToken == "" {
+		t.Fatalf("verification response missing reset token: %v", response)
+	}
+
+	status, response = api.request(http.MethodPost, "/auth/password-reset/complete", "", map[string]any{
+		"reset_token":  resetToken,
+		"new_password": "new correct horse battery staple",
+	})
+	api.requireStatus(status, http.StatusOK, response)
+
+	status, _ = api.request(http.MethodPost, "/auth/login", "", map[string]any{
+		"login": "password_reset_user", "password": "correct horse battery staple",
+	})
+	if status != http.StatusUnauthorized {
+		t.Fatalf("old password should no longer work, got %d", status)
+	}
+	api.login("password_reset_user", "new correct horse battery staple")
+}
+
+func TestPasswordResetSessionGrantEndsWhenEmailChanges(t *testing.T) {
+	api := newAPIHarness(t)
+	user := api.register("password_reset_grant_user")
+
+	status, response := api.request(http.MethodPost, "/auth/password-reset/start", "", map[string]any{
+		"login": "password_reset_grant_user",
+	})
+	api.requireStatus(status, http.StatusOK, response)
+	challengeID := response["challenge_id"].(string)
+	code := api.passwordResetEmail.sent[0].code
+	status, response = api.request(http.MethodPost, "/auth/password-reset/verify", "", map[string]any{
+		"challenge_id": challengeID, "code": code,
+	})
+	api.requireStatus(status, http.StatusOK, response)
+	resetToken := response["reset_token"].(string)
+	status, response = api.request(http.MethodPost, "/auth/password-reset/claim", user.Token, map[string]any{
+		"reset_token": resetToken,
+	})
+	api.requireStatus(status, http.StatusOK, response)
+
+	status, response = api.request(http.MethodPost, "/auth/password", user.Token, map[string]any{
+		"current_password": "", "new_password": "verified password one",
+	})
+	api.requireStatus(status, http.StatusOK, response)
+
+	status, response = api.request(http.MethodPatch, "/users/me/account", user.Token, map[string]any{
+		"email": "password_reset_grant_changed@example.com",
+	})
+	api.requireStatus(status, http.StatusOK, response)
+	status, response = api.request(http.MethodPost, "/auth/password", user.Token, map[string]any{
+		"current_password": "", "new_password": "verified password two",
+	})
+	if status != http.StatusUnauthorized {
+		t.Fatalf("email change should invalidate grant: status=%d response=%v", status, response)
 	}
 }
 

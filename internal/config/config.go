@@ -45,6 +45,10 @@ type Config struct {
 
 	QQMusicBaseURL  string `json:"qqmusic_base_url"`
 	QQMusicPassword string `json:"qqmusic_password"`
+
+	ResendAPIBaseURL string `json:"resend_api_base_url"`
+	ResendAPIKey     string `json:"resend_api_key"`
+	EmailFrom        string `json:"email_from"`
 }
 
 func parseList(value string) []string {
@@ -93,6 +97,9 @@ func Load() *Config {
 	flag.StringVar(&cfg.MusicBoxOpusBitrate, "music-box-opus-bitrate", cfg.MusicBoxOpusBitrate, "Opus bitrate for broadcast transcode, e.g. 128k")
 	flag.IntVar(&cfg.MusicBoxTranscodeWorkers, "music-box-transcode-workers", cfg.MusicBoxTranscodeWorkers, "max concurrent transcode jobs")
 	flag.StringVar(&cfg.MusicBoxDownloadBitrate, "music-box-download-bitrate", cfg.MusicBoxDownloadBitrate, "GD download quality (128/192/320/740/999)")
+	flag.StringVar(&cfg.ResendAPIBaseURL, "resend-api-base-url", cfg.ResendAPIBaseURL, "Resend API base URL")
+	flag.StringVar(&cfg.ResendAPIKey, "resend-api-key", cfg.ResendAPIKey, "Resend API key")
+	flag.StringVar(&cfg.EmailFrom, "email-from", cfg.EmailFrom, "sender used for account emails")
 	flag.StringVar(&trustedProxies, "trusted-proxies", trustedProxies, "comma-separated trusted proxy IPs/CIDRs")
 	allowedOrigins := strings.Join(cfg.AllowedOrigins, ",")
 	flag.StringVar(&allowedOrigins, "allowed-origins", allowedOrigins, "comma-separated allowed CORS origins, or * for any")

@@ -28,6 +28,10 @@
   "music_box_transcode_workers": 3,
   "music_box_download_bitrate": "192",
 
+  "resend_api_base_url": "https://api.resend.com",
+  "resend_api_key": "",
+  "email_from": "",
+
   "qqmusic_base_url": "http://103.47.83.189:12345",
   "qqmusic_password": "REPLACE_WITH_QQMUSIC_PASSWORD"
 }

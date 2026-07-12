@@ -19,10 +19,11 @@ import (
 )
 
 type Handler struct {
-	DB               *sql.DB
-	Cfg              *config.Config
-	Limit            *RateLimiter
-	LocationResolver *SessionLocationResolver
+	DB                       *sql.DB
+	Cfg                      *config.Config
+	Limit                    *RateLimiter
+	LocationResolver         *SessionLocationResolver
+	PasswordResetEmailSender PasswordResetEmailSender
 }
 
 func NewHandler(db *sql.DB, cfg *config.Config) *Handler {
@@ -35,16 +36,20 @@ func NewHandler(db *sql.DB, cfg *config.Config) *Handler {
 		locationResolver = &SessionLocationResolver{}
 	}
 	return &Handler{
-		DB:               db,
-		Cfg:              cfg,
-		Limit:            NewRateLimiter(cfg.LoginMaxAttempts, cfg.LoginWindowSeconds),
-		LocationResolver: locationResolver,
+		DB:                       db,
+		Cfg:                      cfg,
+		Limit:                    NewRateLimiter(cfg.LoginMaxAttempts, cfg.LoginWindowSeconds),
+		LocationResolver:         locationResolver,
+		PasswordResetEmailSender: newPasswordResetEmailSender(cfg),
 	}
 }
 
-func RegisterRoutes(g *gin.RouterGroup, db *sql.DB, cfg *config.Config) {
+func RegisterRoutes(g *gin.RouterGroup, db *sql.DB, cfg *config.Config) *Handler {
 	h := NewHandler(db, cfg)
 	if err := h.ensureSuperUser(); err != nil {
+		panic(err)
+	}
+	if err := h.ensurePasswordResetSchema(); err != nil {
 		panic(err)
 	}
 	auth := g.Group("/auth")
@@ -55,6 +60,11 @@ func RegisterRoutes(g *gin.RouterGroup, db *sql.DB, cfg *config.Config) {
 	auth.POST("/login", h.login)
 	auth.POST("/refresh", h.refresh)
 	auth.POST("/logout", h.logout)
+	auth.POST("/password-reset/start", h.startPasswordReset)
+	auth.POST("/password-reset/resend", h.resendPasswordResetCode)
+	auth.POST("/password-reset/verify", h.verifyPasswordResetCode)
+	auth.POST("/password-reset/complete", h.completePasswordReset)
+	auth.POST("/password-reset/claim", h.Authed(), h.claimPasswordResetForSession)
 	g.GET("/me", h.Authed(), h.me)
 	auth.GET("/me", h.Authed(), h.me)
 	auth.POST("/password", h.Authed(), h.changePassword)
@@ -68,6 +78,7 @@ func RegisterRoutes(g *gin.RouterGroup, db *sql.DB, cfg *config.Config) {
 	g.DELETE("/users/me/account", h.Authed(), h.deleteAccount)
 	g.PATCH("/users/:user_id/settings", h.Authed(), h.forceUpdateUserSettings)
 	g.GET("/users/search", h.Authed(), h.searchUsers)
+	return h
 }
 
 func (h *Handler) usernameAvailability(c *gin.Context) {
@@ -301,10 +312,22 @@ func (h *Handler) changePassword(c *gin.Context) {
 		return
 	}
 
-	ok, err := VerifyPassword(req.CurrentPassword, *user.PasswordHash)
-	if err != nil || !ok {
-		errorJSON(c, http.StatusUnauthorized, "unauthorized", "current password incorrect")
-		return
+	if req.CurrentPassword == "" {
+		granted, err := h.hasPasswordResetGrant(getSessionID(c), user)
+		if err != nil {
+			errorJSON(c, http.StatusInternalServerError, "internal_error", "password reset grant check failed")
+			return
+		}
+		if !granted {
+			errorJSON(c, http.StatusUnauthorized, "password_reset_verification_required", "请先验证绑定邮箱")
+			return
+		}
+	} else {
+		ok, err := VerifyPassword(req.CurrentPassword, *user.PasswordHash)
+		if err != nil || !ok {
+			errorJSON(c, http.StatusUnauthorized, "unauthorized", "current password incorrect")
+			return
+		}
 	}
 
 	newHash, err := HashPassword(req.NewPassword)
