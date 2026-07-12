@@ -288,6 +288,33 @@ func (h *apiHarness) register(username string) testSession {
 	return testSession{Token: token, User: user}
 }
 
+func (h *apiHarness) verifyEmail(email string) string {
+	h.t.Helper()
+	status, response := h.request(http.MethodPost, "/auth/email-verification/inspect", "", map[string]any{
+		"email": email,
+	})
+	h.requireStatus(status, http.StatusOK, response)
+	status, response = h.request(http.MethodPost, "/auth/email-verification/start", "", map[string]any{
+		"email": email,
+	})
+	h.requireStatus(status, http.StatusOK, response)
+	challengeID, _ := response["challenge_id"].(string)
+	if challengeID == "" || len(h.verificationEmail.registrationSent) == 0 {
+		h.t.Fatalf("email verification did not send a code: %v", response)
+	}
+	code := h.verificationEmail.registrationSent[len(h.verificationEmail.registrationSent)-1].code
+	status, response = h.request(http.MethodPost, "/auth/email-verification/verify", "", map[string]any{
+		"challenge_id": challengeID,
+		"code":         code,
+	})
+	h.requireStatus(status, http.StatusOK, response)
+	token, _ := response["verification_token"].(string)
+	if token == "" {
+		h.t.Fatalf("email verification response missing token: %v", response)
+	}
+	return token
+}
+
 func (h *apiHarness) login(login, password string) testSession {
 	h.t.Helper()
 	status, response := h.request(http.MethodPost, "/auth/login", "", map[string]any{
@@ -522,8 +549,11 @@ func TestPasswordResetSessionGrantEndsWhenEmailChanges(t *testing.T) {
 	})
 	api.requireStatus(status, http.StatusOK, response)
 
+	changedEmail := "password_reset_grant_changed@example.com"
+	verificationToken := api.verifyEmail(changedEmail)
 	status, response = api.request(http.MethodPatch, "/users/me/account", user.Token, map[string]any{
-		"email": "password_reset_grant_changed@example.com",
+		"email":                    changedEmail,
+		"email_verification_token": verificationToken,
 	})
 	api.requireStatus(status, http.StatusOK, response)
 	status, response = api.request(http.MethodPost, "/auth/password", user.Token, map[string]any{
@@ -531,6 +561,74 @@ func TestPasswordResetSessionGrantEndsWhenEmailChanges(t *testing.T) {
 	})
 	if status != http.StatusUnauthorized {
 		t.Fatalf("email change should invalidate grant: status=%d response=%v", status, response)
+	}
+}
+
+func TestAccountEmailChangeRequiresVerification(t *testing.T) {
+	api := newAPIHarness(t)
+	user := api.register("account_email_verification_user")
+	changedEmail := "account_email_verification_changed@example.com"
+
+	status, response := api.request(http.MethodPatch, "/users/me/account", user.Token, map[string]any{
+		"email": changedEmail,
+	})
+	errorBody, _ := response["error"].(map[string]any)
+	if status != http.StatusBadRequest || errorBody["code"] != "email_verification_required" {
+		t.Fatalf("unverified email change should fail: status=%d response=%v", status, response)
+	}
+
+	verificationToken := api.verifyEmail(changedEmail)
+	status, response = api.request(http.MethodPatch, "/users/me/account", user.Token, map[string]any{
+		"email":                    changedEmail,
+		"email_verification_token": verificationToken,
+	})
+	api.requireStatus(status, http.StatusOK, response)
+	updated := response["user"].(map[string]any)
+	if updated["email"] != changedEmail || updated["email_verified"] != true {
+		t.Fatalf("verified email should be persisted as verified: %v", updated)
+	}
+}
+
+func TestCurrentAccountCanVerifyItsExistingEmail(t *testing.T) {
+	api := newAPIHarness(t)
+	user := api.register("existing_email_verification_user")
+	userID := user.User["id"].(string)
+	email := user.User["email"].(string)
+	if _, err := api.db.Exec(`UPDATE users SET email_verified = 0 WHERE id = ?`, userID); err != nil {
+		t.Fatalf("mark existing email unverified: %v", err)
+	}
+
+	status, response := api.request(http.MethodPost, "/auth/email-verification/inspect", "", map[string]any{
+		"email": email,
+	})
+	if status != http.StatusConflict {
+		t.Fatalf("public registration verification should still reject a bound email: status=%d response=%v", status, response)
+	}
+
+	status, response = api.request(http.MethodPost, "/users/me/email-verification/inspect", user.Token, map[string]any{
+		"email": email,
+	})
+	api.requireStatus(status, http.StatusOK, response)
+	status, response = api.request(http.MethodPost, "/users/me/email-verification/start", user.Token, map[string]any{
+		"email": email,
+	})
+	api.requireStatus(status, http.StatusOK, response)
+	challengeID := response["challenge_id"].(string)
+	code := api.verificationEmail.registrationSent[len(api.verificationEmail.registrationSent)-1].code
+	status, response = api.request(http.MethodPost, "/auth/email-verification/verify", "", map[string]any{
+		"challenge_id": challengeID,
+		"code":         code,
+	})
+	api.requireStatus(status, http.StatusOK, response)
+	verificationToken := response["verification_token"].(string)
+	status, response = api.request(http.MethodPatch, "/users/me/account", user.Token, map[string]any{
+		"email":                    email,
+		"email_verification_token": verificationToken,
+	})
+	api.requireStatus(status, http.StatusOK, response)
+	updated := response["user"].(map[string]any)
+	if updated["email_verified"] != true {
+		t.Fatalf("existing email should become verified: %v", updated)
 	}
 }
 

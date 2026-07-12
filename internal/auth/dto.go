@@ -94,12 +94,13 @@ type PasswordResetVerificationResponse struct {
 }
 
 type UpdateAccountRequest struct {
-	Username          *string `json:"username"`
-	Email             *string `json:"email"`
-	EmailPublic       *bool   `json:"email_public"`
-	PhoneNumber       *string `json:"phone_number"`
-	PhoneNumberPublic *bool   `json:"phone_number_public"`
-	Language          *string `json:"language"`
+	Username               *string `json:"username"`
+	Email                  *string `json:"email"`
+	EmailVerificationToken *string `json:"email_verification_token"`
+	EmailPublic            *bool   `json:"email_public"`
+	PhoneNumber            *string `json:"phone_number"`
+	PhoneNumberPublic      *bool   `json:"phone_number_public"`
+	Language               *string `json:"language"`
 }
 
 type UpdateProfileRequest struct {

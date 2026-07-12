@@ -2,6 +2,8 @@ package auth
 
 import (
 	"database/sql"
+	"errors"
+	"log"
 	"net/http"
 	"strings"
 	"time"
@@ -32,6 +34,8 @@ func (h *Handler) updateAccount(c *gin.Context) {
 	now := time.Now().Unix()
 	sets := []string{"updated_at = ?"}
 	args := []any{now}
+	var verificationEmailNormalized string
+	var verificationToken string
 
 	if req.Username != nil {
 		username := strings.TrimSpace(*req.Username)
@@ -55,8 +59,18 @@ func (h *Handler) updateAccount(c *gin.Context) {
 			errorJSON(c, http.StatusBadRequest, "validation_failed", "invalid email")
 			return
 		}
-		sets = append(sets, "email = ?", "email_normalized = ?", "email_verified = 0")
-		args = append(args, email, strings.ToLower(email))
+		emailNormalized := strings.ToLower(email)
+		sets = append(sets, "email = ?", "email_normalized = ?")
+		args = append(args, email, emailNormalized)
+		if emailNormalized != user.EmailNormalized || !user.EmailVerified {
+			if req.EmailVerificationToken == nil || strings.TrimSpace(*req.EmailVerificationToken) == "" {
+				errorJSON(c, http.StatusBadRequest, "email_verification_required", "请先验证邮箱")
+				return
+			}
+			verificationEmailNormalized = emailNormalized
+			verificationToken = strings.TrimSpace(*req.EmailVerificationToken)
+			sets = append(sets, "email_verified = 1")
+		}
 	}
 
 	if req.EmailPublic != nil {
@@ -94,13 +108,47 @@ func (h *Handler) updateAccount(c *gin.Context) {
 		args = append(args, language)
 	}
 
+	tx, err := h.DB.Begin()
+	if err != nil {
+		errorJSON(c, http.StatusInternalServerError, "internal_error", "account update failed")
+		return
+	}
+	defer tx.Rollback()
+	if verificationEmailNormalized != "" {
+		err = consumeEmailVerification(
+			tx,
+			verificationEmailNormalized,
+			verificationToken,
+			time.Now().Unix(),
+		)
+		if errors.Is(err, sql.ErrNoRows) {
+			errorJSON(c, http.StatusBadRequest, "email_verification_required", "请先验证邮箱")
+			return
+		}
+		if err != nil {
+			log.Printf(
+				"auth account update: verify email token failed user_id=%q email=%q request_id=%q: %v",
+				user.ID,
+				verificationEmailNormalized,
+				c.GetString("request_id"),
+				err,
+			)
+			errorJSON(c, http.StatusInternalServerError, "internal_error", "email verification failed")
+			return
+		}
+	}
+
 	args = append(args, user.ID)
-	_, err := h.DB.Exec(`UPDATE users SET `+strings.Join(sets, ", ")+` WHERE id = ?`, args...)
+	_, err = tx.Exec(`UPDATE users SET `+strings.Join(sets, ", ")+` WHERE id = ?`, args...)
 	if err != nil {
 		if strings.Contains(err.Error(), "UNIQUE constraint failed") {
 			errorJSON(c, http.StatusConflict, "conflict", "username, email or phone number already taken")
 			return
 		}
+		errorJSON(c, http.StatusInternalServerError, "internal_error", "account update failed")
+		return
+	}
+	if err = tx.Commit(); err != nil {
 		errorJSON(c, http.StatusInternalServerError, "internal_error", "account update failed")
 		return
 	}

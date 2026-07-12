@@ -316,8 +316,16 @@ func (h *Handler) availableRegistrationEmail(c *gin.Context) (string, string, bo
 		return "", "", false
 	}
 	if taken {
-		errorJSON(c, http.StatusConflict, "conflict", "该邮箱已被其他用户使用")
-		return "", "", false
+		userID := getUserID(c)
+		if userID == "" {
+			errorJSON(c, http.StatusConflict, "conflict", "该邮箱已被其他用户使用")
+			return "", "", false
+		}
+		user, err := model.GetUserByID(h.DB, userID)
+		if err != nil || user.EmailNormalized != model.Normalize(email) {
+			errorJSON(c, http.StatusConflict, "conflict", "该邮箱已被其他用户使用")
+			return "", "", false
+		}
 	}
 	return email, model.Normalize(email), true
 }

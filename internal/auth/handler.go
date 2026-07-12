@@ -81,6 +81,8 @@ func RegisterRoutes(g *gin.RouterGroup, db *sql.DB, cfg *config.Config) *Handler
 	auth.DELETE("/sessions/:id", h.Authed(), h.revokeSession)
 
 	g.PATCH("/users/me/account", h.Authed(), h.updateAccount)
+	g.POST("/users/me/email-verification/inspect", h.Authed(), h.inspectEmailVerification)
+	g.POST("/users/me/email-verification/start", h.Authed(), h.startEmailVerification)
 	g.PATCH("/users/me/profile", h.Authed(), h.updateProfile)
 	g.GET("/users/me/audio-settings", h.Authed(), h.getAudioSettings)
 	g.PATCH("/users/me/audio-settings", h.Authed(), h.updateAudioSettings)
