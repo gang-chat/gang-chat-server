@@ -102,7 +102,7 @@ func (h *Handler) inspectPasswordReset(c *gin.Context) {
 	if !ok {
 		return
 	}
-	if h.PasswordResetEmailSender == nil {
+	if h.VerificationEmailSender == nil {
 		errorJSON(c, http.StatusServiceUnavailable, "email_unavailable", "邮件发送服务尚未配置")
 		return
 	}
@@ -150,7 +150,7 @@ func (h *Handler) startPasswordReset(c *gin.Context) {
 	if !ok {
 		return
 	}
-	if h.PasswordResetEmailSender == nil {
+	if h.VerificationEmailSender == nil {
 		errorJSON(c, http.StatusServiceUnavailable, "email_unavailable", "邮件发送服务尚未配置")
 		return
 	}
@@ -211,7 +211,7 @@ func (h *Handler) startPasswordReset(c *gin.Context) {
 		errorJSON(c, http.StatusInternalServerError, "internal_error", "暂时无法发送验证码")
 		return
 	}
-	if err := h.PasswordResetEmailSender.SendPasswordResetCode(c.Request.Context(), user.Email, code); err != nil {
+	if err := h.VerificationEmailSender.SendPasswordResetCode(c.Request.Context(), user.Email, code); err != nil {
 		log.Printf("password reset start: email failed user_id=%q request_id=%q: %v", user.ID, c.GetString("request_id"), err)
 		errorJSON(c, http.StatusServiceUnavailable, "email_send_failed", "验证码发送失败，请稍后重试")
 		return
@@ -245,7 +245,7 @@ func (h *Handler) resendPasswordResetCode(c *gin.Context) {
 		errorJSON(c, http.StatusInternalServerError, "internal_error", "暂时无法重新发送验证码")
 		return
 	}
-	if h.PasswordResetEmailSender == nil {
+	if h.VerificationEmailSender == nil {
 		errorJSON(c, http.StatusServiceUnavailable, "email_unavailable", "邮件发送服务尚未配置")
 		return
 	}
@@ -290,7 +290,7 @@ func (h *Handler) resendPasswordResetCode(c *gin.Context) {
 	challenge.CodeHash = h.passwordResetCodeHash(challenge.ID, code)
 	challenge.ExpiresAt = nowTime.Add(passwordResetCodeTTL).Unix()
 	challenge.ResendAvailableAt = nowTime.Add(passwordResetResendDelay).Unix()
-	if err := h.PasswordResetEmailSender.SendPasswordResetCode(c.Request.Context(), challenge.Email, code); err != nil {
+	if err := h.VerificationEmailSender.SendPasswordResetCode(c.Request.Context(), challenge.Email, code); err != nil {
 		log.Printf("password reset resend: email failed challenge_id=%q: %v", challenge.ID, err)
 		errorJSON(c, http.StatusServiceUnavailable, "email_send_failed", "验证码发送失败，请稍后重试")
 		return

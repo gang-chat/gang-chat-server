@@ -15,15 +15,16 @@ import (
 	"github.com/go-sql-driver/mysql"
 	"github.com/google/uuid"
 	"github.com/zhuangkaiyi/gang-chat/server/internal/config"
+	"github.com/zhuangkaiyi/gang-chat/server/internal/idgen"
 	"github.com/zhuangkaiyi/gang-chat/server/internal/model"
 )
 
 type Handler struct {
-	DB                       *sql.DB
-	Cfg                      *config.Config
-	Limit                    *RateLimiter
-	LocationResolver         *SessionLocationResolver
-	PasswordResetEmailSender PasswordResetEmailSender
+	DB                      *sql.DB
+	Cfg                     *config.Config
+	Limit                   *RateLimiter
+	LocationResolver        *SessionLocationResolver
+	VerificationEmailSender VerificationEmailSender
 }
 
 func NewHandler(db *sql.DB, cfg *config.Config) *Handler {
@@ -36,11 +37,11 @@ func NewHandler(db *sql.DB, cfg *config.Config) *Handler {
 		locationResolver = &SessionLocationResolver{}
 	}
 	return &Handler{
-		DB:                       db,
-		Cfg:                      cfg,
-		Limit:                    NewRateLimiter(cfg.LoginMaxAttempts, cfg.LoginWindowSeconds),
-		LocationResolver:         locationResolver,
-		PasswordResetEmailSender: newPasswordResetEmailSender(cfg),
+		DB:                      db,
+		Cfg:                     cfg,
+		Limit:                   NewRateLimiter(cfg.LoginMaxAttempts, cfg.LoginWindowSeconds),
+		LocationResolver:        locationResolver,
+		VerificationEmailSender: newVerificationEmailSender(cfg),
 	}
 }
 
@@ -52,9 +53,16 @@ func RegisterRoutes(g *gin.RouterGroup, db *sql.DB, cfg *config.Config) *Handler
 	if err := h.ensurePasswordResetSchema(); err != nil {
 		panic(err)
 	}
+	if err := h.ensureEmailVerificationSchema(); err != nil {
+		panic(err)
+	}
 	auth := g.Group("/auth")
 
 	auth.POST("/register", h.register)
+	auth.POST("/email-verification/inspect", h.inspectEmailVerification)
+	auth.POST("/email-verification/start", h.startEmailVerification)
+	auth.POST("/email-verification/resend", h.resendEmailVerificationCode)
+	auth.POST("/email-verification/verify", h.verifyEmailVerificationCode)
 	auth.GET("/username-availability", h.usernameAvailability)
 	auth.GET("/email-availability", h.emailAvailability)
 	auth.POST("/login", h.login)
@@ -145,16 +153,35 @@ func (h *Handler) register(c *gin.Context) {
 	}
 
 	id := uuid.New().String()
-	usernameNorm := strings.ToLower(req.Username)
-	emailNorm := strings.ToLower(req.Email)
-
-	_, err = model.CreateUser(h.DB, id, req.Username, usernameNorm, req.Email, emailNorm, hash)
+	usernameNorm := model.Normalize(req.Username)
+	emailNorm := model.Normalize(req.Email)
+	uid := idgen.NextUserUID(h.DB)
+	tx, err := h.DB.Begin()
+	if err != nil {
+		errorJSON(c, http.StatusInternalServerError, "internal_error", "create user failed")
+		return
+	}
+	defer tx.Rollback()
+	if err = consumeEmailVerification(tx, emailNorm, req.EmailVerificationToken, time.Now().Unix()); errors.Is(err, sql.ErrNoRows) {
+		errorJSON(c, http.StatusBadRequest, "email_verification_required", "请先验证邮箱")
+		return
+	} else if err != nil {
+		log.Printf("auth register: verify email token failed email=%q request_id=%q: %v", req.Email, c.GetString("request_id"), err)
+		errorJSON(c, http.StatusInternalServerError, "internal_error", "email verification failed")
+		return
+	}
+	err = model.InsertUser(tx, id, uid, req.Username, usernameNorm, req.Email, emailNorm, hash)
 	if err != nil {
 		if isDuplicateEntryError(err) {
 			errorJSON(c, http.StatusConflict, "conflict", "username or email already taken")
 			return
 		}
 		log.Printf("auth register: create user failed username=%q email=%q request_id=%q: %v", req.Username, req.Email, c.GetString("request_id"), err)
+		errorJSON(c, http.StatusInternalServerError, "internal_error", "create user failed")
+		return
+	}
+	if err = tx.Commit(); err != nil {
+		log.Printf("auth register: commit failed username=%q email=%q request_id=%q: %v", req.Username, req.Email, c.GetString("request_id"), err)
 		errorJSON(c, http.StatusInternalServerError, "internal_error", "create user failed")
 		return
 	}

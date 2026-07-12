@@ -35,7 +35,7 @@ func TestPasswordResetHelpers(t *testing.T) {
 	}
 }
 
-func TestResendPasswordResetEmailSender(t *testing.T) {
+func TestResendVerificationEmailSender(t *testing.T) {
 	var authorization string
 	var payload map[string]any
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -51,7 +51,7 @@ func TestResendPasswordResetEmailSender(t *testing.T) {
 	}))
 	defer server.Close()
 
-	sender := newPasswordResetEmailSender(&config.Config{
+	sender := newVerificationEmailSender(&config.Config{
 		ResendAPIBaseURL: server.URL,
 		ResendAPIKey:     "resend-key",
 		EmailFrom:        "Gang Chat <no-reply@example.com>",
@@ -85,5 +85,16 @@ func TestResendPasswordResetEmailSender(t *testing.T) {
 	logoBytes, err := base64.StdEncoding.DecodeString(logo["content"].(string))
 	if err != nil || !bytes.HasPrefix(logoBytes, []byte("\x89PNG\r\n\x1a\n")) {
 		t.Fatalf("inline logo is not a valid PNG: %v", err)
+	}
+
+	if err := sender.SendRegistrationVerificationCode(context.Background(), "kai@example.com", "654321"); err != nil {
+		t.Fatal(err)
+	}
+	if payload["subject"] != "Gang Chat｜邮箱验证码" {
+		t.Fatalf("unexpected registration subject: %v", payload["subject"])
+	}
+	htmlBody, _ = payload["html"].(string)
+	if !strings.Contains(htmlBody, "验证您的邮箱") || !strings.Contains(htmlBody, "654321") {
+		t.Fatalf("registration email HTML is incorrect: %s", htmlBody)
 	}
 }

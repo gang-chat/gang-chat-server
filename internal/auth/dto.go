@@ -1,9 +1,38 @@
 package auth
 
 type RegisterRequest struct {
-	Username string `json:"username" binding:"required"`
-	Email    string `json:"email" binding:"required,email"`
-	Password string `json:"password" binding:"required,min=8,max=256"`
+	Username               string `json:"username" binding:"required"`
+	Email                  string `json:"email" binding:"required,email"`
+	Password               string `json:"password" binding:"required,min=8,max=256"`
+	EmailVerificationToken string `json:"email_verification_token" binding:"required"`
+}
+
+type EmailVerificationRequest struct {
+	Email string `json:"email" binding:"required,email,max=254"`
+}
+
+type EmailVerificationChallengeRequest struct {
+	ChallengeID string `json:"challenge_id" binding:"required"`
+}
+
+type VerifyEmailVerificationRequest struct {
+	ChallengeID string `json:"challenge_id" binding:"required"`
+	Code        string `json:"code" binding:"required,len=6"`
+}
+
+type EmailVerificationChallengeResponse struct {
+	ChallengeID string `json:"challenge_id"`
+	RetryAfter  int64  `json:"retry_after"`
+}
+
+type EmailVerificationInspectionResponse struct {
+	CanSend     bool    `json:"can_send"`
+	ChallengeID *string `json:"challenge_id,omitempty"`
+	RetryAfter  int64   `json:"retry_after"`
+}
+
+type EmailVerificationResponse struct {
+	VerificationToken string `json:"verification_token"`
 }
 
 type LoginRequest struct {

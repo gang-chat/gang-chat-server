@@ -35,9 +35,20 @@ type User struct {
 }
 
 func CreateUser(db *sql.DB, id, username, usernameNorm, email, emailNorm, passwordHash string) (*User, error) {
-	now := time.Now().Unix()
 	uid := idgen.NextUserUID(db)
-	_, err := db.Exec(
+	if err := InsertUser(db, id, uid, username, usernameNorm, email, emailNorm, passwordHash); err != nil {
+		return nil, err
+	}
+	return GetUserByID(db, id)
+}
+
+type UserExecer interface {
+	Exec(query string, args ...any) (sql.Result, error)
+}
+
+func InsertUser(execer UserExecer, id, uid, username, usernameNorm, email, emailNorm, passwordHash string) error {
+	now := time.Now().Unix()
+	_, err := execer.Exec(
 		`INSERT INTO users (
 		   id, uid, username, username_normalized, email, email_normalized, password_hash,
 		   status, display_name, bio, gender, default_avatar_key, email_verified, language, username_updated_at,
@@ -45,10 +56,7 @@ func CreateUser(db *sql.DB, id, username, usernameNorm, email, emailNorm, passwo
 		 ) VALUES (?, ?, ?, ?, ?, ?, ?, 'active', ?, '', 'secret', 'blue-3', 1, 'zh-Hans', ?, ?, ?)`,
 		id, uid, username, usernameNorm, email, emailNorm, passwordHash, username, now, now, now,
 	)
-	if err != nil {
-		return nil, err
-	}
-	return GetUserByID(db, id)
+	return err
 }
 
 func GetUserByID(db *sql.DB, id string) (*User, error) {

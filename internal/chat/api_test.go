@@ -29,14 +29,14 @@ import (
 )
 
 type apiHarness struct {
-	t                  *testing.T
-	router             *gin.Engine
-	db                 *sql.DB
-	live               *fakeLiveController
-	bus                *eventbus.Bus
-	assets             *storage.AssetStorage
-	cfg                *config.Config
-	passwordResetEmail *fakePasswordResetEmailSender
+	t                 *testing.T
+	router            *gin.Engine
+	db                *sql.DB
+	live              *fakeLiveController
+	bus               *eventbus.Bus
+	assets            *storage.AssetStorage
+	cfg               *config.Config
+	verificationEmail *fakeVerificationEmailSender
 }
 
 type sentPasswordResetEmail struct {
@@ -44,12 +44,18 @@ type sentPasswordResetEmail struct {
 	code string
 }
 
-type fakePasswordResetEmailSender struct {
-	sent []sentPasswordResetEmail
+type fakeVerificationEmailSender struct {
+	sent             []sentPasswordResetEmail
+	registrationSent []sentPasswordResetEmail
 }
 
-func (f *fakePasswordResetEmailSender) SendPasswordResetCode(_ context.Context, to, code string) error {
+func (f *fakeVerificationEmailSender) SendPasswordResetCode(_ context.Context, to, code string) error {
 	f.sent = append(f.sent, sentPasswordResetEmail{to: to, code: code})
+	return nil
+}
+
+func (f *fakeVerificationEmailSender) SendRegistrationVerificationCode(_ context.Context, to, code string) error {
+	f.registrationSent = append(f.registrationSent, sentPasswordResetEmail{to: to, code: code})
 	return nil
 }
 
@@ -119,8 +125,8 @@ func newAPIHarness(t *testing.T) *apiHarness {
 	router := gin.New()
 	api := router.Group("/api/v1")
 	authHandler := auth.RegisterRoutes(api, pool, cfg)
-	passwordResetEmail := &fakePasswordResetEmailSender{}
-	authHandler.PasswordResetEmailSender = passwordResetEmail
+	verificationEmail := &fakeVerificationEmailSender{}
+	authHandler.VerificationEmailSender = verificationEmail
 
 	authMW := &auth.AuthMiddleware{DB: pool, JWTSecret: cfg.JWTSecret}
 	chatGroup := api.Group("")
@@ -131,14 +137,14 @@ func newAPIHarness(t *testing.T) *apiHarness {
 	RegisterRoutes(chatGroup, pool, cfg, bus, live, nil, assetStore)
 
 	return &apiHarness{
-		t:                  t,
-		router:             router,
-		db:                 pool,
-		live:               live,
-		bus:                bus,
-		assets:             assetStore,
-		cfg:                cfg,
-		passwordResetEmail: passwordResetEmail,
+		t:                 t,
+		router:            router,
+		db:                pool,
+		live:              live,
+		bus:               bus,
+		assets:            assetStore,
+		cfg:               cfg,
+		verificationEmail: verificationEmail,
 	}
 }
 
@@ -241,10 +247,34 @@ func TestAppVersionEndpoint(t *testing.T) {
 
 func (h *apiHarness) register(username string) testSession {
 	h.t.Helper()
-	status, response := h.request(http.MethodPost, "/auth/register", "", map[string]any{
-		"username": username,
-		"email":    username + "@example.com",
-		"password": "correct horse battery staple",
+	email := username + "@example.com"
+	status, response := h.request(http.MethodPost, "/auth/email-verification/inspect", "", map[string]any{
+		"email": email,
+	})
+	h.requireStatus(status, http.StatusOK, response)
+	status, response = h.request(http.MethodPost, "/auth/email-verification/start", "", map[string]any{
+		"email": email,
+	})
+	h.requireStatus(status, http.StatusOK, response)
+	challengeID, _ := response["challenge_id"].(string)
+	if challengeID == "" || len(h.verificationEmail.registrationSent) == 0 {
+		h.t.Fatalf("email verification did not send a code: %v", response)
+	}
+	code := h.verificationEmail.registrationSent[len(h.verificationEmail.registrationSent)-1].code
+	status, response = h.request(http.MethodPost, "/auth/email-verification/verify", "", map[string]any{
+		"challenge_id": challengeID,
+		"code":         code,
+	})
+	h.requireStatus(status, http.StatusOK, response)
+	verificationToken, _ := response["verification_token"].(string)
+	if verificationToken == "" {
+		h.t.Fatalf("email verification response missing token: %v", response)
+	}
+	status, response = h.request(http.MethodPost, "/auth/register", "", map[string]any{
+		"username":                 username,
+		"email":                    email,
+		"password":                 "correct horse battery staple",
+		"email_verification_token": verificationToken,
 	})
 	h.requireStatus(status, http.StatusCreated, response)
 	user, ok := response["user"].(map[string]any)
@@ -373,8 +403,8 @@ func TestPasswordResetFlow(t *testing.T) {
 	if challengeID == "" || response["masked_email"] != "pr***@example.com" {
 		t.Fatalf("unexpected challenge response: %v", response)
 	}
-	if len(api.passwordResetEmail.sent) != 1 {
-		t.Fatalf("want one email, got %d", len(api.passwordResetEmail.sent))
+	if len(api.verificationEmail.sent) != 1 {
+		t.Fatalf("want one email, got %d", len(api.verificationEmail.sent))
 	}
 	status, inspected := api.request(http.MethodPost, "/auth/password-reset/inspect", "", map[string]any{
 		"login": "password_reset_user@example.com",
@@ -388,13 +418,13 @@ func TestPasswordResetFlow(t *testing.T) {
 		"login": "password_reset_user@example.com",
 	})
 	api.requireStatus(status, http.StatusOK, repeated)
-	if repeated["challenge_id"] != challengeID || len(api.passwordResetEmail.sent) != 1 {
-		t.Fatalf("cooldown should reuse the sent challenge: response=%v emails=%d", repeated, len(api.passwordResetEmail.sent))
+	if repeated["challenge_id"] != challengeID || len(api.verificationEmail.sent) != 1 {
+		t.Fatalf("cooldown should reuse the sent challenge: response=%v emails=%d", repeated, len(api.verificationEmail.sent))
 	}
 
 	status, response = api.request(http.MethodPost, "/auth/password-reset/verify", "", map[string]any{
 		"challenge_id": challengeID,
-		"code":         api.passwordResetEmail.sent[0].code,
+		"code":         api.verificationEmail.sent[0].code,
 	})
 	api.requireStatus(status, http.StatusOK, response)
 	resetToken, _ := response["reset_token"].(string)
@@ -417,6 +447,56 @@ func TestPasswordResetFlow(t *testing.T) {
 	api.login("password_reset_user", "new correct horse battery staple")
 }
 
+func TestRegistrationEmailVerificationFlow(t *testing.T) {
+	api := newAPIHarness(t)
+	email := "registration_verification@example.com"
+
+	status, response := api.request(http.MethodPost, "/auth/register", "", map[string]any{
+		"username": "registration_verification",
+		"email":    email,
+		"password": "correct horse battery staple",
+	})
+	if status != http.StatusBadRequest {
+		t.Fatalf("registration without verification should fail: status=%d response=%v", status, response)
+	}
+
+	status, response = api.request(http.MethodPost, "/auth/email-verification/inspect", "", map[string]any{"email": email})
+	api.requireStatus(status, http.StatusOK, response)
+	if response["can_send"] != true {
+		t.Fatalf("first inspection should permit sending: %v", response)
+	}
+	status, response = api.request(http.MethodPost, "/auth/email-verification/start", "", map[string]any{"email": email})
+	api.requireStatus(status, http.StatusOK, response)
+	challengeID := response["challenge_id"].(string)
+	if len(api.verificationEmail.registrationSent) != 1 {
+		t.Fatalf("want one registration email, got %d", len(api.verificationEmail.registrationSent))
+	}
+	status, inspected := api.request(http.MethodPost, "/auth/email-verification/inspect", "", map[string]any{"email": strings.ToUpper(email)})
+	api.requireStatus(status, http.StatusOK, inspected)
+	if inspected["can_send"] != false || inspected["challenge_id"] != challengeID || inspected["retry_after"].(float64) <= 0 {
+		t.Fatalf("inspection should inherit the email cooldown: %v", inspected)
+	}
+	status, repeated := api.request(http.MethodPost, "/auth/email-verification/start", "", map[string]any{"email": email})
+	api.requireStatus(status, http.StatusOK, repeated)
+	if repeated["challenge_id"] != challengeID || len(api.verificationEmail.registrationSent) != 1 {
+		t.Fatalf("cooldown should not send twice: response=%v emails=%d", repeated, len(api.verificationEmail.registrationSent))
+	}
+
+	status, response = api.request(http.MethodPost, "/auth/email-verification/verify", "", map[string]any{
+		"challenge_id": challengeID,
+		"code":         api.verificationEmail.registrationSent[0].code,
+	})
+	api.requireStatus(status, http.StatusOK, response)
+	token := response["verification_token"].(string)
+	status, response = api.request(http.MethodPost, "/auth/register", "", map[string]any{
+		"username":                 "registration_verification",
+		"email":                    email,
+		"password":                 "correct horse battery staple",
+		"email_verification_token": token,
+	})
+	api.requireStatus(status, http.StatusCreated, response)
+}
+
 func TestPasswordResetSessionGrantEndsWhenEmailChanges(t *testing.T) {
 	api := newAPIHarness(t)
 	user := api.register("password_reset_grant_user")
@@ -426,7 +506,7 @@ func TestPasswordResetSessionGrantEndsWhenEmailChanges(t *testing.T) {
 	})
 	api.requireStatus(status, http.StatusOK, response)
 	challengeID := response["challenge_id"].(string)
-	code := api.passwordResetEmail.sent[0].code
+	code := api.verificationEmail.sent[0].code
 	status, response = api.request(http.MethodPost, "/auth/password-reset/verify", "", map[string]any{
 		"challenge_id": challengeID, "code": code,
 	})
