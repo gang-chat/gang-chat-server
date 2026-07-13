@@ -3736,7 +3736,7 @@ func TestConcurrentSaveStickerKeepsDefaultPacksAndNamesUnique(t *testing.T) {
 		t.Fatalf("concurrent personal saves should create one default pack, got %d", count)
 	}
 	personalNames := stickerNamesForDefaultPack(t, api.db, "personal", memberID, "", defaultPersonalStickerPackName)
-	expectedNames := []string{"ok", "ok (2)", "ok (3)", "ok (4)", "ok (5)", "ok (6)"}
+	expectedNames := []string{"ok (6)", "ok (5)", "ok (4)", "ok (3)", "ok (2)", "ok"}
 	if strings.Join(personalNames, "\x00") != strings.Join(expectedNames, "\x00") {
 		t.Fatalf("concurrent personal saves should allocate unique names, got %v", personalNames)
 	}

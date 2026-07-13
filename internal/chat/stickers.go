@@ -885,11 +885,15 @@ func (h *Handler) addStickerToPack(packID, assetID, desiredName string, requeste
 	sortOrder := 0
 	if requestedSortOrder != nil {
 		sortOrder = *requestedSortOrder
-	} else if err := tx.QueryRow(
-		`SELECT COALESCE(MAX(sort_order), 0) + 10 FROM stickers WHERE pack_id = ?`,
-		packID,
-	).Scan(&sortOrder); err != nil {
-		return "", err
+	} else {
+		var stickerCount, minSortOrder int
+		if err := tx.QueryRow(
+			`SELECT COUNT(*), COALESCE(MIN(sort_order), 0) FROM stickers WHERE pack_id = ?`,
+			packID,
+		).Scan(&stickerCount, &minSortOrder); err != nil {
+			return "", err
+		}
+		sortOrder = prependedStickerSortOrder(stickerCount, minSortOrder)
 	}
 
 	base := normalizeStickerName(desiredName)
@@ -914,6 +918,13 @@ func (h *Handler) addStickerToPack(packID, assetID, desiredName string, requeste
 		}
 	}
 	return "", fmt.Errorf("sticker name conflict after retries")
+}
+
+func prependedStickerSortOrder(stickerCount, minSortOrder int) int {
+	if stickerCount == 0 {
+		return 10
+	}
+	return minSortOrder - 10
 }
 
 func (h *Handler) renameStickerInPack(packID, stickerID, desiredName string) error {

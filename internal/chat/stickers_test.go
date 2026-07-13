@@ -32,3 +32,12 @@ func TestStickerNameConflictRecognizesMySQLDuplicate(t *testing.T) {
 		t.Fatal("non-conflict database errors must not be swallowed")
 	}
 }
+
+func TestPrependedStickerSortOrderKeepsExistingRelativeOrder(t *testing.T) {
+	if got := prependedStickerSortOrder(0, 0); got != 10 {
+		t.Fatalf("first sticker sort order = %d, want 10", got)
+	}
+	if got := prependedStickerSortOrder(3, -10); got != -20 {
+		t.Fatalf("prepended sticker sort order = %d, want -20", got)
+	}
+}
