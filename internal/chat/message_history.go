@@ -154,30 +154,75 @@ func messageHistoryCategoryCondition(category string) (string, bool) {
 	const imageAttachment = `EXISTS (
 		SELECT 1 FROM JSON_TABLE(m.attachments_json, '$[*]' COLUMNS (
 			attachment_type VARCHAR(64) PATH '$.type' NULL ON EMPTY,
-			mime_type VARCHAR(255) PATH '$.asset.mime_type' NULL ON EMPTY
+			attachment_mime_type VARCHAR(255) PATH '$.mime_type' NULL ON EMPTY,
+			asset_mime_type VARCHAR(255) PATH '$.asset.mime_type' NULL ON EMPTY
 		)) history_attachment
-		WHERE LOWER(COALESCE(history_attachment.attachment_type, '')) = 'file'
-		  AND LOWER(COALESCE(history_attachment.mime_type, '')) LIKE 'image/%'
+		WHERE m.type = 'file'
+		  AND LOWER(COALESCE(history_attachment.attachment_type, '')) = 'file'
+		  AND LOWER(COALESCE(
+			NULLIF(history_attachment.attachment_mime_type, ''),
+			history_attachment.asset_mime_type,
+			''
+		  )) LIKE 'image/%'
 	)`
 	const fileAttachment = `EXISTS (
 		SELECT 1 FROM JSON_TABLE(m.attachments_json, '$[*]' COLUMNS (
 			attachment_type VARCHAR(64) PATH '$.type' NULL ON EMPTY,
-			mime_type VARCHAR(255) PATH '$.asset.mime_type' NULL ON EMPTY
+			attachment_mime_type VARCHAR(255) PATH '$.mime_type' NULL ON EMPTY,
+			asset_mime_type VARCHAR(255) PATH '$.asset.mime_type' NULL ON EMPTY
 		)) history_attachment
-		WHERE LOWER(COALESCE(history_attachment.attachment_type, '')) = 'file'
-		  AND LOWER(COALESCE(history_attachment.mime_type, '')) NOT LIKE 'image/%'
+		WHERE m.type = 'file'
+		  AND LOWER(COALESCE(history_attachment.attachment_type, '')) = 'file'
+		  AND LOWER(COALESCE(
+			NULLIF(history_attachment.attachment_mime_type, ''),
+			history_attachment.asset_mime_type,
+			''
+		  )) NOT LIKE 'image/%'
+	)`
+	const voiceAttachment = `EXISTS (
+		SELECT 1 FROM JSON_TABLE(m.attachments_json, '$[*]' COLUMNS (
+			attachment_type VARCHAR(64) PATH '$.type' NULL ON EMPTY,
+			attachment_name VARCHAR(1024) PATH '$.name' NULL ON EMPTY,
+			attachment_filename VARCHAR(1024) PATH '$.filename' NULL ON EMPTY,
+			attachment_mime_type VARCHAR(255) PATH '$.mime_type' NULL ON EMPTY,
+			asset_id VARCHAR(128) PATH '$.asset.id' NULL ON EMPTY,
+			asset_filename VARCHAR(1024) PATH '$.asset.filename' NULL ON EMPTY,
+			asset_mime_type VARCHAR(255) PATH '$.asset.mime_type' NULL ON EMPTY,
+			duration_ms BIGINT PATH '$.duration_ms' NULL ON EMPTY
+		)) history_attachment
+		WHERE (
+			m.type = 'audio'
+			OR LOWER(COALESCE(history_attachment.attachment_type, '')) = 'audio'
+			OR (
+				LOWER(COALESCE(history_attachment.attachment_type, '')) = 'file'
+				AND LOWER(COALESCE(
+					NULLIF(history_attachment.attachment_mime_type, ''),
+					history_attachment.asset_mime_type,
+					''
+				)) LIKE 'audio/%'
+				AND LOWER(COALESCE(
+					NULLIF(history_attachment.attachment_name, ''),
+					NULLIF(history_attachment.attachment_filename, ''),
+					history_attachment.asset_filename,
+					''
+				)) REGEXP '(^|[/\\\\])voice_'
+			)
+		)
+		AND (history_attachment.asset_id IS NOT NULL OR history_attachment.duration_ms > 0)
 	)`
 	switch category {
 	case "all":
 		return "", true
 	case "links":
 		return `m.type = 'text' AND LOWER(m.body) REGEXP '(https?://|www\\.)'`, true
+	case "voice":
+		return voiceAttachment, true
 	case "stickers":
 		return `m.type = 'sticker'`, true
 	case "images":
 		return imageAttachment, true
 	case "files":
-		return fileAttachment, true
+		return fileAttachment + " AND NOT (" + voiceAttachment + ")", true
 	case "system":
 		return `m.type = 'system'`, true
 	default:

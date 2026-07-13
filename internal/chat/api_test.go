@@ -1438,12 +1438,93 @@ func TestRoomMessageHistoryFiltersAndDeletesOnlyForCurrentViewer(t *testing.T) {
 
 	linkMessage := api.sendMessage(owner.Token, roomID, "visit https://example.test/history")
 	memberMessage := api.sendMessage(member.Token, roomID, "member-only-history-needle")
+	imageMessage := api.sendTypedMessage(owner.Token, roomID, "file", "history-image.png", []any{
+		map[string]any{
+			"type": "file",
+			"name": "history-image.png",
+			"asset": map[string]any{
+				"id":        "asset_history_image",
+				"url":       "/assets/history-image.png",
+				"mime_type": "image/png",
+				"filename":  "history-image.png",
+			},
+		},
+	})
+	fileMessage := api.sendTypedMessage(owner.Token, roomID, "file", "history-file.pdf", []any{
+		map[string]any{
+			"type": "file",
+			"name": "history-file.pdf",
+			"asset": map[string]any{
+				"id":        "asset_history_file",
+				"url":       "/assets/history-file.pdf",
+				"mime_type": "application/pdf",
+				"filename":  "history-file.pdf",
+			},
+		},
+	})
+	voiceMessage := api.sendTypedMessage(owner.Token, roomID, "audio", "voice_history_current.m4a", []any{
+		map[string]any{
+			"type":        "audio",
+			"name":        "voice_history_current.m4a",
+			"duration_ms": float64(1200),
+			"asset": map[string]any{
+				"id":        "asset_history_voice_current",
+				"url":       "/assets/voice_history_current.m4a",
+				"mime_type": "audio/mp4",
+				"filename":  "voice_history_current.m4a",
+			},
+		},
+	})
+	legacyVoiceMessage := api.sendTypedMessage(owner.Token, roomID, "file", "voice_history_legacy.m4a", []any{
+		map[string]any{
+			"type":        "file",
+			"name":        "voice_history_legacy.m4a",
+			"duration_ms": float64(2200),
+			"asset": map[string]any{
+				"id":        "asset_history_voice_legacy",
+				"url":       "/assets/voice_history_legacy.m4a",
+				"mime_type": "audio/mp4",
+				"filename":  "voice_history_legacy.m4a",
+			},
+		},
+	})
+	stickerMessage := api.sendTypedMessage(owner.Token, roomID, "sticker", "[history-wave]", []any{
+		map[string]any{
+			"type": "sticker",
+			"name": "history-wave",
+			"asset": map[string]any{
+				"id":        "asset_history_sticker",
+				"url":       "/assets/history-wave.webp",
+				"mime_type": "image/webp",
+				"filename":  "history-wave.webp",
+			},
+		},
+	})
 	linkID := linkMessage["id"].(string)
 	memberMessageID := memberMessage["id"].(string)
 
 	status, response = api.request(http.MethodGet, "/rooms/"+roomID+"/message-history?category=links", owner.Token, nil)
 	api.requireStatus(status, http.StatusOK, response)
 	assertHistoryContainsExactly(t, response, linkID)
+
+	status, response = api.request(http.MethodGet, "/rooms/"+roomID+"/message-history?category=voice", owner.Token, nil)
+	api.requireStatus(status, http.StatusOK, response)
+	assertHistoryContainsIDs(t, response,
+		voiceMessage["id"].(string),
+		legacyVoiceMessage["id"].(string),
+	)
+
+	status, response = api.request(http.MethodGet, "/rooms/"+roomID+"/message-history?category=images", owner.Token, nil)
+	api.requireStatus(status, http.StatusOK, response)
+	assertHistoryContainsExactly(t, response, imageMessage["id"].(string))
+
+	status, response = api.request(http.MethodGet, "/rooms/"+roomID+"/message-history?category=files", owner.Token, nil)
+	api.requireStatus(status, http.StatusOK, response)
+	assertHistoryContainsExactly(t, response, fileMessage["id"].(string))
+
+	status, response = api.request(http.MethodGet, "/rooms/"+roomID+"/message-history?category=stickers", owner.Token, nil)
+	api.requireStatus(status, http.StatusOK, response)
+	assertHistoryContainsExactly(t, response, stickerMessage["id"].(string))
 
 	status, response = api.request(
 		http.MethodGet,
@@ -1503,6 +1584,32 @@ func assertHistoryContainsExactly(t *testing.T, response map[string]any, message
 	message, ok := messages[0].(map[string]any)
 	if !ok || message["id"] != messageID {
 		t.Fatalf("history message mismatch: %v", response)
+	}
+}
+
+func assertHistoryContainsIDs(t *testing.T, response map[string]any, messageIDs ...string) {
+	t.Helper()
+	messages, ok := response["messages"].([]any)
+	if !ok || len(messages) != len(messageIDs) {
+		t.Fatalf("history message count mismatch: got %v want %v", response, messageIDs)
+	}
+	want := make(map[string]struct{}, len(messageIDs))
+	for _, messageID := range messageIDs {
+		want[messageID] = struct{}{}
+	}
+	for _, item := range messages {
+		message, ok := item.(map[string]any)
+		if !ok {
+			t.Fatalf("invalid history message: %v", item)
+		}
+		messageID, _ := message["id"].(string)
+		if _, ok := want[messageID]; !ok {
+			t.Fatalf("unexpected history message: got %v want %v", response, messageIDs)
+		}
+		delete(want, messageID)
+	}
+	if len(want) != 0 {
+		t.Fatalf("missing history messages: got %v want %v", response, messageIDs)
 	}
 }
 
