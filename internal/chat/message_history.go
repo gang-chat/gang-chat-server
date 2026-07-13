@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"errors"
 	"net/http"
+	"regexp"
 	"strings"
 	"time"
 
@@ -11,6 +12,9 @@ import (
 )
 
 const messageHistoryMaxBatch = 100
+const messageHistoryScanBatch = 100
+
+var messageHistoryLinkPattern = regexp.MustCompile(`(?i)(https?://|www\.)`)
 
 func (h *Handler) ensureMessageHistorySchema() error {
 	_, err := h.DB.Exec(
@@ -59,13 +63,9 @@ func (h *Handler) listMessageHistory(c *gin.Context) {
 	}
 
 	category := strings.ToLower(strings.TrimSpace(c.DefaultQuery("category", "all")))
-	categoryCondition, ok := messageHistoryCategoryCondition(category)
-	if !ok {
+	if !validMessageHistoryCategory(category) {
 		h.jsonError(c, http.StatusBadRequest, "validation_failed", "invalid message history category")
 		return
-	}
-	if categoryCondition != "" {
-		conditions = append(conditions, categoryCondition)
 	}
 
 	if startAt, ok := h.parseMessageHistoryTime(c, "start_at"); !ok {
@@ -81,6 +81,8 @@ func (h *Handler) listMessageHistory(c *gin.Context) {
 		args = append(args, *endAt)
 	}
 
+	var cursorCreatedAt *int64
+	cursorID := ""
 	if before := strings.TrimSpace(c.Query("before")); before != "" {
 		var beforeCreatedAt int64
 		err := h.DB.QueryRow(
@@ -96,46 +98,73 @@ func (h *Handler) listMessageHistory(c *gin.Context) {
 			h.jsonError(c, http.StatusInternalServerError, "internal_error", "failed to read message history cursor")
 			return
 		}
-		conditions = append(conditions, "(m.created_at < ? OR (m.created_at = ? AND m.id < ?))")
-		args = append(args, beforeCreatedAt, beforeCreatedAt, before)
+		cursorCreatedAt = &beforeCreatedAt
+		cursorID = before
 	}
 
 	limit := parseLimit(c.Query("limit"), 50, 100)
-	args = append(args, limit+1)
-	rows, err := h.DB.Query(
-		`SELECT m.id, m.room_id, m.client_message_id, m.type, m.body,
-		        m.mentions_json, m.attachments_json, m.is_recalled, m.recalled_at,
-		        m.recalled_by_user_id, m.is_force_deleted, m.force_deleted_at,
-		        m.force_deleted_by_user_id, m.created_at,
-		        u.id, u.uid, u.username, u.display_name, u.avatar_url, u.default_avatar_key,
-		        u.is_superuser, sender_rm.room_display_name,
-		        CASE WHEN u.is_superuser != 0 THEN 'superuser' ELSE COALESCE(sender_rm.role, '') END
-		 FROM messages m
-		 JOIN users u ON u.id = m.sender_user_id
-		 LEFT JOIN room_memberships sender_rm ON sender_rm.room_id = m.room_id AND sender_rm.user_id = m.sender_user_id
-		 WHERE `+strings.Join(conditions, " AND ")+`
-		 ORDER BY m.created_at DESC, m.id DESC
-		 LIMIT ?`,
-		args...,
-	)
-	if err != nil {
-		h.jsonError(c, http.StatusInternalServerError, "internal_error", "failed to list message history")
-		return
-	}
-	defer rows.Close()
-
 	messages := make([]message, 0, limit+1)
-	for rows.Next() {
-		msg, err := scanMessage(rows)
+	for len(messages) <= limit {
+		queryConditions := append([]string(nil), conditions...)
+		queryArgs := append([]any(nil), args...)
+		if cursorCreatedAt != nil {
+			queryConditions = append(queryConditions, "(m.created_at < ? OR (m.created_at = ? AND m.id < ?))")
+			queryArgs = append(queryArgs, *cursorCreatedAt, *cursorCreatedAt, cursorID)
+		}
+		queryArgs = append(queryArgs, messageHistoryScanBatch)
+		rows, err := h.DB.Query(
+			`SELECT m.id, m.room_id, m.client_message_id, m.type, m.body,
+			        m.mentions_json, m.attachments_json, m.is_recalled, m.recalled_at,
+			        m.recalled_by_user_id, m.is_force_deleted, m.force_deleted_at,
+			        m.force_deleted_by_user_id, m.created_at,
+			        u.id, u.uid, u.username, u.display_name, u.avatar_url, u.default_avatar_key,
+			        u.is_superuser, sender_rm.room_display_name,
+			        CASE WHEN u.is_superuser != 0 THEN 'superuser' ELSE COALESCE(sender_rm.role, '') END
+			 FROM messages m
+			 JOIN users u ON u.id = m.sender_user_id
+			 LEFT JOIN room_memberships sender_rm ON sender_rm.room_id = m.room_id AND sender_rm.user_id = m.sender_user_id
+			 WHERE `+strings.Join(queryConditions, " AND ")+`
+			 ORDER BY m.created_at DESC, m.id DESC
+			 LIMIT ?`,
+			queryArgs...,
+		)
 		if err != nil {
+			h.jsonError(c, http.StatusInternalServerError, "internal_error", "failed to list message history")
+			return
+		}
+
+		scanned := 0
+		var lastScanned message
+		for rows.Next() {
+			msg, err := scanMessage(rows)
+			if err != nil {
+				rows.Close()
+				h.jsonError(c, http.StatusInternalServerError, "internal_error", "failed to read message history")
+				return
+			}
+			scanned++
+			lastScanned = msg
+			if messageMatchesHistoryCategory(msg, category) {
+				messages = append(messages, h.messageForViewer(msg, userID))
+			}
+		}
+		rowsErr := rows.Err()
+		rows.Close()
+		if rowsErr != nil {
 			h.jsonError(c, http.StatusInternalServerError, "internal_error", "failed to read message history")
 			return
 		}
-		messages = append(messages, h.messageForViewer(msg, userID))
-	}
-	if err := rows.Err(); err != nil {
-		h.jsonError(c, http.StatusInternalServerError, "internal_error", "failed to read message history")
-		return
+		if len(messages) > limit || scanned < messageHistoryScanBatch {
+			break
+		}
+		createdAt, err := time.Parse(time.RFC3339Nano, lastScanned.CreatedAt)
+		if err != nil {
+			h.jsonError(c, http.StatusInternalServerError, "internal_error", "failed to read message history cursor")
+			return
+		}
+		createdAtMillis := createdAt.UnixMilli()
+		cursorCreatedAt = &createdAtMillis
+		cursorID = lastScanned.ID
 	}
 
 	hasMore := len(messages) > limit
@@ -150,84 +179,83 @@ func (h *Handler) listMessageHistory(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"messages": messages, "has_more": hasMore, "next_before": nextBefore})
 }
 
-func messageHistoryCategoryCondition(category string) (string, bool) {
-	const imageAttachment = `EXISTS (
-		SELECT 1 FROM JSON_TABLE(m.attachments_json, '$[*]' COLUMNS (
-			attachment_type VARCHAR(64) PATH '$.type' NULL ON EMPTY,
-			attachment_mime_type VARCHAR(255) PATH '$.mime_type' NULL ON EMPTY,
-			asset_mime_type VARCHAR(255) PATH '$.asset.mime_type' NULL ON EMPTY
-		)) history_attachment
-		WHERE m.type = 'file'
-		  AND LOWER(COALESCE(history_attachment.attachment_type, '')) = 'file'
-		  AND LOWER(COALESCE(
-			NULLIF(history_attachment.attachment_mime_type, ''),
-			history_attachment.asset_mime_type,
-			''
-		  )) LIKE 'image/%'
-	)`
-	const fileAttachment = `EXISTS (
-		SELECT 1 FROM JSON_TABLE(m.attachments_json, '$[*]' COLUMNS (
-			attachment_type VARCHAR(64) PATH '$.type' NULL ON EMPTY,
-			attachment_mime_type VARCHAR(255) PATH '$.mime_type' NULL ON EMPTY,
-			asset_mime_type VARCHAR(255) PATH '$.asset.mime_type' NULL ON EMPTY
-		)) history_attachment
-		WHERE m.type = 'file'
-		  AND LOWER(COALESCE(history_attachment.attachment_type, '')) = 'file'
-		  AND LOWER(COALESCE(
-			NULLIF(history_attachment.attachment_mime_type, ''),
-			history_attachment.asset_mime_type,
-			''
-		  )) NOT LIKE 'image/%'
-	)`
-	const voiceAttachment = `EXISTS (
-		SELECT 1 FROM JSON_TABLE(m.attachments_json, '$[*]' COLUMNS (
-			attachment_type VARCHAR(64) PATH '$.type' NULL ON EMPTY,
-			attachment_name VARCHAR(1024) PATH '$.name' NULL ON EMPTY,
-			attachment_filename VARCHAR(1024) PATH '$.filename' NULL ON EMPTY,
-			attachment_mime_type VARCHAR(255) PATH '$.mime_type' NULL ON EMPTY,
-			asset_id VARCHAR(128) PATH '$.asset.id' NULL ON EMPTY,
-			asset_filename VARCHAR(1024) PATH '$.asset.filename' NULL ON EMPTY,
-			asset_mime_type VARCHAR(255) PATH '$.asset.mime_type' NULL ON EMPTY,
-			duration_ms BIGINT PATH '$.duration_ms' NULL ON EMPTY
-		)) history_attachment
-		WHERE (
-			m.type = 'audio'
-			OR LOWER(COALESCE(history_attachment.attachment_type, '')) = 'audio'
-			OR (
-				LOWER(COALESCE(history_attachment.attachment_type, '')) = 'file'
-				AND LOWER(COALESCE(
-					NULLIF(history_attachment.attachment_mime_type, ''),
-					history_attachment.asset_mime_type,
-					''
-				)) LIKE 'audio/%'
-				AND LOWER(COALESCE(
-					NULLIF(history_attachment.attachment_name, ''),
-					NULLIF(history_attachment.attachment_filename, ''),
-					history_attachment.asset_filename,
-					''
-				)) REGEXP '(^|[/\\\\])voice_'
-			)
-		)
-		AND (history_attachment.asset_id IS NOT NULL OR history_attachment.duration_ms > 0)
-	)`
+func validMessageHistoryCategory(category string) bool {
 	switch category {
-	case "all":
-		return "", true
-	case "links":
-		return `m.type = 'text' AND LOWER(m.body) REGEXP '(https?://|www\\.)'`, true
-	case "voice":
-		return voiceAttachment, true
-	case "stickers":
-		return `m.type = 'sticker'`, true
-	case "images":
-		return imageAttachment, true
-	case "files":
-		return fileAttachment + " AND NOT (" + voiceAttachment + ")", true
-	case "system":
-		return `m.type = 'system'`, true
+	case "all", "links", "voice", "stickers", "images", "files", "system":
+		return true
 	default:
-		return "", false
+		return false
 	}
+}
+
+func messageMatchesHistoryCategory(msg message, category string) bool {
+	if category == "all" {
+		return true
+	}
+	if category == "links" {
+		return msg.Type == "text" && messageHistoryLinkPattern.MatchString(msg.Body)
+	}
+	if category == "system" {
+		return msg.Type == "system"
+	}
+
+	hasVoice := messageHasVoiceAttachment(msg)
+	if category == "voice" {
+		return hasVoice
+	}
+	if category == "stickers" {
+		if msg.Type == "sticker" {
+			return true
+		}
+		for _, raw := range msg.Attachments {
+			attachment, ok := raw.(map[string]any)
+			if ok && strings.EqualFold(stringFromMap(attachment, "type"), "sticker") {
+				return true
+			}
+		}
+		return false
+	}
+	if hasVoice {
+		return false
+	}
+
+	for _, raw := range msg.Attachments {
+		attachment, ok := raw.(map[string]any)
+		if !ok || !strings.EqualFold(stringFromMap(attachment, "type"), "file") {
+			continue
+		}
+		isImage := strings.HasPrefix(strings.ToLower(attachmentMimeType(attachment)), "image/")
+		if category == "images" && isImage {
+			return true
+		}
+		if category == "files" && !isImage {
+			return true
+		}
+	}
+	return false
+}
+
+func messageHasVoiceAttachment(msg message) bool {
+	messageIsAudio := strings.EqualFold(msg.Type, "audio")
+	for _, raw := range msg.Attachments {
+		attachment, ok := raw.(map[string]any)
+		if !ok {
+			continue
+		}
+		attachmentType := strings.ToLower(stringFromMap(attachment, "type"))
+		mimeType := strings.ToLower(attachmentMimeType(attachment))
+		name := strings.ToLower(strings.ReplaceAll(attachmentDisplayName(attachment), `\`, "/"))
+		if separator := strings.LastIndex(name, "/"); separator >= 0 {
+			name = name[separator+1:]
+		}
+		legacyVoiceFile := attachmentType == "file" && strings.HasPrefix(mimeType, "audio/") && strings.HasPrefix(name, "voice_")
+		_, hasDuration := attachment["duration_ms"]
+		_, hasAsset := attachment["asset"].(map[string]any)
+		if (messageIsAudio || attachmentType == "audio" || legacyVoiceFile) && (hasAsset || hasDuration) {
+			return true
+		}
+	}
+	return false
 }
 
 func (h *Handler) parseMessageHistoryTime(c *gin.Context, name string) (*int64, bool) {
