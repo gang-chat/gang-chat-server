@@ -604,7 +604,7 @@ func maskEmail(email string) string {
 		visible = string(local[0])
 	}
 	if len(local) > 2 {
-		visible += string(local[len(local)-1])
+		return visible + "***" + string(local[len(local)-1]) + "@" + parts[1]
 	}
 	return visible + "***@" + parts[1]
 }

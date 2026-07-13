@@ -15,7 +15,10 @@ import (
 )
 
 func TestPasswordResetHelpers(t *testing.T) {
-	if got := maskEmail("kai@example.com"); got != "ki***@example.com" {
+	if got := maskEmail("kai@example.com"); got != "k***i@example.com" {
+		t.Fatalf("maskEmail: got %q", got)
+	}
+	if got := maskEmail("XuX-ing@outlook.com"); got != "X***g@outlook.com" {
 		t.Fatalf("maskEmail: got %q", got)
 	}
 	if got := maskEmail("a@example.com"); got != "a***@example.com" {

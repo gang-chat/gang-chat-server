@@ -427,7 +427,7 @@ func TestPasswordResetFlow(t *testing.T) {
 	})
 	api.requireStatus(status, http.StatusOK, response)
 	challengeID, _ := response["challenge_id"].(string)
-	if challengeID == "" || response["masked_email"] != "pr***@example.com" {
+	if challengeID == "" || response["masked_email"] != "p***r@example.com" {
 		t.Fatalf("unexpected challenge response: %v", response)
 	}
 	if len(api.verificationEmail.sent) != 1 {
