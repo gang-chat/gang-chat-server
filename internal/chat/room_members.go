@@ -1647,7 +1647,9 @@ func (h *Handler) deleteRoom(c *gin.Context) {
 	// membership left to enumerate.
 	members, _ := h.roomMemberIDs(roomID)
 	pendingInviteTargets := h.pendingRoomInviteTargetIDs(roomID)
+	stickerAssetIDs := h.stickerAssetIDsForRoom(roomID)
 	_, _ = h.DB.Exec(`DELETE FROM rooms WHERE id = ?`, roomID)
+	h.scheduleStickerAssets(stickerAssetIDs)
 	h.publishRoomDeleted(roomID, members...)
 	h.publishRoomInvitesUpdatedForUsers(pendingInviteTargets...)
 	c.JSON(http.StatusOK, gin.H{"ok": true})

@@ -8,40 +8,44 @@ import (
 )
 
 const (
-	DefaultAssetUploadMaxBytes     int64 = 50 * 1024 * 1024
-	DefaultImageUploadMaxBytes     int64 = 10 * 1024 * 1024
-	DefaultMusicBoxMaxBytesPerRoom int64 = 200 * 1024 * 1024
+	DefaultAssetUploadMaxBytes                int64 = 50 * 1024 * 1024
+	DefaultImageUploadMaxBytes                int64 = 10 * 1024 * 1024
+	DefaultStickerAssetOrphanTTLSeconds       int64 = 30 * 24 * 60 * 60
+	DefaultStickerAssetCleanupIntervalSeconds int64 = 60 * 60
+	DefaultMusicBoxMaxBytesPerRoom            int64 = 200 * 1024 * 1024
 )
 
 type Config struct {
-	Bind                     string   `json:"bind"`
-	DatabaseURL              string   `json:"database_url"`
-	JWTSecret                string   `json:"jwt_secret"`
-	AccessTokenTTLSeconds    int64    `json:"access_token_ttl_seconds"`
-	RefreshTokenTTLSeconds   int64    `json:"refresh_token_ttl_seconds"`
-	LoginMaxAttempts         int      `json:"login_max_attempts"`
-	LoginWindowSeconds       int64    `json:"login_window_seconds"`
-	AssetUploadMaxBytes      int64    `json:"asset_upload_max_bytes"`
-	ImageUploadMaxBytes      int64    `json:"image_upload_max_bytes"`
-	S3Endpoint               string   `json:"s3_endpoint"`
-	S3Bucket                 string   `json:"s3_bucket"`
-	S3Region                 string   `json:"s3_region"`
-	S3AccessKeyID            string   `json:"s3_access_key_id"`
-	S3SecretAccessKey        string   `json:"s3_secret_access_key"`
-	S3SessionToken           string   `json:"s3_session_token"`
-	S3ForcePathStyle         bool     `json:"s3_force_path_style"`
-	GeoIPDatabasePath        string   `json:"geoip_db_path"`
-	TrustedProxies           []string `json:"trusted_proxies"`
-	AllowedOrigins           []string `json:"allowed_origins"`
-	LiveKitHost              string   `json:"livekit_host"`
-	LiveKitAPIKey            string   `json:"livekit_api_key"`
-	LiveKitAPISecret         string   `json:"livekit_api_secret"`
-	FFmpegPath               string   `json:"ffmpeg_path"`
-	MusicBoxDir              string   `json:"music_box_dir"`
-	MusicBoxMaxBytesPerRoom  int64    `json:"music_box_max_bytes_per_room"`
-	MusicBoxOpusBitrate      string   `json:"music_box_opus_bitrate"`
-	MusicBoxTranscodeWorkers int      `json:"music_box_transcode_workers"`
-	MusicBoxDownloadBitrate  string   `json:"music_box_download_bitrate"`
+	Bind                               string   `json:"bind"`
+	DatabaseURL                        string   `json:"database_url"`
+	JWTSecret                          string   `json:"jwt_secret"`
+	AccessTokenTTLSeconds              int64    `json:"access_token_ttl_seconds"`
+	RefreshTokenTTLSeconds             int64    `json:"refresh_token_ttl_seconds"`
+	LoginMaxAttempts                   int      `json:"login_max_attempts"`
+	LoginWindowSeconds                 int64    `json:"login_window_seconds"`
+	AssetUploadMaxBytes                int64    `json:"asset_upload_max_bytes"`
+	ImageUploadMaxBytes                int64    `json:"image_upload_max_bytes"`
+	StickerAssetOrphanTTLSeconds       int64    `json:"sticker_asset_orphan_ttl_seconds"`
+	StickerAssetCleanupIntervalSeconds int64    `json:"sticker_asset_cleanup_interval_seconds"`
+	S3Endpoint                         string   `json:"s3_endpoint"`
+	S3Bucket                           string   `json:"s3_bucket"`
+	S3Region                           string   `json:"s3_region"`
+	S3AccessKeyID                      string   `json:"s3_access_key_id"`
+	S3SecretAccessKey                  string   `json:"s3_secret_access_key"`
+	S3SessionToken                     string   `json:"s3_session_token"`
+	S3ForcePathStyle                   bool     `json:"s3_force_path_style"`
+	GeoIPDatabasePath                  string   `json:"geoip_db_path"`
+	TrustedProxies                     []string `json:"trusted_proxies"`
+	AllowedOrigins                     []string `json:"allowed_origins"`
+	LiveKitHost                        string   `json:"livekit_host"`
+	LiveKitAPIKey                      string   `json:"livekit_api_key"`
+	LiveKitAPISecret                   string   `json:"livekit_api_secret"`
+	FFmpegPath                         string   `json:"ffmpeg_path"`
+	MusicBoxDir                        string   `json:"music_box_dir"`
+	MusicBoxMaxBytesPerRoom            int64    `json:"music_box_max_bytes_per_room"`
+	MusicBoxOpusBitrate                string   `json:"music_box_opus_bitrate"`
+	MusicBoxTranscodeWorkers           int      `json:"music_box_transcode_workers"`
+	MusicBoxDownloadBitrate            string   `json:"music_box_download_bitrate"`
 
 	QQMusicBaseURL  string `json:"qqmusic_base_url"`
 	QQMusicPassword string `json:"qqmusic_password"`
@@ -83,6 +87,8 @@ func Load() *Config {
 	flag.StringVar(&cfg.DatabaseURL, "database-url", cfg.DatabaseURL, "MySQL DSN")
 	flag.Int64Var(&cfg.AssetUploadMaxBytes, "asset-upload-max-bytes", cfg.AssetUploadMaxBytes, "maximum uploaded file size in bytes")
 	flag.Int64Var(&cfg.ImageUploadMaxBytes, "image-upload-max-bytes", cfg.ImageUploadMaxBytes, "maximum uploaded image size in bytes")
+	flag.Int64Var(&cfg.StickerAssetOrphanTTLSeconds, "sticker-asset-orphan-ttl-seconds", cfg.StickerAssetOrphanTTLSeconds, "seconds an unreferenced sticker asset is retained")
+	flag.Int64Var(&cfg.StickerAssetCleanupIntervalSeconds, "sticker-asset-cleanup-interval-seconds", cfg.StickerAssetCleanupIntervalSeconds, "seconds between sticker asset cleanup passes")
 	flag.StringVar(&cfg.S3Endpoint, "s3-endpoint", cfg.S3Endpoint, "S3-compatible endpoint URL")
 	flag.StringVar(&cfg.S3Bucket, "s3-bucket", cfg.S3Bucket, "S3 bucket name")
 	flag.StringVar(&cfg.S3Region, "s3-region", cfg.S3Region, "S3 signing region")
@@ -104,6 +110,12 @@ func Load() *Config {
 	allowedOrigins := strings.Join(cfg.AllowedOrigins, ",")
 	flag.StringVar(&allowedOrigins, "allowed-origins", allowedOrigins, "comma-separated allowed CORS origins, or * for any")
 	flag.Parse()
+	if cfg.StickerAssetOrphanTTLSeconds <= 0 {
+		cfg.StickerAssetOrphanTTLSeconds = DefaultStickerAssetOrphanTTLSeconds
+	}
+	if cfg.StickerAssetCleanupIntervalSeconds <= 0 {
+		cfg.StickerAssetCleanupIntervalSeconds = DefaultStickerAssetCleanupIntervalSeconds
+	}
 	cfg.TrustedProxies = parseList(trustedProxies)
 	cfg.AllowedOrigins = parseList(allowedOrigins)
 

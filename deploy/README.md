@@ -40,6 +40,8 @@ Run them on the **server**, from the deploy directory:
      "s3_secret_access_key": "<secret key>",
      "s3_session_token": "",
      "s3_force_path_style": true,
+     "sticker_asset_orphan_ttl_seconds": 2592000,
+     "sticker_asset_cleanup_interval_seconds": 3600,
      "livekit_host": "http://localhost:7880",
      "livekit_api_key": "<key>",
      "livekit_api_secret": "<secret>",
@@ -52,6 +54,11 @@ Run them on the **server**, from the deploy directory:
    the backend using server-side credentials. Object keys are fixed as
    `assets/<asset_id>/<filename>`, and asset responses include fixed
    `Cache-Control`, `Expires`, `ETag`, and `Last-Modified` headers.
+   Sticker uploads are reference-aware: assets used by a message or sticker
+   pack are retained, while unreferenced sticker assets are deleted after
+   `sticker_asset_orphan_ttl_seconds` (30 days above). Do not configure a
+   bucket-wide S3 lifecycle rule that expires `assets/` earlier than the app;
+   it cannot see database references and would break historical messages.
    Password-reset email is enabled only when both `resend_api_key` and
    `email_from` are configured. Keep the API key only in the server-side
    deployment config; `email_from` must use a sender/domain accepted by Resend.

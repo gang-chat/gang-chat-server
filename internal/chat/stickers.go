@@ -5,8 +5,10 @@ import (
 	"bytes"
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"net/url"
 	"path/filepath"
@@ -14,6 +16,7 @@ import (
 	"sync"
 
 	"github.com/gin-gonic/gin"
+	mysqlDriver "github.com/go-sql-driver/mysql"
 )
 
 const (
@@ -52,7 +55,7 @@ func (h *Handler) listStickerPacks(c *gin.Context) {
 		rows, err = h.DB.Query(
 			`SELECT id, scope, room_id, name, sort_order, updated_at FROM sticker_packs
 			 WHERE scope = 'personal' AND owner_user_id = ?
-			 ORDER BY sort_order ASC, updated_at DESC`,
+			 ORDER BY sort_order ASC, created_at ASC, id ASC`,
 			currentUserID(c),
 		)
 	case "room":
@@ -62,7 +65,7 @@ func (h *Handler) listStickerPacks(c *gin.Context) {
 		rows, err = h.DB.Query(
 			`SELECT id, scope, room_id, name, sort_order, updated_at FROM sticker_packs
 			 WHERE scope = 'room' AND room_id = ?
-			 ORDER BY sort_order ASC, updated_at DESC`,
+			 ORDER BY sort_order ASC, created_at ASC, id ASC`,
 			roomID,
 		)
 	default:
@@ -117,10 +120,6 @@ func (h *Handler) createStickerPack(c *gin.Context) {
 	}
 	id := newID("stkp")
 	now := nowMillis()
-	sortOrder := 10
-	if req.SortOrder != nil {
-		sortOrder = *req.SortOrder
-	}
 	var ownerID any = currentUserID(c)
 	var roomID any
 	if req.Scope == "room" {
@@ -134,14 +133,42 @@ func (h *Handler) createStickerPack(c *gin.Context) {
 		namespaceRoomID = req.RoomID
 	}
 	unlock := h.stickerPackLocks.lock(stickerPackNameLockKey(req.Scope, namespaceOwnerID, namespaceRoomID))
-	name = h.uniqueStickerPackName(req.Scope, namespaceOwnerID, namespaceRoomID, name, "")
-	_, err := h.DB.Exec(
+	defer unlock()
+	tx, err := h.DB.Begin()
+	if err != nil {
+		h.jsonError(c, http.StatusInternalServerError, "internal_error", "create sticker pack failed")
+		return
+	}
+	defer tx.Rollback()
+	if err := lockStickerPackNamespace(tx, req.Scope, namespaceOwnerID, namespaceRoomID); err != nil {
+		h.jsonError(c, http.StatusInternalServerError, "internal_error", "create sticker pack failed")
+		return
+	}
+	name, err = uniqueStickerPackNameTx(tx, req.Scope, namespaceOwnerID, namespaceRoomID, name, "")
+	if err != nil {
+		h.jsonError(c, http.StatusInternalServerError, "internal_error", "create sticker pack failed")
+		return
+	}
+	sortOrder := 0
+	if req.SortOrder != nil {
+		sortOrder = *req.SortOrder
+	} else {
+		sortOrder, err = nextStickerPackSortOrderTx(tx, req.Scope, namespaceOwnerID, namespaceRoomID)
+		if err != nil {
+			h.jsonError(c, http.StatusInternalServerError, "internal_error", "create sticker pack failed")
+			return
+		}
+	}
+	_, err = tx.Exec(
 		`INSERT INTO sticker_packs (id, owner_user_id, room_id, scope, name, sort_order, created_at, updated_at)
 		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
 		id, ownerID, roomID, req.Scope, name, sortOrder, now, now,
 	)
-	unlock()
 	if err != nil {
+		h.jsonError(c, http.StatusInternalServerError, "internal_error", "create sticker pack failed")
+		return
+	}
+	if err := tx.Commit(); err != nil {
 		h.jsonError(c, http.StatusInternalServerError, "internal_error", "create sticker pack failed")
 		return
 	}
@@ -158,10 +185,6 @@ func (h *Handler) updateStickerPack(c *gin.Context) {
 		h.jsonError(c, http.StatusBadRequest, "bad_request", "invalid JSON body")
 		return
 	}
-	sortOrder := 10
-	if req.SortOrder != nil {
-		sortOrder = *req.SortOrder
-	}
 	packID := c.Param("pack_id")
 	name := strings.TrimSpace(req.Name)
 	var err error
@@ -172,16 +195,36 @@ func (h *Handler) updateStickerPack(c *gin.Context) {
 			return
 		}
 		unlock := h.stickerPackLocks.lock(stickerPackNameLockKey(scope, ownerUserID, roomID))
-		name = h.uniqueStickerPackName(scope, ownerUserID, roomID, name, packID)
-		_, err = h.DB.Exec(
-			`UPDATE sticker_packs SET name = ?, sort_order = ?, updated_at = ? WHERE id = ?`,
-			name, sortOrder, nowMillis(), packID,
-		)
-		unlock()
-	} else {
+		defer unlock()
+		tx, beginErr := h.DB.Begin()
+		if beginErr != nil {
+			err = beginErr
+		} else {
+			defer tx.Rollback()
+			if err = lockStickerPackNamespace(tx, scope, ownerUserID, roomID); err == nil {
+				name, err = uniqueStickerPackNameTx(tx, scope, ownerUserID, roomID, name, packID)
+			}
+			if err == nil {
+				if req.SortOrder == nil {
+					_, err = tx.Exec(
+						`UPDATE sticker_packs SET name = ?, updated_at = ? WHERE id = ?`,
+						name, nowMillis(), packID,
+					)
+				} else {
+					_, err = tx.Exec(
+						`UPDATE sticker_packs SET name = ?, sort_order = ?, updated_at = ? WHERE id = ?`,
+						name, *req.SortOrder, nowMillis(), packID,
+					)
+				}
+			}
+			if err == nil {
+				err = tx.Commit()
+			}
+		}
+	} else if req.SortOrder != nil {
 		_, err = h.DB.Exec(
 			`UPDATE sticker_packs SET sort_order = ?, updated_at = ? WHERE id = ?`,
-			sortOrder, nowMillis(), packID,
+			*req.SortOrder, nowMillis(), packID,
 		)
 	}
 	if err != nil {
@@ -192,11 +235,14 @@ func (h *Handler) updateStickerPack(c *gin.Context) {
 }
 
 func (h *Handler) deleteStickerPack(c *gin.Context) {
-	if !h.canManageStickerPack(c.Param("pack_id"), currentUserID(c)) {
+	packID := c.Param("pack_id")
+	if !h.canManageStickerPack(packID, currentUserID(c)) {
 		h.jsonError(c, http.StatusForbidden, "forbidden", "cannot manage sticker pack")
 		return
 	}
-	_, _ = h.DB.Exec(`DELETE FROM sticker_packs WHERE id = ?`, c.Param("pack_id"))
+	assetIDs := h.stickerAssetIDsForPack(packID)
+	_, _ = h.DB.Exec(`DELETE FROM sticker_packs WHERE id = ?`, packID)
+	h.scheduleStickerAssets(assetIDs)
 	c.JSON(http.StatusOK, gin.H{"ok": true})
 }
 
@@ -222,14 +268,13 @@ func (h *Handler) addSticker(c *gin.Context) {
 		name = "sticker"
 	}
 	packID := c.Param("pack_id")
-	sortOrder := 10
-	if req.SortOrder != nil {
-		sortOrder = *req.SortOrder
-	}
-	id, err := h.addStickerToPack(packID, req.AssetID, name, sortOrder)
+	id, err := h.addStickerToPack(packID, req.AssetID, name, req.SortOrder)
 	if err != nil {
 		h.jsonError(c, http.StatusInternalServerError, "internal_error", "add sticker failed")
 		return
+	}
+	if err := h.retainStickerAsset(req.AssetID); err != nil {
+		log.Printf("chat: retain sticker asset %s: %v", req.AssetID, err)
 	}
 	h.touchStickerPack(packID)
 	h.idempotentJSON(c, http.StatusCreated, rawBody, gin.H{"sticker": h.stickerPayload(id)})
@@ -322,15 +367,20 @@ func (h *Handler) reorderStickers(c *gin.Context) {
 }
 
 func (h *Handler) deleteSticker(c *gin.Context) {
-	if !h.canManageStickerPack(c.Param("pack_id"), currentUserID(c)) {
+	packID := c.Param("pack_id")
+	stickerID := c.Param("sticker_id")
+	if !h.canManageStickerPack(packID, currentUserID(c)) {
 		h.jsonError(c, http.StatusForbidden, "forbidden", "cannot manage sticker pack")
 		return
 	}
-	if _, err := h.DB.Exec(`DELETE FROM stickers WHERE id = ? AND pack_id = ?`, c.Param("sticker_id"), c.Param("pack_id")); err != nil {
+	var assetID string
+	_ = h.DB.QueryRow(`SELECT asset_id FROM stickers WHERE id = ? AND pack_id = ?`, stickerID, packID).Scan(&assetID)
+	if _, err := h.DB.Exec(`DELETE FROM stickers WHERE id = ? AND pack_id = ?`, stickerID, packID); err != nil {
 		h.jsonError(c, http.StatusInternalServerError, "internal_error", "delete sticker failed")
 		return
 	}
-	h.touchStickerPack(c.Param("pack_id"))
+	h.touchStickerPack(packID)
+	h.scheduleStickerAssets([]string{assetID})
 	c.JSON(http.StatusOK, gin.H{"ok": true})
 }
 
@@ -405,7 +455,19 @@ func (h *Handler) saveSticker(c *gin.Context) {
 		return
 	}
 
-	assetID, sourceName, ok := h.visibleStickerAsset(roomID, userID, strings.TrimSpace(req.StickerID))
+	stickerID := strings.TrimSpace(req.StickerID)
+	assetID, sourceName, ok := h.visibleStickerAsset(roomID, userID, stickerID)
+	if !ok && strings.TrimSpace(req.SourceMessageID) != "" {
+		assetID, sourceName, ok = h.stickerAssetFromMessage(
+			roomID,
+			strings.TrimSpace(req.SourceMessageID),
+			stickerID,
+		)
+		if ok && !h.stickerAssetAvailable(c.Request.Context(), assetID) {
+			h.jsonError(c, http.StatusGone, "sticker_asset_expired", "原表情文件已失效")
+			return
+		}
+	}
 	if !ok {
 		h.jsonError(c, http.StatusNotFound, "not_found", "sticker not found")
 		return
@@ -458,19 +520,18 @@ func (h *Handler) saveSticker(c *gin.Context) {
 	if name == "" {
 		name = "sticker"
 	}
-	sortOrder := 10
-	if req.SortOrder != nil {
-		sortOrder = *req.SortOrder
-	}
-	stickerID, err := h.addStickerToPack(packID, assetID, name, sortOrder)
+	savedStickerID, err := h.addStickerToPack(packID, assetID, name, req.SortOrder)
 	if err != nil {
 		h.jsonError(c, http.StatusInternalServerError, "internal_error", "save sticker failed")
 		return
 	}
+	if err := h.retainStickerAsset(assetID); err != nil {
+		log.Printf("chat: retain saved sticker asset %s: %v", assetID, err)
+	}
 	h.touchStickerPack(packID)
 	c.JSON(http.StatusCreated, gin.H{
 		"pack":    h.stickerPackByID(packID),
-		"sticker": h.stickerPayload(stickerID),
+		"sticker": h.stickerPayload(savedStickerID),
 	})
 }
 
@@ -516,7 +577,7 @@ func (h *Handler) stickersForPack(packID string) []gin.H {
 	rows, _ := h.DB.Query(
 		`SELECT s.id, s.name, s.sort_order, a.id, a.filename, a.mime_type, a.width, a.height, a.created_at
 		 FROM stickers s JOIN assets a ON a.id = s.asset_id
-		 WHERE s.pack_id = ? ORDER BY s.sort_order ASC`,
+		 WHERE s.pack_id = ? ORDER BY s.sort_order ASC, s.created_at ASC, s.id ASC`,
 		packID,
 	)
 	assetStore := h.assetStore()
@@ -554,7 +615,8 @@ func (h *Handler) stickersByPackID(packIDs []string) map[string][]gin.H {
 		fmt.Sprintf(
 			`SELECT s.pack_id, s.id, s.name, s.sort_order, a.id, a.filename, a.mime_type, a.width, a.height, a.created_at
 			 FROM stickers s JOIN assets a ON a.id = s.asset_id
-			 WHERE s.pack_id IN (%s) ORDER BY s.pack_id ASC, s.sort_order ASC`,
+			 WHERE s.pack_id IN (%s)
+			 ORDER BY s.pack_id ASC, s.sort_order ASC, s.created_at ASC, s.id ASC`,
 			placeholders,
 		),
 		args...,
@@ -658,46 +720,73 @@ func (h *Handler) ensureDefaultStickerPack(scope, ownerUserID, roomID, name stri
 	unlock := h.stickerPackLocks.lock(stickerPackNameLockKey(scope, ownerUserID, roomID))
 	defer unlock()
 
+	tx, err := h.DB.Begin()
+	if err != nil {
+		return "", err
+	}
+	defer tx.Rollback()
+	if err := lockStickerPackNamespace(tx, scope, ownerUserID, roomID); err != nil {
+		return "", err
+	}
+
 	var id string
 	if scope == "personal" {
-		err := h.DB.QueryRow(
-			`SELECT id FROM sticker_packs WHERE scope = 'personal' AND owner_user_id = ? AND name = ? ORDER BY created_at ASC LIMIT 1`,
+		err = tx.QueryRow(
+			`SELECT id FROM sticker_packs
+			 WHERE scope = 'personal' AND owner_user_id = ? AND name = ?
+			 ORDER BY created_at ASC LIMIT 1 FOR UPDATE`,
 			ownerUserID, name,
 		).Scan(&id)
 		if err == nil {
-			return id, nil
+			return id, tx.Commit()
 		}
 		if err != sql.ErrNoRows {
 			return "", err
 		}
+		sortOrder, err := nextStickerPackSortOrderTx(tx, scope, ownerUserID, roomID)
+		if err != nil {
+			return "", err
+		}
 		now := nowMillis()
 		id = newID("stkp")
-		_, err = h.DB.Exec(
+		_, err = tx.Exec(
 			`INSERT INTO sticker_packs (id, owner_user_id, scope, name, sort_order, created_at, updated_at)
-			 VALUES (?, ?, 'personal', ?, 10, ?, ?)`,
-			id, ownerUserID, name, now, now,
+			 VALUES (?, ?, 'personal', ?, ?, ?, ?)`,
+			id, ownerUserID, name, sortOrder, now, now,
 		)
-		return id, err
+		if err != nil {
+			return "", err
+		}
+		return id, tx.Commit()
 	}
 
-	err := h.DB.QueryRow(
-		`SELECT id FROM sticker_packs WHERE scope = 'room' AND room_id = ? AND name = ? ORDER BY created_at ASC LIMIT 1`,
+	err = tx.QueryRow(
+		`SELECT id FROM sticker_packs
+		 WHERE scope = 'room' AND room_id = ? AND name = ?
+		 ORDER BY created_at ASC LIMIT 1 FOR UPDATE`,
 		roomID, name,
 	).Scan(&id)
 	if err == nil {
-		return id, nil
+		return id, tx.Commit()
 	}
 	if err != sql.ErrNoRows {
 		return "", err
 	}
+	sortOrder, err := nextStickerPackSortOrderTx(tx, scope, ownerUserID, roomID)
+	if err != nil {
+		return "", err
+	}
 	now := nowMillis()
 	id = newID("stkp")
-	_, err = h.DB.Exec(
+	_, err = tx.Exec(
 		`INSERT INTO sticker_packs (id, room_id, scope, name, sort_order, created_at, updated_at)
-		 VALUES (?, ?, 'room', ?, 10, ?, ?)`,
-		id, roomID, name, now, now,
+		 VALUES (?, ?, 'room', ?, ?, ?, ?)`,
+		id, roomID, name, sortOrder, now, now,
 	)
-	return id, err
+	if err != nil {
+		return "", err
+	}
+	return id, tx.Commit()
 }
 
 func (h *Handler) packHasScope(packID, scope, roomID string) bool {
@@ -710,59 +799,114 @@ func (h *Handler) packHasScope(packID, scope, roomID string) bool {
 	return count > 0
 }
 
-func (h *Handler) uniqueStickerPackName(scope, ownerUserID, roomID, desired, excludePackID string) string {
+func lockStickerPackNamespace(tx *sql.Tx, scope, ownerUserID, roomID string) error {
+	var id string
+	if scope == "room" {
+		return tx.QueryRow(`SELECT id FROM rooms WHERE id = ? FOR UPDATE`, roomID).Scan(&id)
+	}
+	return tx.QueryRow(`SELECT id FROM users WHERE id = ? FOR UPDATE`, ownerUserID).Scan(&id)
+}
+
+func uniqueStickerPackNameTx(tx *sql.Tx, scope, ownerUserID, roomID, desired, excludePackID string) (string, error) {
 	base := strings.TrimSpace(desired)
 	if base == "" {
-		return base
+		return base, nil
 	}
-	var rows *sql.Rows
-	var err error
-	if scope == "room" {
-		rows, err = h.DB.Query(
-			`SELECT name FROM sticker_packs WHERE scope = 'room' AND room_id = ? AND id <> ?`,
-			roomID, excludePackID,
-		)
-	} else {
-		rows, err = h.DB.Query(
-			`SELECT name FROM sticker_packs WHERE scope = 'personal' AND owner_user_id = ? AND id <> ?`,
-			ownerUserID, excludePackID,
-		)
-	}
-	if err != nil {
-		return base
-	}
-	defer rows.Close()
-	existing := map[string]bool{}
-	for rows.Next() {
-		var name string
-		if err := rows.Scan(&name); err == nil {
-			existing[name] = true
+	for occurrence := 1; ; occurrence++ {
+		candidate := numberedName(base, occurrence)
+		var existing string
+		var err error
+		if scope == "room" {
+			err = tx.QueryRow(
+				`SELECT name FROM sticker_packs
+				 WHERE scope = 'room' AND room_id = ? AND id <> ? AND name = ?
+				 LIMIT 1 FOR UPDATE`,
+				roomID, excludePackID, candidate,
+			).Scan(&existing)
+		} else {
+			err = tx.QueryRow(
+				`SELECT name FROM sticker_packs
+				 WHERE scope = 'personal' AND owner_user_id = ? AND id <> ? AND name = ?
+				 LIMIT 1 FOR UPDATE`,
+				ownerUserID, excludePackID, candidate,
+			).Scan(&existing)
 		}
-	}
-	if !existing[base] {
-		return base
-	}
-	for index := 2; ; index++ {
-		candidate := fmt.Sprintf("%s (%d)", base, index)
-		if !existing[candidate] {
-			return candidate
+		if err == sql.ErrNoRows {
+			return candidate, nil
+		}
+		if err != nil {
+			return "", err
 		}
 	}
 }
 
-func (h *Handler) addStickerToPack(packID, assetID, desiredName string, sortOrder int) (string, error) {
+func nextStickerPackSortOrderTx(tx *sql.Tx, scope, ownerUserID, roomID string) (int, error) {
+	var maxSortOrder int
+	var err error
+	if scope == "room" {
+		err = tx.QueryRow(
+			`SELECT COALESCE(MAX(sort_order), 0) FROM sticker_packs WHERE scope = 'room' AND room_id = ?`,
+			roomID,
+		).Scan(&maxSortOrder)
+	} else {
+		err = tx.QueryRow(
+			`SELECT COALESCE(MAX(sort_order), 0) FROM sticker_packs WHERE scope = 'personal' AND owner_user_id = ?`,
+			ownerUserID,
+		).Scan(&maxSortOrder)
+	}
+	if err != nil {
+		return 0, err
+	}
+	return maxSortOrder + 10, nil
+}
+
+func numberedName(base string, occurrence int) string {
+	if occurrence <= 1 {
+		return base
+	}
+	return fmt.Sprintf("%s (%d)", base, occurrence)
+}
+
+func (h *Handler) addStickerToPack(packID, assetID, desiredName string, requestedSortOrder *int) (string, error) {
+	unlockAsset := h.assetLifecycleLocks.lock(assetID)
+	defer unlockAsset()
 	unlock := h.stickerPackLocks.lock("stickers:" + packID)
 	defer unlock()
+
+	tx, err := h.DB.Begin()
+	if err != nil {
+		return "", err
+	}
+	defer tx.Rollback()
+	var lockedPackID string
+	if err := tx.QueryRow(`SELECT id FROM sticker_packs WHERE id = ? FOR UPDATE`, packID).Scan(&lockedPackID); err != nil {
+		return "", err
+	}
+	sortOrder := 0
+	if requestedSortOrder != nil {
+		sortOrder = *requestedSortOrder
+	} else if err := tx.QueryRow(
+		`SELECT COALESCE(MAX(sort_order), 0) + 10 FROM stickers WHERE pack_id = ?`,
+		packID,
+	).Scan(&sortOrder); err != nil {
+		return "", err
+	}
 
 	base := normalizeStickerName(desiredName)
 	for attempt := 0; attempt < 20; attempt++ {
 		id := newID("stk")
-		name := h.uniqueStickerName(packID, base, "")
-		_, err := h.DB.Exec(
+		name, err := uniqueStickerNameTx(tx, packID, base, "")
+		if err != nil {
+			return "", err
+		}
+		_, err = tx.Exec(
 			`INSERT INTO stickers (id, pack_id, asset_id, name, sort_order, created_at) VALUES (?, ?, ?, ?, ?, ?)`,
 			id, packID, assetID, name, sortOrder, nowMillis(),
 		)
 		if err == nil {
+			if err := tx.Commit(); err != nil {
+				return "", err
+			}
 			return id, nil
 		}
 		if !isStickerNameConflict(err) {
@@ -776,12 +920,24 @@ func (h *Handler) renameStickerInPack(packID, stickerID, desiredName string) err
 	unlock := h.stickerPackLocks.lock("stickers:" + packID)
 	defer unlock()
 
+	tx, err := h.DB.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	var lockedPackID string
+	if err := tx.QueryRow(`SELECT id FROM sticker_packs WHERE id = ? FOR UPDATE`, packID).Scan(&lockedPackID); err != nil {
+		return err
+	}
 	base := normalizeStickerName(desiredName)
 	for attempt := 0; attempt < 20; attempt++ {
-		name := h.uniqueStickerName(packID, base, stickerID)
-		_, err := h.DB.Exec(`UPDATE stickers SET name = ? WHERE id = ? AND pack_id = ?`, name, stickerID, packID)
+		name, err := uniqueStickerNameTx(tx, packID, base, stickerID)
+		if err != nil {
+			return err
+		}
+		_, err = tx.Exec(`UPDATE stickers SET name = ? WHERE id = ? AND pack_id = ?`, name, stickerID, packID)
 		if err == nil {
-			return nil
+			return tx.Commit()
 		}
 		if !isStickerNameConflict(err) {
 			return err
@@ -790,27 +946,22 @@ func (h *Handler) renameStickerInPack(packID, stickerID, desiredName string) err
 	return fmt.Errorf("sticker name conflict after retries")
 }
 
-func (h *Handler) uniqueStickerName(packID, desired, excludeStickerID string) string {
+func uniqueStickerNameTx(tx *sql.Tx, packID, desired, excludeStickerID string) (string, error) {
 	base := normalizeStickerName(desired)
-	rows, err := h.DB.Query(`SELECT name FROM stickers WHERE pack_id = ? AND id <> ?`, packID, excludeStickerID)
-	if err != nil {
-		return base
-	}
-	defer rows.Close()
-	existing := map[string]bool{}
-	for rows.Next() {
-		var name string
-		if err := rows.Scan(&name); err == nil {
-			existing[name] = true
+	for occurrence := 1; ; occurrence++ {
+		candidate := numberedName(base, occurrence)
+		var existing string
+		err := tx.QueryRow(
+			`SELECT name FROM stickers
+			 WHERE pack_id = ? AND id <> ? AND name = ?
+			 LIMIT 1 FOR UPDATE`,
+			packID, excludeStickerID, candidate,
+		).Scan(&existing)
+		if err == sql.ErrNoRows {
+			return candidate, nil
 		}
-	}
-	if !existing[base] {
-		return base
-	}
-	for index := 2; ; index++ {
-		candidate := fmt.Sprintf("%s (%d)", base, index)
-		if !existing[candidate] {
-			return candidate
+		if err != nil {
+			return "", err
 		}
 	}
 }
@@ -827,9 +978,14 @@ func isStickerNameConflict(err error) bool {
 	if err == nil {
 		return false
 	}
+	var mysqlErr *mysqlDriver.MySQLError
+	if errors.As(err, &mysqlErr) {
+		return mysqlErr.Number == 1062
+	}
 	message := err.Error()
-	return strings.Contains(message, "UNIQUE constraint failed") &&
-		strings.Contains(message, "stickers")
+	return (strings.Contains(message, "UNIQUE constraint failed") &&
+		strings.Contains(message, "stickers")) ||
+		strings.Contains(message, "Duplicate entry")
 }
 
 func (h *Handler) touchStickerPack(packID string) {

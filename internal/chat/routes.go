@@ -42,7 +42,8 @@ type Handler struct {
 	Assets   *storage.AssetStorage
 	MusicBox *musicbox.Manager
 
-	stickerPackLocks keyedMutexes
+	stickerPackLocks    keyedMutexes
+	assetLifecycleLocks keyedMutexes
 }
 
 // RegisterRoutes wires the chat API onto g and returns the handler so the
@@ -68,6 +69,9 @@ func RegisterRoutes(g *gin.RouterGroup, db *sql.DB, cfg *config.Config, bus *eve
 	}
 	if err := h.ensureMessageHistorySchema(); err != nil {
 		log.Printf("chat: ensure message history schema: %v", err)
+	}
+	if err := h.ensureStickerAssetLifecycleSchema(); err != nil {
+		log.Printf("chat: ensure sticker asset lifecycle schema: %v", err)
 	}
 
 	// The music box fans out a fresh snapshot whenever a room's queue or

@@ -100,9 +100,10 @@ type musicBoxControlRequest struct {
 }
 
 type saveStickerRequest struct {
-	StickerID    string `json:"sticker_id"`
-	TargetScope  string `json:"target_scope"`
-	TargetPackID string `json:"target_pack_id"`
-	Name         string `json:"name"`
-	SortOrder    *int   `json:"sort_order"`
+	StickerID       string `json:"sticker_id"`
+	SourceMessageID string `json:"source_message_id"`
+	TargetScope     string `json:"target_scope"`
+	TargetPackID    string `json:"target_pack_id"`
+	Name            string `json:"name"`
+	SortOrder       *int   `json:"sort_order"`
 }

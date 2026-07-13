@@ -128,6 +128,12 @@ func (h *Handler) uploadFile(c *gin.Context) {
 		h.jsonError(c, http.StatusInternalServerError, "internal_error", "store asset failed")
 		return
 	}
+	if err := h.trackUploadedStickerAsset(id, purpose); err != nil {
+		_, _ = h.DB.Exec(`DELETE FROM assets WHERE id = ?`, id)
+		_ = assetStore.Delete(c.Request.Context(), storageKey)
+		h.jsonError(c, http.StatusInternalServerError, "internal_error", "track sticker asset failed")
+		return
+	}
 	c.JSON(http.StatusCreated, gin.H{"asset": h.assetPayload(id)})
 }
 

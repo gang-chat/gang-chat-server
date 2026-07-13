@@ -133,11 +133,13 @@ func (h *Handler) forceDeleteMessage(c *gin.Context) {
 		h.jsonError(c, http.StatusBadRequest, "validation_failed", "confirm must be true")
 		return
 	}
+	messageID := c.Param("message_id")
+	stickerAssetIDs := h.messageStickerAssetIDs(messageID)
 	res, err := h.DB.Exec(
 		`UPDATE messages SET body = '', mentions_json = '[]', attachments_json = '[]',
 		        is_force_deleted = 1, force_deleted_at = ?, force_deleted_by_user_id = ?
 		 WHERE id = ? AND room_id = ?`,
-		nowMillis(), currentUserID(c), c.Param("message_id"), roomID,
+		nowMillis(), currentUserID(c), messageID, roomID,
 	)
 	if err != nil {
 		h.jsonError(c, http.StatusInternalServerError, "internal_error", "force delete failed")
@@ -147,8 +149,9 @@ func (h *Handler) forceDeleteMessage(c *gin.Context) {
 		h.jsonError(c, http.StatusNotFound, "not_found", "message not found")
 		return
 	}
-	msg, _ := h.messageByIDForUser(c.Param("message_id"), currentUserID(c))
-	for _, userID := range h.deleteRoomNotificationsForMessage(roomID, c.Param("message_id")) {
+	h.scheduleStickerAssets(stickerAssetIDs)
+	msg, _ := h.messageByIDForUser(messageID, currentUserID(c))
+	for _, userID := range h.deleteRoomNotificationsForMessage(roomID, messageID) {
 		h.publishRoomNotificationsUpdated(userID)
 	}
 	// Force-deleting the latest message changes the last_message preview.
@@ -157,6 +160,7 @@ func (h *Handler) forceDeleteMessage(c *gin.Context) {
 }
 
 func (h *Handler) applyRecall(roomID, messageID, userID string) {
+	stickerAssetIDs := h.messageStickerAssetIDs(messageID)
 	_, _ = h.DB.Exec(
 		`UPDATE messages SET body = CASE WHEN type = 'text' THEN body ELSE '' END,
 		        mentions_json = '[]', attachments_json = '[]',
@@ -164,6 +168,7 @@ func (h *Handler) applyRecall(roomID, messageID, userID string) {
 		 WHERE id = ? AND room_id = ?`,
 		nowMillis(), userID, messageID, roomID,
 	)
+	h.scheduleStickerAssets(stickerAssetIDs)
 	// Recalling the latest message changes the room's last_message preview, so
 	// refresh every member's list entry. Covers both the immediate-recall and
 	// the admin-approval paths since both funnel through here.

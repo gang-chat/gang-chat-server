@@ -109,6 +109,7 @@ func main() {
 	chatGroup := api.Group("")
 	chatGroup.Use(authMW.Handle)
 	chatHandler := chat.RegisterRoutes(chatGroup, pool, cfg, bus, liveController, musicBox, assetStore)
+	go chatHandler.RunStickerAssetCleanup(context.Background())
 
 	lkGroup := r.Group("/livekit")
 	lkGroup.Use(authMW.Handle)

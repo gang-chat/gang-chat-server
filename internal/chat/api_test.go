@@ -35,6 +35,7 @@ type apiHarness struct {
 	live              *fakeLiveController
 	bus               *eventbus.Bus
 	assets            *storage.AssetStorage
+	chat              *Handler
 	cfg               *config.Config
 	verificationEmail *fakeVerificationEmailSender
 }
@@ -134,7 +135,7 @@ func newAPIHarness(t *testing.T) *apiHarness {
 	live := &fakeLiveController{}
 	bus := eventbus.New()
 	assetStore := storage.NewMemoryAssetStorage()
-	RegisterRoutes(chatGroup, pool, cfg, bus, live, nil, assetStore)
+	chatHandler := RegisterRoutes(chatGroup, pool, cfg, bus, live, nil, assetStore)
 
 	return &apiHarness{
 		t:                 t,
@@ -143,6 +144,7 @@ func newAPIHarness(t *testing.T) *apiHarness {
 		live:              live,
 		bus:               bus,
 		assets:            assetStore,
+		chat:              chatHandler,
 		cfg:               cfg,
 		verificationEmail: verificationEmail,
 	}
@@ -726,6 +728,24 @@ func hasStickerNames(pack map[string]any, names ...string) bool {
 	return true
 }
 
+func packHasStickerAsset(pack map[string]any, assetID string) bool {
+	stickers, ok := pack["stickers"].([]any)
+	if !ok {
+		return false
+	}
+	for _, item := range stickers {
+		sticker, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		asset, ok := sticker["asset"].(map[string]any)
+		if ok && asset["id"] == assetID {
+			return true
+		}
+	}
+	return false
+}
+
 func postJSON(router *gin.Engine, path, token string, body any) *httptest.ResponseRecorder {
 	payload, err := json.Marshal(body)
 	if err != nil {
@@ -771,7 +791,8 @@ func stickerNamesForDefaultPack(t *testing.T, db *sql.DB, scope, ownerUserID, ro
 			`SELECT s.name
 			 FROM stickers s
 			 JOIN sticker_packs p ON p.id = s.pack_id
-			 WHERE p.scope = 'personal' AND p.owner_user_id = ? AND p.name = ?`,
+			 WHERE p.scope = 'personal' AND p.owner_user_id = ? AND p.name = ?
+			 ORDER BY s.sort_order ASC, s.created_at ASC, s.id ASC`,
 			ownerUserID, name,
 		)
 	} else {
@@ -779,7 +800,8 @@ func stickerNamesForDefaultPack(t *testing.T, db *sql.DB, scope, ownerUserID, ro
 			`SELECT s.name
 			 FROM stickers s
 			 JOIN sticker_packs p ON p.id = s.pack_id
-			 WHERE p.scope = 'room' AND p.room_id = ? AND p.name = ?`,
+			 WHERE p.scope = 'room' AND p.room_id = ? AND p.name = ?
+			 ORDER BY s.sort_order ASC, s.created_at ASC, s.id ASC`,
 			roomID, name,
 		)
 	}
@@ -807,12 +829,16 @@ func stickerPackNamesForScope(t *testing.T, db *sql.DB, scope, ownerUserID, room
 	var err error
 	if scope == "personal" {
 		rows, err = db.Query(
-			`SELECT name FROM sticker_packs WHERE scope = 'personal' AND owner_user_id = ?`,
+			`SELECT name FROM sticker_packs
+			 WHERE scope = 'personal' AND owner_user_id = ?
+			 ORDER BY sort_order ASC, created_at ASC, id ASC`,
 			ownerUserID,
 		)
 	} else {
 		rows, err = db.Query(
-			`SELECT name FROM sticker_packs WHERE scope = 'room' AND room_id = ?`,
+			`SELECT name FROM sticker_packs
+			 WHERE scope = 'room' AND room_id = ?
+			 ORDER BY sort_order ASC, created_at ASC, id ASC`,
 			roomID,
 		)
 	}
@@ -3521,6 +3547,130 @@ func TestSaveStickerToPersonalAndRoomPacks(t *testing.T) {
 	}
 }
 
+func TestSaveDeletedStickerFromMessageSnapshot(t *testing.T) {
+	api := newAPIHarness(t)
+	owner := api.register("sticker_snapshot_owner")
+	room := api.createRoom(owner.Token, map[string]any{"name": "Sticker Snapshot Room", "join_policy": "open"})
+	roomID := room["id"].(string)
+
+	assetID := "asset_sticker_snapshot"
+	filename := "snapshot.webp"
+	body := []byte("sticker snapshot")
+	api.putAsset(assetID, filename, "image/webp", body)
+	_, err := api.db.Exec(
+		`INSERT INTO assets (id, owner_user_id, purpose, filename, mime_type, size_bytes, url, storage_key, created_at)
+		 VALUES (?, ?, 'sticker', ?, 'image/webp', ?, ?, ?, ?)`,
+		assetID,
+		owner.User["id"].(string),
+		filename,
+		len(body),
+		"/assets/"+assetID+"/"+filename,
+		"assets/"+assetID+"/"+filename,
+		nowMillis(),
+	)
+	if err != nil {
+		t.Fatalf("insert asset: %v", err)
+	}
+
+	status, response := api.request(http.MethodPost, "/sticker-packs", owner.Token, map[string]any{
+		"scope": "personal",
+		"name":  "Snapshot Source",
+	})
+	api.requireStatus(status, http.StatusCreated, response)
+	packID := response["pack"].(map[string]any)["id"].(string)
+
+	status, response = api.request(http.MethodPost, "/sticker-packs/"+packID+"/stickers", owner.Token, map[string]any{
+		"asset_id": assetID,
+		"name":     "snapshot",
+	})
+	api.requireStatus(status, http.StatusCreated, response)
+	stickerID := response["sticker"].(map[string]any)["id"].(string)
+
+	message := api.sendTypedMessage(owner.Token, roomID, "sticker", "[表情] snapshot", []any{
+		map[string]any{
+			"type":       "sticker",
+			"sticker_id": stickerID,
+			"name":       "snapshot",
+			"asset": map[string]any{
+				"id":        assetID,
+				"filename":  filename,
+				"url":       "/assets/" + assetID + "/" + filename,
+				"mime_type": "image/webp",
+			},
+		},
+	})
+
+	status, response = api.request(http.MethodDelete, "/sticker-packs/"+packID+"/stickers/"+stickerID, owner.Token, nil)
+	api.requireStatus(status, http.StatusOK, response)
+
+	status, response = api.request(http.MethodPost, "/rooms/"+roomID+"/stickers/save", owner.Token, map[string]any{
+		"sticker_id":        stickerID,
+		"source_message_id": message["id"].(string),
+		"target_scope":      "personal",
+	})
+	api.requireStatus(status, http.StatusCreated, response)
+	savedPack := response["pack"].(map[string]any)
+	if !packHasStickerAsset(savedPack, assetID) {
+		t.Fatalf("saved pack should reuse the message asset: %v", savedPack)
+	}
+
+	var expiresAt sql.NullInt64
+	if err := api.db.QueryRow(
+		`SELECT expires_at FROM sticker_asset_lifecycle WHERE asset_id = ?`,
+		assetID,
+	).Scan(&expiresAt); err != nil {
+		t.Fatalf("read sticker lifecycle: %v", err)
+	}
+	if expiresAt.Valid {
+		t.Fatalf("message or pack referenced sticker must not expire: %v", expiresAt.Int64)
+	}
+}
+
+func TestExpiredOrphanStickerAssetDeletesMetadataAndObject(t *testing.T) {
+	api := newAPIHarness(t)
+	owner := api.register("sticker_cleanup_owner")
+	assetID := "asset_sticker_cleanup"
+	filename := "cleanup.webp"
+	body := []byte("cleanup")
+	api.putAsset(assetID, filename, "image/webp", body)
+	_, err := api.db.Exec(
+		`INSERT INTO assets (id, owner_user_id, purpose, filename, mime_type, size_bytes, url, storage_key, created_at)
+		 VALUES (?, ?, 'sticker', ?, 'image/webp', ?, ?, ?, ?)`,
+		assetID,
+		owner.User["id"].(string),
+		filename,
+		len(body),
+		"/assets/"+assetID+"/"+filename,
+		"assets/"+assetID+"/"+filename,
+		nowMillis(),
+	)
+	if err != nil {
+		t.Fatalf("insert asset: %v", err)
+	}
+	_, err = api.db.Exec(
+		`INSERT INTO sticker_asset_lifecycle (asset_id, expires_at, updated_at)
+		 VALUES (?, ?, ?)`,
+		assetID, nowMillis()-1, nowMillis(),
+	)
+	if err != nil {
+		t.Fatalf("insert lifecycle: %v", err)
+	}
+
+	if err := api.chat.cleanupExpiredStickerAssets(context.Background()); err != nil {
+		t.Fatalf("cleanup sticker assets: %v", err)
+	}
+	var count int
+	if err := api.db.QueryRow(`SELECT COUNT(*) FROM assets WHERE id = ?`, assetID).Scan(&count); err != nil {
+		t.Fatalf("count cleaned asset: %v", err)
+	}
+	if count != 0 {
+		t.Fatalf("expired orphan metadata should be deleted, count=%d", count)
+	}
+	if _, err := api.assets.Open(context.Background(), "assets/"+assetID+"/"+filename, assetID, filename); err == nil {
+		t.Fatal("expired orphan object should be deleted")
+	}
+}
+
 func TestConcurrentSaveStickerKeepsDefaultPacksAndNamesUnique(t *testing.T) {
 	api := newAPIHarness(t)
 	owner := api.register("sticker_concurrent_owner")
@@ -3586,7 +3736,8 @@ func TestConcurrentSaveStickerKeepsDefaultPacksAndNamesUnique(t *testing.T) {
 		t.Fatalf("concurrent personal saves should create one default pack, got %d", count)
 	}
 	personalNames := stickerNamesForDefaultPack(t, api.db, "personal", memberID, "", defaultPersonalStickerPackName)
-	if !sameStringSet(personalNames, []string{"ok", "ok (2)", "ok (3)", "ok (4)", "ok (5)", "ok (6)"}) {
+	expectedNames := []string{"ok", "ok (2)", "ok (3)", "ok (4)", "ok (5)", "ok (6)"}
+	if strings.Join(personalNames, "\x00") != strings.Join(expectedNames, "\x00") {
 		t.Fatalf("concurrent personal saves should allocate unique names, got %v", personalNames)
 	}
 
@@ -3595,7 +3746,7 @@ func TestConcurrentSaveStickerKeepsDefaultPacksAndNamesUnique(t *testing.T) {
 		t.Fatalf("concurrent room saves should create one default pack, got %d", count)
 	}
 	roomNames := stickerNamesForDefaultPack(t, api.db, "room", "", roomID, defaultRoomStickerPackName)
-	if !sameStringSet(roomNames, []string{"ok", "ok (2)", "ok (3)", "ok (4)", "ok (5)", "ok (6)"}) {
+	if strings.Join(roomNames, "\x00") != strings.Join(expectedNames, "\x00") {
 		t.Fatalf("concurrent room saves should allocate unique names, got %v", roomNames)
 	}
 }
@@ -3637,14 +3788,68 @@ func TestConcurrentCreateStickerPacksKeepsNamesUnique(t *testing.T) {
 	createPacksConcurrently("personal")
 	ownerID := owner.User["id"].(string)
 	personalNames := stickerPackNamesForScope(t, api.db, "personal", ownerID, "")
-	if !sameStringSet(personalNames, []string{"same", "same (2)", "same (3)", "same (4)", "same (5)", "same (6)"}) {
+	expectedNames := []string{"same", "same (2)", "same (3)", "same (4)", "same (5)", "same (6)"}
+	if strings.Join(personalNames, "\x00") != strings.Join(expectedNames, "\x00") {
 		t.Fatalf("concurrent personal pack creates should allocate unique names, got %v", personalNames)
 	}
 
 	createPacksConcurrently("room")
 	roomNames := stickerPackNamesForScope(t, api.db, "room", "", roomID)
-	if !sameStringSet(roomNames, []string{"same", "same (2)", "same (3)", "same (4)", "same (5)", "same (6)"}) {
+	if strings.Join(roomNames, "\x00") != strings.Join(expectedNames, "\x00") {
 		t.Fatalf("concurrent room pack creates should allocate unique names, got %v", roomNames)
+	}
+	personalNamesAfterRoomCreates := stickerPackNamesForScope(t, api.db, "personal", ownerID, "")
+	if !sameStringSet(personalNamesAfterRoomCreates, personalNames) {
+		t.Fatalf(
+			"room pack names must not rename existing personal packs: before=%v after=%v",
+			personalNames,
+			personalNamesAfterRoomCreates,
+		)
+	}
+}
+
+func TestStickerPackDuplicateRenamePreservesOrder(t *testing.T) {
+	api := newAPIHarness(t)
+	owner := api.register("sticker_pack_order_owner")
+	ownerID := owner.User["id"].(string)
+
+	create := func(name string) map[string]any {
+		t.Helper()
+		status, response := api.request(http.MethodPost, "/sticker-packs", owner.Token, map[string]any{
+			"scope": "personal",
+			"name":  name,
+		})
+		api.requireStatus(status, http.StatusCreated, response)
+		return response["pack"].(map[string]any)
+	}
+
+	first := create("same")
+	second := create("second")
+	if first["sort_order"] != float64(10) || second["sort_order"] != float64(20) {
+		t.Fatalf("packs should append by default, first=%v second=%v", first, second)
+	}
+
+	status, response := api.request(
+		http.MethodPatch,
+		"/sticker-packs/"+second["id"].(string),
+		owner.Token,
+		map[string]any{"name": "same"},
+	)
+	api.requireStatus(status, http.StatusOK, response)
+	renamed := response["pack"].(map[string]any)
+	if renamed["name"] != "same (2)" || renamed["sort_order"] != float64(20) {
+		t.Fatalf("duplicate rename should suffix only the renamed pack without moving it: %v", renamed)
+	}
+
+	third := create("same")
+	if third["name"] != "same (3)" || third["sort_order"] != float64(30) {
+		t.Fatalf("new duplicate pack should receive the next name and append order: %v", third)
+	}
+
+	names := stickerPackNamesForScope(t, api.db, "personal", ownerID, "")
+	expected := []string{"same", "same (2)", "same (3)"}
+	if strings.Join(names, "\x00") != strings.Join(expected, "\x00") {
+		t.Fatalf("duplicate naming should preserve existing pack order: got %v want %v", names, expected)
 	}
 }
 
