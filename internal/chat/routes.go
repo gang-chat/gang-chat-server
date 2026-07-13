@@ -66,6 +66,9 @@ func RegisterRoutes(g *gin.RouterGroup, db *sql.DB, cfg *config.Config, bus *eve
 	if err := h.ensureRoomNotificationSchema(); err != nil {
 		log.Printf("chat: ensure room notification schema: %v", err)
 	}
+	if err := h.ensureMessageHistorySchema(); err != nil {
+		log.Printf("chat: ensure message history schema: %v", err)
+	}
 
 	// The music box fans out a fresh snapshot whenever a room's queue or
 	// playback changes; route it through the same SSE bus as everything else.
@@ -135,6 +138,8 @@ func RegisterRoutes(g *gin.RouterGroup, db *sql.DB, cfg *config.Config, bus *eve
 
 	g.GET("/rooms/:room_id/messages", h.listMessages)
 	g.POST("/rooms/:room_id/messages", h.sendMessage)
+	g.GET("/rooms/:room_id/message-history", h.listMessageHistory)
+	g.POST("/rooms/:room_id/message-history/hide", h.hideMessageHistory)
 	g.POST("/rooms/:room_id/messages/:message_id/recall", h.recallMessage)
 	g.GET("/rooms/:room_id/message-recall-requests", h.listMessageRecallRequests)
 	g.PATCH("/rooms/:room_id/message-recall-requests/:request_id", h.reviewMessageRecallRequest)

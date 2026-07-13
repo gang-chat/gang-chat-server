@@ -1424,6 +1424,99 @@ func TestHistoricalLiveSystemMessagesAreHidden(t *testing.T) {
 	}
 }
 
+func TestRoomMessageHistoryFiltersAndDeletesOnlyForCurrentViewer(t *testing.T) {
+	api := newAPIHarness(t)
+	owner := api.register("history_owner")
+	member := api.register("history_member")
+	room := api.createRoom(owner.Token, map[string]any{
+		"name":        "Message History",
+		"join_policy": "open",
+	})
+	roomID := room["id"].(string)
+	status, response := api.request(http.MethodPost, "/rooms/"+roomID+"/join", member.Token, nil)
+	api.requireStatus(status, http.StatusOK, response)
+
+	linkMessage := api.sendMessage(owner.Token, roomID, "visit https://example.test/history")
+	memberMessage := api.sendMessage(member.Token, roomID, "member-only-history-needle")
+	linkID := linkMessage["id"].(string)
+	memberMessageID := memberMessage["id"].(string)
+
+	status, response = api.request(http.MethodGet, "/rooms/"+roomID+"/message-history?category=links", owner.Token, nil)
+	api.requireStatus(status, http.StatusOK, response)
+	assertHistoryContainsExactly(t, response, linkID)
+
+	status, response = api.request(
+		http.MethodGet,
+		"/rooms/"+roomID+"/message-history?sender_user_id="+member.User["id"].(string),
+		owner.Token,
+		nil,
+	)
+	api.requireStatus(status, http.StatusOK, response)
+	assertHistoryContainsExactly(t, response, memberMessageID)
+
+	status, response = api.request(
+		http.MethodGet,
+		"/rooms/"+roomID+"/message-history?query=member-only-history-needle",
+		owner.Token,
+		nil,
+	)
+	api.requireStatus(status, http.StatusOK, response)
+	assertHistoryContainsExactly(t, response, memberMessageID)
+
+	status, response = api.request(http.MethodPost, "/rooms/"+roomID+"/message-history/hide", owner.Token, map[string]any{
+		"message_ids": []string{linkID},
+		"confirm":     true,
+	})
+	api.requireStatus(status, http.StatusOK, response)
+	if response["deleted_count"] != float64(1) {
+		t.Fatalf("delete count mismatch: %v", response)
+	}
+
+	status, response = api.request(http.MethodGet, "/rooms/"+roomID+"/message-history", owner.Token, nil)
+	api.requireStatus(status, http.StatusOK, response)
+	if historyContains(response, linkID) {
+		t.Fatalf("owner history should hide deleted record: %v", response)
+	}
+
+	status, response = api.request(http.MethodGet, "/rooms/"+roomID+"/message-history", member.Token, nil)
+	api.requireStatus(status, http.StatusOK, response)
+	if !historyContains(response, linkID) {
+		t.Fatalf("another member should still see the record: %v", response)
+	}
+
+	status, response = api.request(http.MethodGet, "/rooms/"+roomID+"/messages?limit=100", owner.Token, nil)
+	api.requireStatus(status, http.StatusOK, response)
+	if !historyContains(response, linkID) {
+		t.Fatalf("deleting a history record must not delete the room message: %v", response)
+	}
+
+	status, response = api.request(http.MethodGet, "/rooms/"+roomID+"/message-history?category=unknown", owner.Token, nil)
+	api.requireStatus(status, http.StatusBadRequest, response)
+}
+
+func assertHistoryContainsExactly(t *testing.T, response map[string]any, messageID string) {
+	t.Helper()
+	messages, ok := response["messages"].([]any)
+	if !ok || len(messages) != 1 {
+		t.Fatalf("expected exactly one history message: %v", response)
+	}
+	message, ok := messages[0].(map[string]any)
+	if !ok || message["id"] != messageID {
+		t.Fatalf("history message mismatch: %v", response)
+	}
+}
+
+func historyContains(response map[string]any, messageID string) bool {
+	messages, _ := response["messages"].([]any)
+	for _, item := range messages {
+		message, _ := item.(map[string]any)
+		if message["id"] == messageID {
+			return true
+		}
+	}
+	return false
+}
+
 func TestListRoomsOrdersLiveFirstThenLatestMessage(t *testing.T) {
 	api := newAPIHarness(t)
 	owner := api.register("room_order_owner")
