@@ -113,9 +113,8 @@ func (h *Handler) appendSystemMessageTxWithID(tx *sql.Tx, roomID string, spec sy
 	}
 	messageID := newID("msg")
 	clientMessageID := newID("sys")
-	_, err = tx.Exec(
-		`INSERT INTO messages (id, room_id, sender_user_id, client_message_id, type, body, mentions_json, attachments_json, created_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+	_, err = insertMessageWithSenderSnapshot(
+		tx,
 		messageID,
 		roomID,
 		subjectID,

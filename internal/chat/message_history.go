@@ -113,15 +113,9 @@ func (h *Handler) listMessageHistory(c *gin.Context) {
 		}
 		queryArgs = append(queryArgs, messageHistoryScanBatch)
 		rows, err := h.DB.Query(
-			`SELECT m.id, m.room_id, m.client_message_id, m.type, m.body,
-			        m.mentions_json, m.attachments_json, m.is_recalled, m.recalled_at,
-			        m.recalled_by_user_id, m.is_force_deleted, m.force_deleted_at,
-			        m.force_deleted_by_user_id, m.created_at,
-			        u.id, u.uid, u.username, u.display_name, u.avatar_url, u.default_avatar_key,
-			        u.is_superuser, sender_rm.room_display_name,
-			        CASE WHEN u.is_superuser != 0 THEN 'superuser' ELSE COALESCE(sender_rm.role, '') END
+			`SELECT `+messageSelectColumnsSQL+`
 			 FROM messages m
-			 JOIN users u ON u.id = m.sender_user_id
+			 LEFT JOIN users u ON u.id = m.sender_user_id
 			 LEFT JOIN room_memberships sender_rm ON sender_rm.room_id = m.room_id AND sender_rm.user_id = m.sender_user_id
 			 WHERE `+strings.Join(queryConditions, " AND ")+`
 			 ORDER BY m.created_at DESC, m.id DESC

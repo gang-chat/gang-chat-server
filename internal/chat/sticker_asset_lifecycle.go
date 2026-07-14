@@ -160,9 +160,10 @@ func (h *Handler) stickerAssetReferenced(assetID string) (bool, error) {
 					WHERE attachment.asset_id = ?
 				)
 				OR LOCATE(?, m.attachments_json) > 0
+				OR LOCATE(?, COALESCE(m.sender_avatar_url_snapshot, '')) > 0
 				LIMIT 1
 			)`,
-			args: []any{assetID, assetURLNeedle},
+			args: []any{assetID, assetURLNeedle, assetURLNeedle},
 		},
 		{
 			query: `SELECT EXISTS(SELECT 1 FROM users WHERE LOCATE(?, COALESCE(avatar_url, '')) > 0 LIMIT 1)`,
@@ -290,6 +291,7 @@ func (h *Handler) reconcileUnreferencedStickerAssets(ctx context.Context) error 
 		       WHERE attachment.asset_id = lifecycle.asset_id
 		     )
 		     OR LOCATE(CONCAT('/assets/', lifecycle.asset_id, '/'), m.attachments_json) > 0
+		     OR LOCATE(CONCAT('/assets/', lifecycle.asset_id, '/'), COALESCE(m.sender_avatar_url_snapshot, '')) > 0
 		   )
 		   AND NOT EXISTS (
 		     SELECT 1 FROM users u

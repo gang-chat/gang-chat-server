@@ -35,7 +35,10 @@ type User struct {
 }
 
 func CreateUser(db *sql.DB, id, username, usernameNorm, email, emailNorm, passwordHash string) (*User, error) {
-	uid := idgen.NextUserUID(db)
+	uid, err := idgen.NextUserUID(db)
+	if err != nil {
+		return nil, err
+	}
 	if err := InsertUser(db, id, uid, username, usernameNorm, email, emailNorm, passwordHash); err != nil {
 		return nil, err
 	}
@@ -160,7 +163,10 @@ func EnsureUserPublicFields(db *sql.DB, userID string) error {
 	}
 	uid := u.UID.String
 	if uid == "" {
-		uid = idgen.NextUserUID(db)
+		uid, err = idgen.NextUserUID(db)
+		if err != nil {
+			return err
+		}
 	}
 	displayName := u.DisplayName.String
 	if displayName == "" {

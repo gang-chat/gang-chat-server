@@ -2,7 +2,9 @@ package musicbox
 
 import (
 	"database/sql"
+	"fmt"
 	"os"
+	"strings"
 	"testing"
 
 	_ "github.com/go-sql-driver/mysql"
@@ -13,15 +15,20 @@ import (
 // full production schema.
 func newTestStore(t *testing.T) *store {
 	t.Helper()
-	dsn := os.Getenv("GANG_TEST_MYSQL_DSN")
+	dsn := os.Getenv("GANG_TEST_MUSICBOX_MYSQL_DSN")
 	if dsn == "" {
-		t.Skip("GANG_TEST_MYSQL_DSN is required for MySQL-backed musicbox tests")
+		t.Skip("GANG_TEST_MUSICBOX_MYSQL_DSN is required for MySQL-backed musicbox tests")
 	}
 	db, err := sql.Open("mysql", dsn)
 	if err != nil {
 		t.Fatalf("open db: %v", err)
 	}
+	db.SetMaxOpenConns(10)
+	db.SetMaxIdleConns(5)
 	t.Cleanup(func() { db.Close() })
+	if err := requireIsolatedMusicboxTestDatabase(db); err != nil {
+		t.Fatal(err)
+	}
 
 	cleanup := []string{
 		`DROP TABLE IF EXISTS room_music_box_queue`,
@@ -59,6 +66,44 @@ func newTestStore(t *testing.T) *store {
 		}
 	}
 	return &store{db: db}
+}
+
+func requireIsolatedMusicboxTestDatabase(db *sql.DB) error {
+	var name string
+	if err := db.QueryRow(`SELECT DATABASE()`).Scan(&name); err != nil {
+		return fmt.Errorf("read musicbox test database name: %w", err)
+	}
+	if !isSafeMusicboxTestDatabaseName(name) {
+		return fmt.Errorf("refusing to modify non-test musicbox database %q", name)
+	}
+	return nil
+}
+
+func isSafeMusicboxTestDatabaseName(name string) bool {
+	name = strings.ToLower(strings.TrimSpace(name))
+	return name != "" && (strings.HasSuffix(name, "_test") || strings.Contains(name, "_test_"))
+}
+
+func TestSafeMusicboxTestDatabaseName(t *testing.T) {
+	t.Parallel()
+	tests := map[string]bool{
+		"gang_chat_musicbox_test": true,
+		"musicbox_test_parallel":  true,
+		" GANG_TEST ":             true,
+		"gang_chat":               false,
+		"contest":                 false,
+		"test":                    false,
+		"":                        false,
+	}
+	for name, want := range tests {
+		name, want := name, want
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			if got := isSafeMusicboxTestDatabaseName(name); got != want {
+				t.Fatalf("isSafeMusicboxTestDatabaseName(%q) = %v, want %v", name, got, want)
+			}
+		})
+	}
 }
 
 func add(t *testing.T, s *store, id string, sort int64) *QueueItem {

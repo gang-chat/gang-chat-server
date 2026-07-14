@@ -33,6 +33,16 @@ func (h *Handler) getMemberProfile(c *gin.Context) {
 			h.jsonError(c, http.StatusInternalServerError, "internal_error", "failed to read member profile")
 			return
 		}
+		if deleted, exists, deletedErr := h.deletedMessageSender(targetID, roomID); deletedErr == nil && exists && h.roomIDExists(roomID) {
+			c.JSON(http.StatusOK, gin.H{"profile": gin.H{
+				"user":              deleted,
+				"room_display_name": nil,
+				"role":              "",
+				"text_muted_until":  nil,
+				"joined_at":         formatMillis(0),
+			}})
+			return
+		}
 		user, userErr := h.profileUserSummary(targetID, viewerID)
 		if userErr != nil || !user.IsSuperuser || !h.roomIDExists(roomID) {
 			h.jsonError(c, http.StatusNotFound, "not_found", "member not found")
@@ -64,6 +74,13 @@ func (h *Handler) getMemberProfile(c *gin.Context) {
 func (h *Handler) getUserProfile(c *gin.Context) {
 	user, err := h.profileUserSummary(c.Param("user_id"), currentUserID(c))
 	if errors.Is(err, sql.ErrNoRows) {
+		if deleted, exists, deletedErr := h.deletedMessageSender(c.Param("user_id")); deletedErr == nil && exists {
+			c.JSON(http.StatusOK, gin.H{"profile": gin.H{"user": deleted}})
+			return
+		} else if deletedErr != nil {
+			h.jsonError(c, http.StatusInternalServerError, "internal_error", "failed to read user profile")
+			return
+		}
 		h.jsonError(c, http.StatusNotFound, "not_found", "user not found")
 		return
 	}
@@ -1189,8 +1206,15 @@ func (h *Handler) updateMemberRole(c *gin.Context) {
 			return
 		}
 		if n, _ := res.RowsAffected(); n == 0 {
-			h.jsonError(c, http.StatusNotFound, "not_found", "member not found")
-			return
+			exists, existsErr := roomMembershipExistsTx(tx, roomID, targetID)
+			if existsErr != nil {
+				h.jsonError(c, http.StatusInternalServerError, "internal_error", "update role failed")
+				return
+			}
+			if !exists {
+				h.jsonError(c, http.StatusNotFound, "not_found", "member not found")
+				return
+			}
 		}
 		if _, err := h.pruneOrRepairRoomTx(tx, roomID); err != nil {
 			h.jsonError(c, http.StatusInternalServerError, "internal_error", "repair room admins failed")
@@ -1234,8 +1258,15 @@ func (h *Handler) updateMemberRole(c *gin.Context) {
 			return
 		}
 		if n, _ := res.RowsAffected(); n == 0 {
-			h.jsonError(c, http.StatusNotFound, "not_found", "member not found")
-			return
+			exists, existsErr := roomMembershipExistsTx(tx, roomID, targetID)
+			if existsErr != nil {
+				h.jsonError(c, http.StatusInternalServerError, "internal_error", "update member failed")
+				return
+			}
+			if !exists {
+				h.jsonError(c, http.StatusNotFound, "not_found", "member not found")
+				return
+			}
 		}
 		displayNameChanged = true
 	}
@@ -1260,6 +1291,17 @@ func (h *Handler) updateMemberRole(c *gin.Context) {
 		h.publishRoomUpdated(roomID)
 	}
 	c.JSON(http.StatusOK, gin.H{"member": h.memberPayload(roomID, targetID, actorID)})
+}
+
+func roomMembershipExistsTx(tx *sql.Tx, roomID, userID string) (bool, error) {
+	var count int
+	if err := tx.QueryRow(
+		`SELECT COUNT(*) FROM room_memberships WHERE room_id = ? AND user_id = ?`,
+		roomID, userID,
+	).Scan(&count); err != nil {
+		return false, err
+	}
+	return count > 0, nil
 }
 
 func (h *Handler) canEditMemberRoomDisplayName(roomID, actorID, targetID, targetRole string) bool {
@@ -1789,7 +1831,7 @@ func scanJoinRequest(rows *sql.Rows) (gin.H, string, int64, error) {
 
 func (h *Handler) joinRequestSourcePayload(roomID, targetUserID string, requestCreatedAt int64) (string, []userSummary) {
 	rows, err := h.DB.Query(
-		`SELECT DISTINCT u.id, u.uid, u.username, u.display_name, u.avatar_url, u.default_avatar_key,
+		`SELECT u.id, u.uid, u.username, u.display_name, u.avatar_url, u.default_avatar_key,
 		        irm.room_display_name, irm.role
 		 FROM room_invites ri
 		 JOIN users u ON u.id = ri.inviter_user_id
@@ -1804,12 +1846,17 @@ func (h *Handler) joinRequestSourcePayload(roomID, targetUserID string, requestC
 	defer rows.Close()
 
 	inviters := make([]userSummary, 0)
+	seenInviters := make(map[string]bool)
 	for rows.Next() {
 		var id, uid, username string
 		var displayName, avatarURL, defaultAvatar, roomDisplayName, roomRole sql.NullString
 		if err := rows.Scan(&id, &uid, &username, &displayName, &avatarURL, &defaultAvatar, &roomDisplayName, &roomRole); err != nil {
 			continue
 		}
+		if seenInviters[id] {
+			continue
+		}
+		seenInviters[id] = true
 		summary := summaryFromUserFields(id, uid, username, displayName, avatarURL, defaultAvatar)
 		summary.RoomDisplayName = nullableString(roomDisplayName)
 		if roomRole.Valid && roomRole.String != "" {
@@ -1874,7 +1921,7 @@ func (h *Handler) roomInvitePayload(inviteID, viewerID string) gin.H {
 		inviterSummaryUID = inviterUID.String
 		inviterSummaryUsername = inviterUsername.String
 	} else {
-		inviterDisplayName = sql.NullString{String: "用户不存在", Valid: true}
+		inviterDisplayName = sql.NullString{String: "用户已注销", Valid: true}
 		inviterAvatarURL = sql.NullString{}
 		inviterDefaultAvatar = sql.NullString{String: "graphite-2", Valid: true}
 	}
@@ -1886,14 +1933,18 @@ func (h *Handler) roomInvitePayload(inviteID, viewerID string) gin.H {
 		inviterAvatarURL,
 		inviterDefaultAvatar,
 	)
-	inviter.RoomDisplayName = nullableString(inviterRoomDisplayName)
-	inviter.IsSuperuser = h.isSuperuser(inviterID)
-	if inviterRoomRole.Valid && inviterRoomRole.String != "" {
-		inviter.RoomRole = inviterRoomRole.String
-	} else if inviter.IsSuperuser {
-		inviter.RoomRole = "superuser"
+	if !inviterExists {
+		inviter = deletedUserSummary(inviterID)
 	} else {
-		inviter.RoomRole = "left"
+		inviter.RoomDisplayName = nullableString(inviterRoomDisplayName)
+		inviter.IsSuperuser = h.isSuperuser(inviterID)
+		if inviterRoomRole.Valid && inviterRoomRole.String != "" {
+			inviter.RoomRole = inviterRoomRole.String
+		} else if inviter.IsSuperuser {
+			inviter.RoomRole = "superuser"
+		} else {
+			inviter.RoomRole = "left"
+		}
 	}
 	invalidReason := ""
 	if status == "pending" {
@@ -2011,7 +2062,7 @@ func (h *Handler) roomApplicationPayload(requestID, viewerID string) gin.H {
 		        r.description, r.created_by_user_id
 		 FROM join_requests jr
 		 JOIN rooms r ON r.id = jr.room_id
-		 LEFT JOIN users u ON u.id = jr.reviewer_user_id
+		 LEFT JOIN users u ON u.id = jr.reviewer_user_id AND u.deleted_at IS NULL
 		 LEFT JOIN room_memberships rrm ON rrm.room_id = jr.room_id AND rrm.user_id = jr.reviewer_user_id
 		 WHERE jr.id = ? AND jr.user_id = ?`,
 		requestID, viewerID,
@@ -2027,7 +2078,7 @@ func (h *Handler) roomApplicationPayload(requestID, viewerID string) gin.H {
 	}
 
 	var reviewer any
-	reviewerExists := true
+	reviewerExists := false
 	if reviewerRefID.Valid && reviewerRefID.String != "" {
 		reviewerExists = reviewerUserID.Valid && reviewerUsername.Valid
 		reviewerSummaryID := reviewerRefID.String
@@ -2038,7 +2089,7 @@ func (h *Handler) roomApplicationPayload(requestID, viewerID string) gin.H {
 			reviewerSummaryUID = reviewerUID.String
 			reviewerSummaryUsername = reviewerUsername.String
 		} else {
-			reviewerDisplayName = sql.NullString{String: "用户不存在", Valid: true}
+			reviewerDisplayName = sql.NullString{String: "用户已注销", Valid: true}
 			reviewerAvatarURL = sql.NullString{}
 			reviewerDefaultAvatar = sql.NullString{String: "graphite-2", Valid: true}
 		}
@@ -2050,13 +2101,22 @@ func (h *Handler) roomApplicationPayload(requestID, viewerID string) gin.H {
 			reviewerAvatarURL,
 			reviewerDefaultAvatar,
 		)
-		summary.RoomDisplayName = nullableString(reviewerRoomDisplayName)
-		if reviewerRoomRole.Valid && reviewerRoomRole.String != "" {
-			summary.RoomRole = reviewerRoomRole.String
-		} else if h.isSuperuser(reviewerRefID.String) {
-			summary.RoomRole = "superuser"
+		if !reviewerExists {
+			summary = deletedUserSummary(reviewerRefID.String)
+		} else {
+			summary.RoomDisplayName = nullableString(reviewerRoomDisplayName)
+			if reviewerRoomRole.Valid && reviewerRoomRole.String != "" {
+				summary.RoomRole = reviewerRoomRole.String
+			} else if h.isSuperuser(reviewerRefID.String) {
+				summary.RoomRole = "superuser"
+			}
 		}
 		reviewer = summary
+	} else if reviewedAt.Valid {
+		// Older schemas may clear reviewer_user_id through ON DELETE SET NULL.
+		// reviewed_at still distinguishes that historical review from a pending
+		// application, so retain an explicit missing-user placeholder.
+		reviewer = deletedUserSummary("")
 	}
 
 	return gin.H{
@@ -2078,6 +2138,15 @@ func (h *Handler) roomNotificationRoomPayload(
 	avatarURL, description, createdByUserID sql.NullString,
 	roomExists bool,
 ) gin.H {
+	if !roomExists {
+		return gin.H{
+			"id": roomID, "rid": "", "name": "房间已删除",
+			"description": "", "avatar_url": nil, "default_avatar_key": "graphite-2",
+			"visibility": "", "join_policy": "closed",
+			"member_count": 0, "online_member_count": 0, "live_participant_count": 0,
+			"joined": false, "join_state": "none", "is_deleted": true,
+		}
+	}
 	memberCount := 0
 	onlineCount := 0
 	liveCount := 0
@@ -2100,9 +2169,6 @@ func (h *Handler) roomNotificationRoomPayload(
 		"joined": joined, "join_state": h.joinState(roomID, viewerID, joined),
 	}
 
-	if !roomExists {
-		return room
-	}
 	if createdByUserID.Valid && createdByUserID.String != "" {
 		rec := roomRecord{ID: roomID, CreatedByUserID: createdByUserID}
 		if !h.shouldHideRoomCreator(rec) {

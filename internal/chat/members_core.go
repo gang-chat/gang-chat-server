@@ -379,7 +379,7 @@ func (h *Handler) pruneOrRepairRoomTx(tx *sql.Tx, roomID string) (bool, error) {
 		 ORDER BY
 		   CASE WHEN rm.role = 'admin' THEN 0 ELSE 1 END,
 		   CASE WHEN lp.user_id IS NOT NULL THEN 0 ELSE 1 END,
-		   RANDOM()
+		   RAND()
 		 LIMIT 1`,
 		roomID,
 	).Scan(&nextOwner); err != nil {

@@ -102,6 +102,13 @@ func TestStreamApprovalAddsRoomForApplicant(t *testing.T) {
 	status, resp := api.request(http.MethodPost, "/rooms/"+roomID+"/join", applicant.Token, nil)
 	api.requireStatus(status, http.StatusAccepted, resp)
 	requestID := resp["join_request"].(map[string]any)["id"].(string)
+	// Creating the pending request changes the owner's room card before the
+	// approval changes membership. Consume and verify that distinct snapshot so
+	// the assertion below observes the approval event, not this earlier update.
+	pending := ownerStream.await("room_updated")
+	if pending["snapshot"].(roomSnapshot).MemberCount != 1 {
+		t.Fatalf("pending request must not change member count: %v", pending)
+	}
 
 	status, resp = api.request(http.MethodPatch, "/rooms/"+roomID+"/join-requests/"+requestID, owner.Token, map[string]any{"decision": "approve"})
 	api.requireStatus(status, http.StatusOK, resp)

@@ -318,7 +318,35 @@ func (h *Handler) deleteAccount(c *gin.Context) {
 		errorJSON(c, http.StatusForbidden, "forbidden", "super user account cannot be deleted")
 		return
 	}
-	if _, err := h.DB.Exec(`DELETE FROM users WHERE id = ?`, user.ID); err != nil {
+	// Account deletion must fail closed if the retention migration cannot be
+	// applied; otherwise legacy CASCADE constraints could erase message history
+	// and the assets referenced by it.
+	if err := model.EnsureHistoricalMessageRetentionSchema(h.DB); err != nil {
+		log.Printf("auth: prepare historical message retention: %v", err)
+		errorJSON(c, http.StatusInternalServerError, "internal_error", "delete account failed")
+		return
+	}
+	tx, err := h.DB.Begin()
+	if err != nil {
+		errorJSON(c, http.StatusInternalServerError, "internal_error", "delete account failed")
+		return
+	}
+	defer tx.Rollback()
+	if err := model.BackfillMessageSenderSnapshots(tx, user.ID); err != nil {
+		errorJSON(c, http.StatusInternalServerError, "internal_error", "delete account failed")
+		return
+	}
+	// Explicitly detach assets before deleting the user. This protects retained
+	// message attachments even if the database has an older FK name.
+	if _, err := tx.Exec(`UPDATE assets SET owner_user_id = NULL WHERE owner_user_id = ?`, user.ID); err != nil {
+		errorJSON(c, http.StatusInternalServerError, "internal_error", "delete account failed")
+		return
+	}
+	if _, err := tx.Exec(`DELETE FROM users WHERE id = ?`, user.ID); err != nil {
+		errorJSON(c, http.StatusInternalServerError, "internal_error", "delete account failed")
+		return
+	}
+	if err := tx.Commit(); err != nil {
 		errorJSON(c, http.StatusInternalServerError, "internal_error", "delete account failed")
 		return
 	}

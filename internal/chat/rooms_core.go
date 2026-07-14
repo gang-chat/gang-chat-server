@@ -136,7 +136,11 @@ func (h *Handler) createRoom(c *gin.Context) {
 
 	now := nowMillis()
 	roomID := newID("room")
-	rid := idgen.NextRoomRID(h.DB)
+	rid, err := idgen.NextRoomRID(h.DB)
+	if err != nil {
+		h.jsonError(c, http.StatusInternalServerError, "internal_error", "failed to allocate room id")
+		return
+	}
 	userID := currentUserID(c)
 	visibility := req.Visibility
 	if visibility == "" {
@@ -611,13 +615,21 @@ func (h *Handler) lastMessage(roomID string) (*lastMessagePreview, error) {
 	err := h.DB.QueryRow(
 		`SELECT m.id,
 		        m.sender_user_id,
-		        COALESCE(NULLIF(sender_rm.room_display_name, ''), NULLIF(u.display_name, ''), u.username),
+		        COALESCE(
+		          NULLIF(m.sender_room_display_name_snapshot, ''),
+		          NULLIF(m.sender_display_name_snapshot, ''),
+		          NULLIF(m.sender_username_snapshot, ''),
+		          NULLIF(sender_rm.room_display_name, ''),
+		          NULLIF(u.display_name, ''),
+		          u.username,
+		          ''
+		        ),
 		        m.type, m.body, m.attachments_json,
 		        m.is_recalled, m.recalled_by_user_id,
 		        m.is_force_deleted, m.force_deleted_by_user_id,
 		        m.created_at
 		 FROM messages m
-		 JOIN users u ON u.id = m.sender_user_id
+		 LEFT JOIN users u ON u.id = m.sender_user_id
 		 LEFT JOIN room_memberships sender_rm ON sender_rm.room_id = m.room_id AND sender_rm.user_id = m.sender_user_id
 		 WHERE m.room_id = ? AND `+visibleMessageSQL("m")+`
 		 ORDER BY m.created_at DESC, m.id DESC

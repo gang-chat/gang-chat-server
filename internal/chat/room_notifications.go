@@ -9,14 +9,13 @@ import (
 )
 
 const (
-	roomNotificationMemberRemoved           = "member_removed"
-	roomNotificationRolePromoted            = "role_promoted"
-	roomNotificationRoleDemoted             = "role_demoted"
-	roomNotificationCreatorTransferDemoted  = "creator_transfer_demoted"
-	roomNotificationMentioned               = "mentioned"
-	defaultRoomNotificationListLimit        = 100
-	maxRoomNotificationListLimit            = 200
-	missingRoomNotificationActorDisplayName = "用户不存在"
+	roomNotificationMemberRemoved          = "member_removed"
+	roomNotificationRolePromoted           = "role_promoted"
+	roomNotificationRoleDemoted            = "role_demoted"
+	roomNotificationCreatorTransferDemoted = "creator_transfer_demoted"
+	roomNotificationMentioned              = "mentioned"
+	defaultRoomNotificationListLimit       = 100
+	maxRoomNotificationListLimit           = 200
 )
 
 type roomNotificationSpec struct {
@@ -506,14 +505,7 @@ func (h *Handler) roomEventNotificationPayload(notificationID, viewerID string) 
 			summary.IsSuperuser = h.isSuperuser(actorID.String)
 			actor = summary
 		} else {
-			actor = summaryFromUserFields(
-				actorRefID.String,
-				"",
-				"",
-				sql.NullString{String: missingRoomNotificationActorDisplayName, Valid: true},
-				sql.NullString{},
-				sql.NullString{String: "graphite-2", Valid: true},
-			)
+			actor = deletedUserSummary(actorRefID.String)
 		}
 	}
 

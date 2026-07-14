@@ -45,6 +45,7 @@ type userSummary struct {
 	IsSuperuser       bool             `json:"is_superuser,omitempty"`
 	IsOnline          *bool            `json:"is_online,omitempty"`
 	CommonRooms       []userCommonRoom `json:"common_rooms,omitempty"`
+	IsDeleted         bool             `json:"is_deleted,omitempty"`
 }
 
 type userCommonRoom struct {
@@ -115,6 +116,7 @@ type publicRoom struct {
 	Joined               bool    `json:"joined"`
 	JoinState            string  `json:"join_state,omitempty"`
 	UpdatedAt            string  `json:"updated_at"`
+	IsDeleted            bool    `json:"is_deleted,omitempty"`
 }
 
 type searchRoomContext struct {
@@ -576,19 +578,20 @@ func scanMessage(rows *sql.Rows) (message, error) {
 	var mentionsJSON, attachmentsJSON string
 	var recalledAt, forceDeletedAt sql.NullInt64
 	var recalledByUserID, forceDeletedByUserID sql.NullString
-	var isRecalled, isForceDeleted, senderIsSuperuser int
+	var isRecalled, isForceDeleted, senderIsSuperuser, senderIsDeleted int
 	var createdAt int64
 	if err := rows.Scan(
 		&msg.ID, &msg.RoomID, &msg.ClientMessageID, &msg.Type, &msg.Body,
 		&mentionsJSON, &attachmentsJSON, &isRecalled, &recalledAt, &recalledByUserID,
 		&isForceDeleted, &forceDeletedAt, &forceDeletedByUserID, &createdAt,
 		&senderID, &senderUID, &senderUsername, &senderDisplayName, &senderAvatarURL, &senderDefaultAvatar,
-		&senderIsSuperuser, &senderRoomDisplayName, &senderRoomRole,
+		&senderIsSuperuser, &senderRoomDisplayName, &senderRoomRole, &senderIsDeleted,
 	); err != nil {
 		return message{}, err
 	}
 	msg.Sender = summaryFromUserFields(senderID, senderUID, senderUsername, senderDisplayName, senderAvatarURL, senderDefaultAvatar)
 	msg.Sender.IsSuperuser = senderIsSuperuser != 0
+	msg.Sender.IsDeleted = senderIsDeleted != 0
 	msg.Sender.RoomDisplayName = nullableString(senderRoomDisplayName)
 	if senderRoomRole.Valid && senderRoomRole.String != "" {
 		msg.Sender.RoomRole = senderRoomRole.String
@@ -693,6 +696,35 @@ func summaryFromUserFields(id, uid, username string, displayName, avatarURL, def
 		AvatarURL:        nullableString(avatarURL),
 		DefaultAvatarKey: avatarKey,
 	}
+}
+
+func deletedUserSummary(id string) userSummary {
+	return userSummary{
+		ID:               id,
+		Username:         "已注销",
+		DisplayName:      "用户已注销",
+		AvatarURL:        nil,
+		DefaultAvatarKey: "graphite-2",
+		IsDeleted:        true,
+	}
+}
+
+func (h *Handler) deletedMessageSender(userID string, roomID ...string) (userSummary, bool, error) {
+	query := `SELECT EXISTS(SELECT 1 FROM messages WHERE sender_user_id = ?`
+	args := []any{userID}
+	if len(roomID) > 0 && strings.TrimSpace(roomID[0]) != "" {
+		query += ` AND room_id = ?`
+		args = append(args, roomID[0])
+	}
+	query += ` LIMIT 1)`
+	var exists int
+	if err := h.DB.QueryRow(query, args...).Scan(&exists); err != nil {
+		return userSummary{}, false, err
+	}
+	if exists == 0 {
+		return userSummary{}, false, nil
+	}
+	return deletedUserSummary(userID), true, nil
 }
 
 func currentUsernameFromDB(db *sql.DB, userID string) string {

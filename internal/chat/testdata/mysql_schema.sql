@@ -1,0 +1,443 @@
+-- Test-only MySQL schema for internal/chat integration tests.
+-- Keep this fixture aligned with current queries; it is not a production migration.
+SET FOREIGN_KEY_CHECKS = 0;
+
+CREATE TABLE `assets` (
+  `id` varchar(128) NOT NULL,
+  `owner_user_id` varchar(128) DEFAULT NULL,
+  `purpose` varchar(32) NOT NULL,
+  `filename` varchar(512) NOT NULL,
+  `mime_type` varchar(255) NOT NULL,
+  `size_bytes` bigint NOT NULL,
+  `url` text NOT NULL,
+  `storage_key` text,
+  `thumbnail_url` text,
+  `width` int DEFAULT NULL,
+  `height` int DEFAULT NULL,
+  `created_at` bigint NOT NULL,
+  PRIMARY KEY (`id`),
+  KEY `idx_assets_owner` (`owner_user_id`),
+  CONSTRAINT `fk_assets_owner` FOREIGN KEY (`owner_user_id`) REFERENCES `users` (`id`) ON DELETE SET NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+CREATE TABLE `email_verification_challenges` (
+  `id` varchar(36) NOT NULL,
+  `email` varchar(254) NOT NULL,
+  `email_normalized` varchar(254) NOT NULL,
+  `code_hash` char(64) NOT NULL,
+  `expires_at` bigint NOT NULL,
+  `resend_available_at` bigint NOT NULL,
+  `attempts` int NOT NULL DEFAULT '0',
+  `verified_at` bigint DEFAULT NULL,
+  `verification_token_hash` char(43) DEFAULT NULL,
+  `verification_token_expires_at` bigint DEFAULT NULL,
+  `consumed_at` bigint DEFAULT NULL,
+  `created_at` bigint NOT NULL,
+  `updated_at` bigint NOT NULL,
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `idx_email_verification_token` (`verification_token_hash`),
+  KEY `idx_email_verification_email_created` (`email_normalized`,`created_at`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+CREATE TABLE `email_verification_locks` (
+  `email_normalized` varchar(254) NOT NULL,
+  `updated_at` bigint NOT NULL,
+  PRIMARY KEY (`email_normalized`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+CREATE TABLE `id_sequences` (
+  `name` varchar(64) NOT NULL,
+  `next_value` bigint NOT NULL,
+  PRIMARY KEY (`name`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+CREATE TABLE `idempotency_keys` (
+  `user_id` varchar(128) NOT NULL,
+  `method` varchar(16) NOT NULL,
+  `path` varchar(191) NOT NULL,
+  `idempotency_key` varchar(255) NOT NULL,
+  `request_hash` char(64) NOT NULL,
+  `response_status` int NOT NULL,
+  `response_body` longtext NOT NULL,
+  `created_at` bigint NOT NULL,
+  PRIMARY KEY (`user_id`,`method`,`path`,`idempotency_key`),
+  KEY `idx_idempotency_keys_created_at` (`created_at`),
+  CONSTRAINT `fk_idempotency_keys_user` FOREIGN KEY (`user_id`) REFERENCES `users` (`id`) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+CREATE TABLE `join_requests` (
+  `id` varchar(128) NOT NULL,
+  `room_id` varchar(128) NOT NULL,
+  `user_id` varchar(128) NOT NULL,
+  `status` varchar(32) NOT NULL DEFAULT 'pending',
+  `reason` text NOT NULL,
+  `reviewer_user_id` varchar(128) DEFAULT NULL,
+  `reviewed_at` bigint DEFAULT NULL,
+  `created_at` bigint NOT NULL,
+  `updated_at` bigint NOT NULL,
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uq_join_requests_room_user` (`room_id`,`user_id`),
+  KEY `fk_join_requests_user` (`user_id`),
+  KEY `fk_join_requests_reviewer` (`reviewer_user_id`),
+  CONSTRAINT `fk_join_requests_reviewer` FOREIGN KEY (`reviewer_user_id`) REFERENCES `users` (`id`) ON DELETE SET NULL,
+  CONSTRAINT `fk_join_requests_room` FOREIGN KEY (`room_id`) REFERENCES `rooms` (`id`) ON DELETE CASCADE,
+  CONSTRAINT `fk_join_requests_user` FOREIGN KEY (`user_id`) REFERENCES `users` (`id`) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+CREATE TABLE `live_member_volumes` (
+  `room_id` varchar(128) NOT NULL,
+  `listener_user_id` varchar(128) NOT NULL,
+  `target_user_id` varchar(128) NOT NULL,
+  `volume` int NOT NULL DEFAULT '100',
+  `updated_at` bigint NOT NULL,
+  PRIMARY KEY (`room_id`,`listener_user_id`,`target_user_id`),
+  KEY `idx_live_member_volumes_listener` (`listener_user_id`,`room_id`),
+  KEY `fk_live_member_volumes_target` (`target_user_id`),
+  CONSTRAINT `fk_live_member_volumes_listener` FOREIGN KEY (`listener_user_id`) REFERENCES `users` (`id`) ON DELETE CASCADE,
+  CONSTRAINT `fk_live_member_volumes_room` FOREIGN KEY (`room_id`) REFERENCES `rooms` (`id`) ON DELETE CASCADE,
+  CONSTRAINT `fk_live_member_volumes_target` FOREIGN KEY (`target_user_id`) REFERENCES `users` (`id`) ON DELETE CASCADE,
+  CONSTRAINT `chk_live_member_distinct_users` CHECK ((`listener_user_id` <> `target_user_id`)),
+  CONSTRAINT `chk_live_member_volume` CHECK ((`volume` between 0 and 100))
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+CREATE TABLE `live_participants` (
+  `live_session_id` varchar(128) NOT NULL,
+  `room_id` varchar(128) NOT NULL,
+  `user_id` varchar(128) NOT NULL,
+  `client_live_session_id` varchar(128) NOT NULL,
+  `joined_at` bigint NOT NULL,
+  `updated_at` bigint NOT NULL,
+  `mic_muted` tinyint(1) NOT NULL DEFAULT '1',
+  `mic_blocked` tinyint(1) NOT NULL DEFAULT '0',
+  `headphones_muted` tinyint(1) NOT NULL DEFAULT '0',
+  `headphones_blocked` tinyint(1) NOT NULL DEFAULT '0',
+  `voice_blocked` tinyint(1) NOT NULL DEFAULT '0',
+  `camera_on` tinyint(1) NOT NULL DEFAULT '0',
+  `screen_sharing` tinyint(1) NOT NULL DEFAULT '0',
+  `connection_state` varchar(32) NOT NULL DEFAULT 'joining',
+  PRIMARY KEY (`live_session_id`),
+  UNIQUE KEY `uq_live_participants_room_user` (`room_id`,`user_id`),
+  KEY `idx_live_participants_room` (`room_id`),
+  KEY `fk_live_participants_user` (`user_id`),
+  CONSTRAINT `fk_live_participants_room` FOREIGN KEY (`room_id`) REFERENCES `rooms` (`id`) ON DELETE CASCADE,
+  CONSTRAINT `fk_live_participants_user` FOREIGN KEY (`user_id`) REFERENCES `users` (`id`) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+CREATE TABLE `message_history_deletions` (
+  `user_id` varchar(128) NOT NULL,
+  `message_id` varchar(128) NOT NULL,
+  `created_at` bigint NOT NULL,
+  PRIMARY KEY (`user_id`,`message_id`),
+  KEY `idx_message_history_deletions_message` (`message_id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+CREATE TABLE `message_recall_requests` (
+  `id` varchar(128) NOT NULL,
+  `room_id` varchar(128) NOT NULL,
+  `message_id` varchar(128) NOT NULL,
+  `requested_by_user_id` varchar(128) NOT NULL,
+  `status` varchar(32) NOT NULL DEFAULT 'pending',
+  `created_at` bigint NOT NULL,
+  `updated_at` bigint NOT NULL,
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uq_message_recall_request` (`room_id`,`message_id`,`requested_by_user_id`),
+  KEY `idx_message_recall_requests_room_status` (`room_id`,`status`,`created_at`),
+  KEY `fk_message_recall_requests_message` (`message_id`),
+  KEY `fk_message_recall_requests_requester` (`requested_by_user_id`),
+  CONSTRAINT `fk_message_recall_requests_message` FOREIGN KEY (`message_id`) REFERENCES `messages` (`id`) ON DELETE CASCADE,
+  CONSTRAINT `fk_message_recall_requests_requester` FOREIGN KEY (`requested_by_user_id`) REFERENCES `users` (`id`) ON DELETE CASCADE,
+  CONSTRAINT `fk_message_recall_requests_room` FOREIGN KEY (`room_id`) REFERENCES `rooms` (`id`) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+CREATE TABLE `messages` (
+  `id` varchar(128) NOT NULL,
+  `room_id` varchar(128) NOT NULL,
+  `sender_user_id` varchar(128) NOT NULL,
+  `client_message_id` varchar(128) NOT NULL,
+  `type` varchar(32) NOT NULL DEFAULT 'text',
+  `body` text NOT NULL,
+  `mentions_json` json NOT NULL,
+  `attachments_json` json NOT NULL,
+  `is_recalled` tinyint(1) NOT NULL DEFAULT '0',
+  `recalled_at` bigint DEFAULT NULL,
+  `recalled_by_user_id` varchar(128) DEFAULT NULL,
+  `is_force_deleted` tinyint(1) NOT NULL DEFAULT '0',
+  `force_deleted_at` bigint DEFAULT NULL,
+  `force_deleted_by_user_id` varchar(128) DEFAULT NULL,
+  `created_at` bigint NOT NULL,
+  `sender_uid_snapshot` varchar(32) NOT NULL DEFAULT '',
+  `sender_username_snapshot` varchar(64) NOT NULL DEFAULT '',
+  `sender_display_name_snapshot` varchar(128) DEFAULT NULL,
+  `sender_room_display_name_snapshot` varchar(128) DEFAULT NULL,
+  `sender_avatar_url_snapshot` text,
+  `sender_default_avatar_key_snapshot` varchar(64) NOT NULL DEFAULT 'blue-3',
+  `sender_is_superuser_snapshot` tinyint(1) NOT NULL DEFAULT '0',
+  `sender_room_role_snapshot` varchar(32) NOT NULL DEFAULT '',
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uq_messages_client` (`room_id`,`sender_user_id`,`client_message_id`),
+  KEY `idx_messages_room_created` (`room_id`,`created_at`,`id`),
+  KEY `fk_messages_sender` (`sender_user_id`),
+  KEY `fk_messages_recalled_by` (`recalled_by_user_id`),
+  KEY `fk_messages_force_deleted_by` (`force_deleted_by_user_id`),
+  CONSTRAINT `fk_messages_force_deleted_by` FOREIGN KEY (`force_deleted_by_user_id`) REFERENCES `users` (`id`) ON DELETE SET NULL,
+  CONSTRAINT `fk_messages_recalled_by` FOREIGN KEY (`recalled_by_user_id`) REFERENCES `users` (`id`) ON DELETE SET NULL,
+  CONSTRAINT `fk_messages_room` FOREIGN KEY (`room_id`) REFERENCES `rooms` (`id`) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+CREATE TABLE `password_reset_challenges` (
+  `id` varchar(36) NOT NULL,
+  `user_id` varchar(128) NOT NULL,
+  `email` varchar(320) NOT NULL,
+  `code_hash` char(64) NOT NULL,
+  `expires_at` bigint NOT NULL,
+  `resend_available_at` bigint NOT NULL,
+  `attempts` int NOT NULL DEFAULT '0',
+  `verified_at` bigint DEFAULT NULL,
+  `reset_token_hash` char(43) DEFAULT NULL,
+  `reset_token_expires_at` bigint DEFAULT NULL,
+  `consumed_at` bigint DEFAULT NULL,
+  `created_at` bigint NOT NULL,
+  `updated_at` bigint NOT NULL,
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `idx_password_reset_token` (`reset_token_hash`),
+  KEY `idx_password_reset_user_created` (`user_id`,`created_at`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+CREATE TABLE `password_reset_session_grants` (
+  `session_id` varchar(128) NOT NULL,
+  `user_id` varchar(128) NOT NULL,
+  `email_normalized` varchar(320) NOT NULL,
+  `expires_at` bigint NOT NULL,
+  `created_at` bigint NOT NULL,
+  `updated_at` bigint NOT NULL,
+  PRIMARY KEY (`session_id`),
+  KEY `idx_password_reset_grant_user` (`user_id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+CREATE TABLE `room_blacklist` (
+  `room_id` varchar(128) NOT NULL,
+  `user_id` varchar(128) NOT NULL,
+  `blocked_by_user_id` varchar(128) DEFAULT NULL,
+  `created_at` bigint NOT NULL,
+  PRIMARY KEY (`room_id`,`user_id`),
+  KEY `idx_room_blacklist_user` (`user_id`,`room_id`),
+  KEY `fk_room_blacklist_actor` (`blocked_by_user_id`),
+  CONSTRAINT `fk_room_blacklist_actor` FOREIGN KEY (`blocked_by_user_id`) REFERENCES `users` (`id`) ON DELETE SET NULL,
+  CONSTRAINT `fk_room_blacklist_room` FOREIGN KEY (`room_id`) REFERENCES `rooms` (`id`) ON DELETE CASCADE,
+  CONSTRAINT `fk_room_blacklist_user` FOREIGN KEY (`user_id`) REFERENCES `users` (`id`) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+CREATE TABLE `room_invites` (
+  `id` varchar(128) NOT NULL,
+  `room_id` varchar(128) NOT NULL,
+  `inviter_user_id` varchar(128) NOT NULL,
+  `target_user_id` varchar(128) NOT NULL,
+  `status` varchar(32) NOT NULL DEFAULT 'pending',
+  `created_at` bigint NOT NULL,
+  `updated_at` bigint NOT NULL,
+  `room_rid` varchar(32) NOT NULL DEFAULT '',
+  `room_name` varchar(128) NOT NULL DEFAULT '',
+  `room_avatar_url` text,
+  `room_default_avatar_key` varchar(64) NOT NULL DEFAULT 'room-1',
+  `room_visibility` varchar(32) NOT NULL DEFAULT 'private',
+  `room_join_policy` varchar(32) NOT NULL DEFAULT 'closed',
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uq_room_invites_room_target_inviter` (`room_id`,`target_user_id`,`inviter_user_id`),
+  KEY `idx_room_invites_target` (`target_user_id`,`status`,`created_at`),
+  KEY `idx_room_invites_room_target` (`room_id`,`target_user_id`,`status`),
+  CONSTRAINT `fk_room_invites_target` FOREIGN KEY (`target_user_id`) REFERENCES `users` (`id`) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+CREATE TABLE `room_memberships` (
+  `room_id` varchar(128) NOT NULL,
+  `user_id` varchar(128) NOT NULL,
+  `role` varchar(32) NOT NULL DEFAULT 'member',
+  `remark_name` varchar(128) DEFAULT NULL,
+  `room_display_name` varchar(128) DEFAULT NULL,
+  `room_avatar_url` text,
+  `room_default_avatar_key` varchar(64) DEFAULT NULL,
+  `notification_level` varchar(32) NOT NULL DEFAULT 'all',
+  `text_muted_until` bigint DEFAULT NULL,
+  `is_pinned` tinyint(1) NOT NULL DEFAULT '0',
+  `joined_at` bigint NOT NULL,
+  PRIMARY KEY (`room_id`,`user_id`),
+  KEY `idx_room_memberships_user_id` (`user_id`),
+  KEY `idx_room_memberships_user_pinned` (`user_id`,`is_pinned`),
+  CONSTRAINT `fk_room_memberships_room` FOREIGN KEY (`room_id`) REFERENCES `rooms` (`id`) ON DELETE CASCADE,
+  CONSTRAINT `fk_room_memberships_user` FOREIGN KEY (`user_id`) REFERENCES `users` (`id`) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+CREATE TABLE `room_notification_deletions` (
+  `user_id` varchar(128) NOT NULL,
+  `notification_type` varchar(32) NOT NULL,
+  `notification_id` varchar(128) NOT NULL,
+  `created_at` bigint NOT NULL,
+  PRIMARY KEY (`user_id`,`notification_type`,`notification_id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+CREATE TABLE `room_notifications` (
+  `id` varchar(128) NOT NULL,
+  `recipient_user_id` varchar(128) NOT NULL,
+  `room_id` varchar(128) NOT NULL,
+  `actor_user_id` varchar(128) DEFAULT NULL,
+  `type` varchar(32) NOT NULL,
+  `from_role` varchar(32) DEFAULT NULL,
+  `to_role` varchar(32) DEFAULT NULL,
+  `message_id` varchar(128) DEFAULT NULL,
+  `message_body_preview` text,
+  `created_at` bigint NOT NULL,
+  `read_at` bigint DEFAULT NULL,
+  `room_rid` varchar(32) NOT NULL DEFAULT '',
+  `room_name` varchar(128) NOT NULL DEFAULT '',
+  `room_avatar_url` text,
+  `room_default_avatar_key` varchar(64) NOT NULL DEFAULT 'room-1',
+  `room_visibility` varchar(32) NOT NULL DEFAULT 'private',
+  `room_join_policy` varchar(32) NOT NULL DEFAULT 'closed',
+  `room_description` text NOT NULL,
+  `room_created_by_user_id` varchar(128) DEFAULT NULL,
+  `actor_uid` varchar(32) DEFAULT NULL,
+  `actor_username` varchar(64) DEFAULT NULL,
+  `actor_display_name` varchar(128) DEFAULT NULL,
+  `actor_avatar_url` text,
+  `actor_default_avatar_key` varchar(64) NOT NULL DEFAULT 'blue-3',
+  `actor_room_display_name` varchar(128) DEFAULT NULL,
+  `actor_room_role` varchar(32) DEFAULT NULL,
+  PRIMARY KEY (`id`),
+  KEY `idx_room_notifications_recipient_created` (`recipient_user_id`,`created_at`),
+  KEY `idx_room_notifications_room_created` (`room_id`,`created_at`),
+  CONSTRAINT `fk_room_notifications_recipient` FOREIGN KEY (`recipient_user_id`) REFERENCES `users` (`id`) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+CREATE TABLE `room_reads` (
+  `room_id` varchar(128) NOT NULL,
+  `user_id` varchar(128) NOT NULL,
+  `last_read_message_id` varchar(128) NOT NULL,
+  `updated_at` bigint NOT NULL,
+  PRIMARY KEY (`room_id`,`user_id`),
+  KEY `idx_room_reads_message` (`last_read_message_id`),
+  KEY `fk_room_reads_user` (`user_id`),
+  CONSTRAINT `fk_room_reads_message` FOREIGN KEY (`last_read_message_id`) REFERENCES `messages` (`id`) ON DELETE CASCADE,
+  CONSTRAINT `fk_room_reads_room` FOREIGN KEY (`room_id`) REFERENCES `rooms` (`id`) ON DELETE CASCADE,
+  CONSTRAINT `fk_room_reads_user` FOREIGN KEY (`user_id`) REFERENCES `users` (`id`) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+CREATE TABLE `room_voice_bans` (
+  `room_id` varchar(128) NOT NULL,
+  `user_id` varchar(128) NOT NULL,
+  `created_by_user_id` varchar(128) NOT NULL,
+  `reason` text NOT NULL,
+  `created_at` bigint NOT NULL,
+  `mic_blocked` tinyint(1) NOT NULL DEFAULT '1',
+  `headphones_blocked` tinyint(1) NOT NULL DEFAULT '1',
+  PRIMARY KEY (`room_id`,`user_id`),
+  KEY `idx_room_voice_bans_room` (`room_id`),
+  KEY `fk_room_voice_bans_user` (`user_id`),
+  KEY `fk_room_voice_bans_actor` (`created_by_user_id`),
+  CONSTRAINT `fk_room_voice_bans_actor` FOREIGN KEY (`created_by_user_id`) REFERENCES `users` (`id`) ON DELETE CASCADE,
+  CONSTRAINT `fk_room_voice_bans_room` FOREIGN KEY (`room_id`) REFERENCES `rooms` (`id`) ON DELETE CASCADE,
+  CONSTRAINT `fk_room_voice_bans_user` FOREIGN KEY (`user_id`) REFERENCES `users` (`id`) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+CREATE TABLE `rooms` (
+  `id` varchar(128) NOT NULL,
+  `rid` varchar(32) NOT NULL,
+  `name` varchar(128) NOT NULL,
+  `avatar_asset_id` varchar(128) DEFAULT NULL,
+  `avatar_url` text,
+  `default_avatar_key` varchar(64) NOT NULL,
+  `created_by_user_id` varchar(128) DEFAULT NULL,
+  `visibility` varchar(32) NOT NULL DEFAULT 'public',
+  `join_policy` varchar(32) NOT NULL DEFAULT 'open',
+  `ai_voice_announce_enabled` tinyint(1) NOT NULL DEFAULT '1',
+  `message_recall_policy` varchar(32) NOT NULL DEFAULT 'time_limited',
+  `message_recall_window_seconds` bigint DEFAULT '120',
+  `description` text NOT NULL,
+  `created_at` bigint NOT NULL,
+  `updated_at` bigint NOT NULL,
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uq_rooms_rid` (`rid`),
+  KEY `fk_rooms_creator` (`created_by_user_id`),
+  CONSTRAINT `fk_rooms_creator` FOREIGN KEY (`created_by_user_id`) REFERENCES `users` (`id`) ON DELETE SET NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+CREATE TABLE `sticker_asset_lifecycle` (
+  `asset_id` varchar(128) NOT NULL,
+  `expires_at` bigint DEFAULT NULL,
+  `updated_at` bigint NOT NULL,
+  PRIMARY KEY (`asset_id`),
+  KEY `idx_sticker_asset_lifecycle_expires_at` (`expires_at`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+CREATE TABLE `sticker_packs` (
+  `id` varchar(128) NOT NULL,
+  `owner_user_id` varchar(128) DEFAULT NULL,
+  `room_id` varchar(128) DEFAULT NULL,
+  `scope` varchar(32) NOT NULL,
+  `name` varchar(128) NOT NULL,
+  `sort_order` int NOT NULL DEFAULT '10',
+  `created_at` bigint NOT NULL,
+  `updated_at` bigint NOT NULL,
+  PRIMARY KEY (`id`),
+  KEY `idx_sticker_packs_owner` (`owner_user_id`),
+  KEY `idx_sticker_packs_room` (`room_id`),
+  CONSTRAINT `fk_sticker_packs_owner` FOREIGN KEY (`owner_user_id`) REFERENCES `users` (`id`) ON DELETE CASCADE,
+  CONSTRAINT `fk_sticker_packs_room` FOREIGN KEY (`room_id`) REFERENCES `rooms` (`id`) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+CREATE TABLE `stickers` (
+  `id` varchar(128) NOT NULL,
+  `pack_id` varchar(128) NOT NULL,
+  `asset_id` varchar(128) NOT NULL,
+  `name` varchar(128) NOT NULL,
+  `sort_order` int NOT NULL DEFAULT '10',
+  `created_at` bigint NOT NULL,
+  PRIMARY KEY (`id`),
+  KEY `idx_stickers_pack` (`pack_id`),
+  KEY `idx_stickers_asset` (`asset_id`),
+  CONSTRAINT `fk_stickers_asset` FOREIGN KEY (`asset_id`) REFERENCES `assets` (`id`) ON DELETE CASCADE,
+  CONSTRAINT `fk_stickers_pack` FOREIGN KEY (`pack_id`) REFERENCES `sticker_packs` (`id`) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+CREATE TABLE `user_audio_settings` (
+  `user_id` varchar(128) NOT NULL,
+  `default_audio_input_volume` int NOT NULL DEFAULT '100',
+  `default_audio_output_volume` int NOT NULL DEFAULT '100',
+  `live_mic_input_volume` int NOT NULL DEFAULT '100',
+  `live_voice_output_volume` int NOT NULL DEFAULT '100',
+  `live_screen_share_output_volume` int NOT NULL DEFAULT '100',
+  `live_music_output_volume` int NOT NULL DEFAULT '100',
+  `updated_at` bigint NOT NULL,
+  PRIMARY KEY (`user_id`),
+  CONSTRAINT `fk_user_audio_settings_user` FOREIGN KEY (`user_id`) REFERENCES `users` (`id`) ON DELETE CASCADE,
+  CONSTRAINT `chk_user_audio_default_input` CHECK ((`default_audio_input_volume` between 0 and 100)),
+  CONSTRAINT `chk_user_audio_default_output` CHECK ((`default_audio_output_volume` between 0 and 100)),
+  CONSTRAINT `chk_user_audio_live_mic` CHECK ((`live_mic_input_volume` between 0 and 100)),
+  CONSTRAINT `chk_user_audio_live_music` CHECK ((`live_music_output_volume` between 0 and 100)),
+  CONSTRAINT `chk_user_audio_live_screen` CHECK ((`live_screen_share_output_volume` between 0 and 100)),
+  CONSTRAINT `chk_user_audio_live_voice` CHECK ((`live_voice_output_volume` between 0 and 100))
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+CREATE TABLE `user_sessions` (
+  `id` varchar(128) NOT NULL,
+  `user_id` varchar(128) NOT NULL,
+  `refresh_token_hash` varchar(128) NOT NULL,
+  `user_agent` text,
+  `ip_address` varchar(128) DEFAULT NULL,
+  `expires_at` bigint NOT NULL,
+  `revoked_at` bigint DEFAULT NULL,
+  `created_at` bigint NOT NULL,
+  `last_used_at` bigint NOT NULL,
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uq_user_sessions_refresh_token_hash` (`refresh_token_hash`),
+  KEY `idx_user_sessions_user_id` (`user_id`),
+  KEY `idx_user_sessions_expires_at` (`expires_at`),
+  CONSTRAINT `fk_user_sessions_user` FOREIGN KEY (`user_id`) REFERENCES `users` (`id`) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+CREATE TABLE `users` (
+  `id` varchar(128) NOT NULL,
+  `uid` varchar(32) NOT NULL,
+  `username` varchar(64) NOT NULL,
+  `username_normalized` varchar(64) NOT NULL,
+  `email` varchar(320) NOT NULL,
+  `email_normalized` varchar(320) NOT NULL,
+  `password_hash` text,
+  `status` varchar(32) NOT NULL DEFAULT 'active',
+  `display_name` varchar(128) DEFAULT NULL,
+  `bio` text NOT NULL,
+  `gender` varchar(32) NOT NULL DEFAULT 'secret',
+  `avatar_url` text,
+  `default_avatar_key` varchar(64) NOT NULL DEFAULT 'blue-3',
+  `email_verified` tinyint(1) NOT NULL DEFAULT '1',
+  `email_public` tinyint(1) NOT NULL DEFAULT '0',
+  `phone_number` varchar(64) DEFAULT NULL,
+  `phone_number_normalized` varchar(64) DEFAULT NULL,
+  `phone_number_public` tinyint(1) NOT NULL DEFAULT '0',
+  `language` varchar(32) NOT NULL DEFAULT 'zh-Hans',
+  `is_superuser` tinyint(1) NOT NULL DEFAULT '0',
+  `username_updated_at` bigint DEFAULT NULL,
+  `deleted_at` bigint DEFAULT NULL,
+  `created_at` bigint NOT NULL,
+  `updated_at` bigint NOT NULL,
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uq_users_uid` (`uid`),
+  UNIQUE KEY `uq_users_username_normalized` (`username_normalized`),
+  UNIQUE KEY `uq_users_email_normalized` (`email_normalized`),
+  UNIQUE KEY `uq_users_phone_number_normalized` (`phone_number_normalized`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+
+SET FOREIGN_KEY_CHECKS = 1;

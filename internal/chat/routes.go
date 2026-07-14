@@ -7,6 +7,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/zhuangkaiyi/gang-chat/server/internal/config"
 	"github.com/zhuangkaiyi/gang-chat/server/internal/eventbus"
+	"github.com/zhuangkaiyi/gang-chat/server/internal/model"
 	"github.com/zhuangkaiyi/gang-chat/server/internal/musicbox"
 	"github.com/zhuangkaiyi/gang-chat/server/internal/storage"
 )
@@ -64,6 +65,9 @@ func RegisterRoutes(g *gin.RouterGroup, db *sql.DB, cfg *config.Config, bus *eve
 		}
 	}
 	h := &Handler{DB: db, Cfg: cfg, Bus: bus, Live: live, Assets: assetStore, MusicBox: mb}
+	if err := model.EnsureHistoricalMessageRetentionSchema(db); err != nil {
+		log.Printf("chat: ensure historical message retention schema: %v", err)
+	}
 	if err := h.ensureRoomNotificationSchema(); err != nil {
 		log.Printf("chat: ensure room notification schema: %v", err)
 	}

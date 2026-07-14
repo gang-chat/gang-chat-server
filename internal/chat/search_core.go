@@ -344,8 +344,8 @@ func (h *Handler) searchMessages(userID, query string, limit, offset int) ([]mes
 func (h *Handler) searchFiles(userID, query string, limit, offset int) ([]messageSearchResult, any, int, error) {
 	return h.searchMessageRows(
 		userID,
-		`EXISTS (
-		    SELECT 1
+		`(
+		    SELECT COUNT(*)
 		    FROM JSON_TABLE(m.attachments_json, '$[*]' COLUMNS (
 		      attachment_type VARCHAR(64) PATH '$.type' NULL ON EMPTY,
 		      attachment_name VARCHAR(1024) PATH '$.name' NULL ON EMPTY,
@@ -358,7 +358,7 @@ func (h *Handler) searchFiles(userID, query string, limit, offset int) ([]messag
 		        OR instr(lower(COALESCE(attachment.attachment_filename, '')), lower(?)) > 0
 		        OR instr(lower(COALESCE(attachment.asset_filename, '')), lower(?)) > 0
 		      )
-		  )`,
+		  ) > 0`,
 		[]any{query, query, query},
 		limit,
 		offset,
@@ -381,7 +381,7 @@ func (h *Handler) searchMessageRows(userID, predicate string, predicateArgs []an
 	if err := h.DB.QueryRow(
 		`SELECT COUNT(*)
 		 FROM messages m
-		 JOIN users u ON u.id = m.sender_user_id
+		 LEFT JOIN users u ON u.id = m.sender_user_id
 		 JOIN rooms r ON r.id = m.room_id
 		 LEFT JOIN room_memberships sender_rm ON sender_rm.room_id = m.room_id AND sender_rm.user_id = m.sender_user_id
 		 `+accessJoin+`
@@ -395,16 +395,10 @@ func (h *Handler) searchMessageRows(userID, predicate string, predicateArgs []an
 	args = append(args, fetch, offset)
 
 	rows, err := h.DB.Query(
-		`SELECT m.id, m.room_id, m.client_message_id, m.type, m.body,
-		        m.mentions_json, m.attachments_json, m.is_recalled, m.recalled_at,
-		        m.recalled_by_user_id, m.is_force_deleted, m.force_deleted_at,
-		        m.force_deleted_by_user_id, m.created_at,
-		        u.id, u.uid, u.username, u.display_name, u.avatar_url, u.default_avatar_key,
-		        u.is_superuser, sender_rm.room_display_name,
-		        CASE WHEN u.is_superuser != 0 THEN 'superuser' ELSE COALESCE(sender_rm.role, '') END,
+		`SELECT `+messageSelectColumnsSQL+`,
 		        r.id, r.rid, r.name, r.avatar_url, r.default_avatar_key, `+viewerRemarkSelect+`
 		 FROM messages m
-		 JOIN users u ON u.id = m.sender_user_id
+		 LEFT JOIN users u ON u.id = m.sender_user_id
 		 JOIN rooms r ON r.id = m.room_id
 		 LEFT JOIN room_memberships sender_rm ON sender_rm.room_id = m.room_id AND sender_rm.user_id = m.sender_user_id
 		 `+accessJoin+`
@@ -454,20 +448,21 @@ func scanSearchMessage(rows *sql.Rows) (message, searchRoomContext, error) {
 	var mentionsJSON, attachmentsJSON string
 	var recalledAt, forceDeletedAt sql.NullInt64
 	var recalledByUserID, forceDeletedByUserID sql.NullString
-	var isRecalled, isForceDeleted, senderIsSuperuser int
+	var isRecalled, isForceDeleted, senderIsSuperuser, senderIsDeleted int
 	var createdAt int64
 	if err := rows.Scan(
 		&msg.ID, &msg.RoomID, &msg.ClientMessageID, &msg.Type, &msg.Body,
 		&mentionsJSON, &attachmentsJSON, &isRecalled, &recalledAt, &recalledByUserID,
 		&isForceDeleted, &forceDeletedAt, &forceDeletedByUserID, &createdAt,
 		&senderID, &senderUID, &senderUsername, &senderDisplayName, &senderAvatarURL, &senderDefaultAvatar,
-		&senderIsSuperuser, &senderRoomDisplayName, &senderRoomRole,
+		&senderIsSuperuser, &senderRoomDisplayName, &senderRoomRole, &senderIsDeleted,
 		&room.ID, &roomRID, &room.Name, &roomAvatarURL, &roomDefaultAvatar, &roomRemarkName,
 	); err != nil {
 		return message{}, searchRoomContext{}, err
 	}
 	msg.Sender = summaryFromUserFields(senderID, senderUID, senderUsername, senderDisplayName, senderAvatarURL, senderDefaultAvatar)
 	msg.Sender.IsSuperuser = senderIsSuperuser != 0
+	msg.Sender.IsDeleted = senderIsDeleted != 0
 	if senderRoomDisplayName.Valid && senderRoomDisplayName.String != "" {
 		msg.Sender.RoomDisplayName = &senderRoomDisplayName.String
 	}

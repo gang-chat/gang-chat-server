@@ -157,7 +157,12 @@ func (h *Handler) register(c *gin.Context) {
 	id := uuid.New().String()
 	usernameNorm := model.Normalize(req.Username)
 	emailNorm := model.Normalize(req.Email)
-	uid := idgen.NextUserUID(h.DB)
+	uid, err := idgen.NextUserUID(h.DB)
+	if err != nil {
+		log.Printf("auth register: allocate uid failed request_id=%q: %v", c.GetString("request_id"), err)
+		errorJSON(c, http.StatusInternalServerError, "internal_error", "create user failed")
+		return
+	}
 	tx, err := h.DB.Begin()
 	if err != nil {
 		errorJSON(c, http.StatusInternalServerError, "internal_error", "create user failed")
