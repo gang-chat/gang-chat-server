@@ -107,10 +107,12 @@ CREATE TABLE `live_participants` (
   `voice_blocked` tinyint(1) NOT NULL DEFAULT '0',
   `camera_on` tinyint(1) NOT NULL DEFAULT '0',
   `screen_sharing` tinyint(1) NOT NULL DEFAULT '0',
+  `watching_screen_user_id` varchar(128) DEFAULT NULL,
   `connection_state` varchar(32) NOT NULL DEFAULT 'joining',
   PRIMARY KEY (`live_session_id`),
   UNIQUE KEY `uq_live_participants_room_user` (`room_id`,`user_id`),
   KEY `idx_live_participants_room` (`room_id`),
+  KEY `idx_live_participants_watching_screen` (`room_id`,`watching_screen_user_id`,`connection_state`),
   KEY `fk_live_participants_user` (`user_id`),
   CONSTRAINT `fk_live_participants_room` FOREIGN KEY (`room_id`) REFERENCES `rooms` (`id`) ON DELETE CASCADE,
   CONSTRAINT `fk_live_participants_user` FOREIGN KEY (`user_id`) REFERENCES `users` (`id`) ON DELETE CASCADE

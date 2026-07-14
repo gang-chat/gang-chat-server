@@ -68,6 +68,9 @@ func RegisterRoutes(g *gin.RouterGroup, db *sql.DB, cfg *config.Config, bus *eve
 	if err := model.EnsureHistoricalMessageRetentionSchema(db); err != nil {
 		log.Printf("chat: ensure historical message retention schema: %v", err)
 	}
+	if err := model.EnsureLiveScreenViewerSchema(db); err != nil {
+		log.Printf("chat: ensure live screen viewer schema: %v", err)
+	}
 	if err := h.ensureRoomNotificationSchema(); err != nil {
 		log.Printf("chat: ensure room notification schema: %v", err)
 	}
@@ -157,6 +160,7 @@ func RegisterRoutes(g *gin.RouterGroup, db *sql.DB, cfg *config.Config, bus *eve
 	g.GET("/rooms/:room_id/live", h.getLiveState)
 	g.POST("/rooms/:room_id/live/join", h.joinLive)
 	g.PATCH("/rooms/:room_id/live/me", h.updateMyLiveState)
+	g.PATCH("/rooms/:room_id/live/me/screen-view", h.updateMyLiveScreenView)
 	g.GET("/rooms/:room_id/live/me/member-volumes", h.listMyLiveMemberVolumes)
 	g.PATCH("/rooms/:room_id/live/me/member-volumes/:target_user_id", h.updateMyLiveMemberVolume)
 	g.POST("/rooms/:room_id/live/participants/:user_id/moderation", h.moderateLiveParticipant)

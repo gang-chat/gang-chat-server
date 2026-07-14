@@ -195,18 +195,19 @@ type message struct {
 }
 
 type liveParticipant struct {
-	LiveSessionID       string      `json:"live_session_id"`
-	User                userSummary `json:"user"`
-	JoinedAt            string      `json:"joined_at"`
-	MicMuted            bool        `json:"mic_muted"`
-	MicBlocked          bool        `json:"mic_blocked"`
-	HeadphonesMuted     bool        `json:"headphones_muted"`
-	HeadphonesBlocked   bool        `json:"headphones_blocked"`
-	HeadphonesListening bool        `json:"headphones_listening"`
-	VoiceBlocked        bool        `json:"voice_blocked"`
-	CameraOn            bool        `json:"camera_on"`
-	ScreenSharing       bool        `json:"screen_sharing"`
-	ConnectionState     string      `json:"connection_state"`
+	LiveSessionID       string        `json:"live_session_id"`
+	User                userSummary   `json:"user"`
+	JoinedAt            string        `json:"joined_at"`
+	MicMuted            bool          `json:"mic_muted"`
+	MicBlocked          bool          `json:"mic_blocked"`
+	HeadphonesMuted     bool          `json:"headphones_muted"`
+	HeadphonesBlocked   bool          `json:"headphones_blocked"`
+	HeadphonesListening bool          `json:"headphones_listening"`
+	VoiceBlocked        bool          `json:"voice_blocked"`
+	CameraOn            bool          `json:"camera_on"`
+	ScreenSharing       bool          `json:"screen_sharing"`
+	ScreenViewers       []userSummary `json:"screen_viewers"`
+	ConnectionState     string        `json:"connection_state"`
 }
 
 type liveMemberVolume struct {
@@ -257,6 +258,10 @@ type updateLiveRequest struct {
 	CameraOn        *bool   `json:"camera_on"`
 	ScreenSharing   *bool   `json:"screen_sharing"`
 	ConnectionState *string `json:"connection_state"`
+}
+
+type updateLiveScreenViewRequest struct {
+	BroadcasterUserID string `json:"broadcaster_user_id"`
 }
 
 type updateLiveMemberVolumeRequest struct {

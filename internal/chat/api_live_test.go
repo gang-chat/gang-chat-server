@@ -374,6 +374,90 @@ func TestLiveCameraAndScreenShareAreExclusive(t *testing.T) {
 	}
 }
 
+func TestLiveScreenViewersTrackOnlyActiveRemoteWatchers(t *testing.T) {
+	api := newAPIHarness(t)
+	broadcaster := api.register("screen_view_broadcaster")
+	viewer := api.register("screen_view_viewer")
+	room := api.createRoom(broadcaster.Token, map[string]any{
+		"name":        "Screen Viewer Room",
+		"join_policy": "open",
+	})
+	roomID := room["id"].(string)
+	broadcasterID := broadcaster.User["id"].(string)
+	viewerID := viewer.User["id"].(string)
+
+	status, response := api.request(http.MethodPost, "/rooms/"+roomID+"/join", viewer.Token, nil)
+	api.requireStatus(status, http.StatusOK, response)
+	for _, entry := range []struct {
+		token     string
+		sessionID string
+	}{
+		{token: broadcaster.Token, sessionID: "screen_view_broadcaster_live"},
+		{token: viewer.Token, sessionID: "screen_view_viewer_live"},
+	} {
+		status, response = api.request(http.MethodPost, "/rooms/"+roomID+"/live/join", entry.token, map[string]any{
+			"client_live_session_id": entry.sessionID,
+			"source":                 "live_panel",
+		})
+		api.requireStatus(status, http.StatusOK, response)
+	}
+
+	status, response = api.request(http.MethodPatch, "/rooms/"+roomID+"/live/me/screen-view", viewer.Token, map[string]any{
+		"broadcaster_user_id": broadcasterID,
+	})
+	api.requireStatus(status, http.StatusConflict, response)
+
+	status, response = api.request(http.MethodPatch, "/rooms/"+roomID+"/live/me", broadcaster.Token, map[string]any{
+		"screen_sharing": true,
+	})
+	api.requireStatus(status, http.StatusOK, response)
+	status, response = api.request(http.MethodPatch, "/rooms/"+roomID+"/live/me/screen-view", broadcaster.Token, map[string]any{
+		"broadcaster_user_id": broadcasterID,
+	})
+	api.requireStatus(status, http.StatusBadRequest, response)
+
+	status, response = api.request(http.MethodPatch, "/rooms/"+roomID+"/live/me/screen-view", viewer.Token, map[string]any{
+		"broadcaster_user_id": broadcasterID,
+	})
+	api.requireStatus(status, http.StatusOK, response)
+	assertViewerIDs := func(want ...string) {
+		t.Helper()
+		status, response = api.request(http.MethodGet, "/rooms/"+roomID+"/live", broadcaster.Token, nil)
+		api.requireStatus(status, http.StatusOK, response)
+		participant := participantByUserID(t, response["live"].(map[string]any), broadcasterID)
+		items, ok := participant["screen_viewers"].([]any)
+		if !ok {
+			t.Fatalf("screen_viewers missing from participant: %v", participant)
+		}
+		if len(items) != len(want) {
+			t.Fatalf("screen viewer count got %d, want %d: %v", len(items), len(want), items)
+		}
+		for index, userID := range want {
+			viewerUser := items[index].(map[string]any)
+			if viewerUser["id"] != userID {
+				t.Fatalf("screen viewer %d got %v, want %s", index, viewerUser, userID)
+			}
+		}
+	}
+	assertViewerIDs(viewerID)
+
+	status, response = api.request(http.MethodPatch, "/rooms/"+roomID+"/live/me/screen-view", viewer.Token, map[string]any{
+		"broadcaster_user_id": "",
+	})
+	api.requireStatus(status, http.StatusOK, response)
+	assertViewerIDs()
+
+	status, response = api.request(http.MethodPatch, "/rooms/"+roomID+"/live/me/screen-view", viewer.Token, map[string]any{
+		"broadcaster_user_id": broadcasterID,
+	})
+	api.requireStatus(status, http.StatusOK, response)
+	status, response = api.request(http.MethodPatch, "/rooms/"+roomID+"/live/me", viewer.Token, map[string]any{
+		"connection_state": "left",
+	})
+	api.requireStatus(status, http.StatusOK, response)
+	assertViewerIDs()
+}
+
 func TestLiveModerationPersistsOnlyWithinRoom(t *testing.T) {
 	api := newAPIHarness(t)
 	owner := api.register("voice_scope_owner")

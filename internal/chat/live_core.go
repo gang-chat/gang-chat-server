@@ -1,6 +1,7 @@
 package chat
 
 import (
+	"database/sql"
 	"net/http"
 	"strings"
 	"time"
@@ -61,11 +62,12 @@ func (h *Handler) joinLive(c *gin.Context) {
 		`INSERT INTO live_participants (
 		   live_session_id, room_id, user_id, client_live_session_id, joined_at, updated_at,
 		   mic_muted, mic_blocked, headphones_muted, headphones_blocked,
-		   voice_blocked, camera_on, screen_sharing, connection_state
-		 ) VALUES (?, ?, ?, ?, ?, ?, 1, 0, 0, 0, 0, 0, 0, 'joining')
+		   voice_blocked, camera_on, screen_sharing, watching_screen_user_id, connection_state
+		 ) VALUES (?, ?, ?, ?, ?, ?, 1, 0, 0, 0, 0, 0, 0, NULL, 'joining')
 		 ON DUPLICATE KEY UPDATE
 		   client_live_session_id = VALUES(client_live_session_id),
 		   updated_at = VALUES(updated_at),
+		   watching_screen_user_id = NULL,
 		   connection_state = 'joining'`,
 		liveSessionID, roomID, userID, req.ClientLiveSessionID, now, now,
 	)
@@ -137,6 +139,79 @@ func (h *Handler) joinLive(c *gin.Context) {
 		Participant: participant,
 		Live:        live,
 	})
+}
+
+func (h *Handler) updateMyLiveScreenView(c *gin.Context) {
+	roomID := c.Param("room_id")
+	viewerUserID := currentUserID(c)
+	if !h.requireRoomAccess(c, roomID) {
+		return
+	}
+
+	var req updateLiveScreenViewRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		h.jsonError(c, http.StatusBadRequest, "bad_request", "invalid JSON body")
+		return
+	}
+	targetUserID := strings.TrimSpace(req.BroadcasterUserID)
+	if targetUserID == viewerUserID {
+		h.jsonError(c, http.StatusBadRequest, "validation_failed", "cannot watch your own screen")
+		return
+	}
+	if targetUserID != "" {
+		var targetCount int
+		if err := h.DB.QueryRow(
+			`SELECT COUNT(*)
+			 FROM live_participants
+			 WHERE room_id = ? AND user_id = ?
+			   AND connection_state != 'left' AND screen_sharing = 1`,
+			roomID,
+			targetUserID,
+		).Scan(&targetCount); err != nil {
+			h.jsonError(c, http.StatusInternalServerError, "internal_error", "failed to validate screen share")
+			return
+		}
+		if targetCount == 0 {
+			h.jsonError(c, http.StatusConflict, "screen_share_not_active", "screen share is not active")
+			return
+		}
+	}
+
+	var target any
+	if targetUserID != "" {
+		target = targetUserID
+	}
+	res, err := h.DB.Exec(
+		`UPDATE live_participants
+		 SET watching_screen_user_id = ?, updated_at = ?
+		 WHERE room_id = ? AND user_id = ? AND connection_state != 'left'`,
+		target,
+		nowMillis(),
+		roomID,
+		viewerUserID,
+	)
+	if err != nil {
+		h.jsonError(c, http.StatusInternalServerError, "internal_error", "failed to update screen view")
+		return
+	}
+	if affected, _ := res.RowsAffected(); affected == 0 {
+		var activeViewerCount int
+		if err := h.DB.QueryRow(
+			`SELECT COUNT(*) FROM live_participants
+			 WHERE room_id = ? AND user_id = ? AND connection_state != 'left'`,
+			roomID,
+			viewerUserID,
+		).Scan(&activeViewerCount); err != nil || activeViewerCount == 0 {
+			h.jsonError(c, http.StatusConflict, "conflict", "user is not in live")
+			return
+		}
+	}
+
+	h.PublishLiveSnapshot(roomID, "live_participant_updated", map[string]any{
+		"user_id":             viewerUserID,
+		"broadcaster_user_id": target,
+	})
+	c.JSON(http.StatusOK, gin.H{"broadcaster_user_id": target})
 }
 
 func (h *Handler) updateMyLiveState(c *gin.Context) {
@@ -301,6 +376,20 @@ func (h *Handler) buildLiveState(roomID string, fallbackUpdatedAt int64) (liveSt
 		}
 		participants = append(participants, participant)
 	}
+	if err := rows.Err(); err != nil {
+		return liveState{}, err
+	}
+	viewersByBroadcaster, err := h.activeScreenViewers(roomID)
+	if err != nil {
+		return liveState{}, err
+	}
+	for index := range participants {
+		participant := &participants[index]
+		participant.ScreenViewers = viewersByBroadcaster[participant.User.ID]
+		if participant.ScreenViewers == nil {
+			participant.ScreenViewers = []userSummary{}
+		}
+	}
 	return liveState{
 		RoomID:           roomID,
 		ParticipantCount: len(participants),
@@ -325,7 +414,70 @@ func (h *Handler) liveParticipantForUser(roomID, userID string) (liveParticipant
 		roomID, userID,
 	)
 	participant, _, err := scanLiveParticipant(row)
+	if err != nil {
+		return liveParticipant{}, err
+	}
+	viewersByBroadcaster, err := h.activeScreenViewers(roomID)
+	if err != nil {
+		return liveParticipant{}, err
+	}
+	participant.ScreenViewers = viewersByBroadcaster[userID]
+	if participant.ScreenViewers == nil {
+		participant.ScreenViewers = []userSummary{}
+	}
 	return participant, err
+}
+
+func (h *Handler) activeScreenViewers(roomID string) (map[string][]userSummary, error) {
+	rows, err := h.DB.Query(
+		`SELECT viewer.watching_screen_user_id,
+		        u.id, u.uid, u.username, u.display_name, u.avatar_url, u.default_avatar_key,
+		        rm.room_display_name, rm.role
+		 FROM live_participants viewer
+		 JOIN live_participants broadcaster
+		   ON broadcaster.room_id = viewer.room_id
+		  AND broadcaster.user_id = viewer.watching_screen_user_id
+		 JOIN users u ON u.id = viewer.user_id
+		 LEFT JOIN room_memberships rm
+		   ON rm.room_id = viewer.room_id AND rm.user_id = viewer.user_id
+		 WHERE viewer.room_id = ?
+		   AND viewer.connection_state != 'left'
+		   AND broadcaster.connection_state != 'left'
+		   AND broadcaster.screen_sharing = 1
+		   AND viewer.user_id != broadcaster.user_id
+		 ORDER BY viewer.joined_at ASC`,
+		roomID,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	viewers := make(map[string][]userSummary)
+	for rows.Next() {
+		var broadcasterUserID, userID, uid, username string
+		var displayName, avatarURL, defaultAvatar, roomDisplayName, roomRole sql.NullString
+		if err := rows.Scan(
+			&broadcasterUserID,
+			&userID,
+			&uid,
+			&username,
+			&displayName,
+			&avatarURL,
+			&defaultAvatar,
+			&roomDisplayName,
+			&roomRole,
+		); err != nil {
+			return nil, err
+		}
+		user := summaryFromUserFields(userID, uid, username, displayName, avatarURL, defaultAvatar)
+		user.RoomDisplayName = nullableString(roomDisplayName)
+		if roomRole.Valid {
+			user.RoomRole = roomRole.String
+		}
+		viewers[broadcasterUserID] = append(viewers[broadcasterUserID], user)
+	}
+	return viewers, rows.Err()
 }
 
 func (h *Handler) liveKitToken(roomID, userID string) (string, time.Time, error) {
