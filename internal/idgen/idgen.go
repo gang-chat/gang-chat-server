@@ -9,11 +9,12 @@ import (
 )
 
 const (
-	UserUIDStart       = int64(10000000)
-	RoomRIDStart       = int64(20000000)
-	ReservedSuperUID   = "66666666"
-	ReservedSuperEmail = "gang-chat@outlook.com"
-	ReservedSuperName  = "GANG"
+	UserUIDStart          = int64(10000000)
+	RoomRIDStart          = int64(20000000)
+	ReservedSuperUIDValue = int64(66666666)
+	ReservedSuperUID      = "66666666"
+	ReservedSuperEmail    = "gang-chat@outlook.com"
+	ReservedSuperName     = "GANG"
 )
 
 func New(prefix string) string {
@@ -73,8 +74,19 @@ func nextSeq(db *sql.DB, name string, start int64) (string, error) {
 	if err := tx.QueryRow(`SELECT next_value FROM id_sequences WHERE name = ? FOR UPDATE`, name).Scan(&allocated); err != nil {
 		return "", fmt.Errorf("lock sequence %s: %w", name, err)
 	}
-	if allocated < seed {
+	if name == "user_uid" && allocated >= ReservedSuperUIDValue && seed < ReservedSuperUIDValue {
+		// Older deployments seeded this sequence from the reserved super-user
+		// UID. Repair the poisoned value while holding the sequence row lock so
+		// concurrent registration remains serialized without MySQL gap locks.
 		allocated = seed
+	} else if allocated < seed {
+		allocated = seed
+	}
+	if name == "user_uid" {
+		allocated, err = nextAvailableUserUID(tx, allocated)
+		if err != nil {
+			return "", err
+		}
 	}
 	if _, err := tx.Exec(`UPDATE id_sequences SET next_value = ? WHERE name = ?`, allocated+1, name); err != nil {
 		return "", fmt.Errorf("advance sequence %s from %d: %w", name, allocated, err)
@@ -88,11 +100,15 @@ func nextSeq(db *sql.DB, name string, start int64) (string, error) {
 
 func sequenceSeedValue(tx *sql.Tx, name string, start int64) (int64, error) {
 	query := ""
+	args := []any{start}
 	switch name {
 	case "user_uid":
 		query = `SELECT COALESCE(MAX(CAST(uid AS UNSIGNED)) + 1, ?)
 			FROM users
-			WHERE uid REGEXP '^[0-9]+$'`
+			WHERE uid REGEXP '^[0-9]+$'
+			  AND CAST(uid AS UNSIGNED) >= ?
+			  AND CAST(uid AS UNSIGNED) < ?`
+		args = append(args, start, ReservedSuperUIDValue)
 	case "room_rid":
 		query = `SELECT COALESCE(MAX(CAST(rid AS UNSIGNED)) + 1, ?)
 			FROM rooms
@@ -102,11 +118,37 @@ func sequenceSeedValue(tx *sql.Tx, name string, start int64) (int64, error) {
 	}
 
 	seed := start
-	if err := tx.QueryRow(query, start).Scan(&seed); err != nil {
+	if err := tx.QueryRow(query, args...).Scan(&seed); err != nil {
 		return 0, fmt.Errorf("read sequence seed %s: %w", name, err)
 	}
 	if seed < start {
 		return start, nil
 	}
 	return seed, nil
+}
+
+func nextAvailableUserUID(tx *sql.Tx, candidate int64) (int64, error) {
+	const maxInt64Value int64 = 9223372036854775807
+	if candidate < UserUIDStart {
+		candidate = UserUIDStart
+	}
+	for {
+		if candidate == ReservedSuperUIDValue {
+			candidate++
+		}
+		var exists int
+		if err := tx.QueryRow(
+			`SELECT EXISTS(SELECT 1 FROM users WHERE uid = ? LIMIT 1)`,
+			strconv.FormatInt(candidate, 10),
+		).Scan(&exists); err != nil {
+			return 0, fmt.Errorf("check user uid %d: %w", candidate, err)
+		}
+		if exists == 0 {
+			return candidate, nil
+		}
+		if candidate == maxInt64Value {
+			return 0, fmt.Errorf("user uid sequence exhausted")
+		}
+		candidate++
+	}
 }

@@ -27,7 +27,10 @@ func TestPublicUIDAndRIDRanges(t *testing.T) {
 
 	ownerUID := parseNumericID(t, owner.User["uid"])
 	otherUID := parseNumericID(t, other.User["uid"])
-	if ownerUID < idgen.UserUIDStart || otherUID <= ownerUID {
+	if ownerUID < idgen.UserUIDStart ||
+		ownerUID >= idgen.ReservedSuperUIDValue ||
+		otherUID <= ownerUID ||
+		otherUID >= idgen.ReservedSuperUIDValue {
 		t.Fatalf("unexpected uid sequence: owner=%d other=%d", ownerUID, otherUID)
 	}
 

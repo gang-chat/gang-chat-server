@@ -153,6 +153,53 @@ func TestNextSeqSeedsBeyondExistingPublicIDs(t *testing.T) {
 	}
 }
 
+func TestNextUserUIDIgnoresReservedSuperUID(t *testing.T) {
+	db := newSeqDB(t)
+	if _, err := db.Exec(`INSERT INTO users (uid) VALUES (?)`, ReservedSuperUID); err != nil {
+		t.Fatalf("seed super user: %v", err)
+	}
+
+	if uid, err := NextUserUID(db); err != nil || uid != "10000000" {
+		t.Fatalf("uid after reserved super user = %q, %v; want 10000000", uid, err)
+	}
+}
+
+func TestNextUserUIDRepairsSequencePoisonedByReservedSuperUID(t *testing.T) {
+	db := newSeqDB(t)
+	if _, err := db.Exec(
+		`INSERT INTO users (uid) VALUES ('10000005'), (?), ('66666667')`,
+		ReservedSuperUID,
+	); err != nil {
+		t.Fatalf("seed users: %v", err)
+	}
+	if _, err := db.Exec(
+		`INSERT INTO id_sequences (name, next_value) VALUES ('user_uid', 66666668)`,
+	); err != nil {
+		t.Fatalf("seed poisoned sequence: %v", err)
+	}
+
+	if uid, err := NextUserUID(db); err != nil || uid != "10000006" {
+		t.Fatalf("repaired uid = %q, %v; want 10000006", uid, err)
+	}
+	if uid, err := NextUserUID(db); err != nil || uid != "10000007" {
+		t.Fatalf("next repaired uid = %q, %v; want 10000007", uid, err)
+	}
+}
+
+func TestNextUserUIDSkipsReservedAndOccupiedHighValues(t *testing.T) {
+	db := newSeqDB(t)
+	if _, err := db.Exec(
+		`INSERT INTO users (uid) VALUES ('66666665'), (?), ('66666667')`,
+		ReservedSuperUID,
+	); err != nil {
+		t.Fatalf("seed boundary users: %v", err)
+	}
+
+	if uid, err := NextUserUID(db); err != nil || uid != "66666668" {
+		t.Fatalf("boundary uid = %q, %v; want 66666668", uid, err)
+	}
+}
+
 func TestNextSeqReturnsDatabaseErrorsInsteadOfDuplicateFallbacks(t *testing.T) {
 	db, err := sql.Open("mysql", "")
 	if err != nil {

@@ -199,6 +199,49 @@ func TestRoomEventNotifications(t *testing.T) {
 	if roomPayload := promotion["room"].(map[string]any); roomPayload["name"] != "Event Room" || roomPayload["description"] != "Room event bio" {
 		t.Fatalf("promotion should include room payload: %v", promotion)
 	}
+	if _, err := api.db.Exec(
+		`UPDATE users
+		 SET display_name = 'Current Owner Name', avatar_url = '/current-owner.png',
+		     default_avatar_key = 'green-2'
+		 WHERE id = ?`,
+		owner.User["id"],
+	); err != nil {
+		t.Fatalf("change promotion actor profile: %v", err)
+	}
+	if _, err := api.db.Exec(
+		`UPDATE room_memberships
+		 SET room_display_name = 'Current Owner In Room'
+		 WHERE room_id = ? AND user_id = ?`,
+		roomID,
+		owner.User["id"],
+	); err != nil {
+		t.Fatalf("change promotion actor room profile: %v", err)
+	}
+	if _, err := api.db.Exec(
+		`UPDATE rooms
+		 SET name = 'Current Event Room', description = 'Current room bio',
+		     avatar_url = '/current-room.png', default_avatar_key = 'room-3'
+		 WHERE id = ?`,
+		roomID,
+	); err != nil {
+		t.Fatalf("change notification room profile: %v", err)
+	}
+	status, response = api.request(http.MethodGet, "/room-notifications", member.Token, nil)
+	api.requireStatus(status, http.StatusOK, response)
+	promotion = response["notifications"].([]any)[0].(map[string]any)
+	promotionActor := promotion["actor"].(map[string]any)
+	if promotionActor["display_name"] != owner.User["display_name"] ||
+		promotionActor["room_display_name"] != nil ||
+		promotionActor["avatar_url"] != nil ||
+		promotionActor["room_role"] != "owner" {
+		t.Fatalf("promotion actor should retain its creation snapshot: %v", promotionActor)
+	}
+	if roomPayload := promotion["room"].(map[string]any); roomPayload["name"] != "Event Room" ||
+		roomPayload["description"] != "Room event bio" ||
+		roomPayload["avatar_url"] != nil ||
+		roomPayload["default_avatar_key"] != room["default_avatar_key"] {
+		t.Fatalf("promotion room should retain its creation snapshot: %v", roomPayload)
+	}
 	status, response = api.request(http.MethodPost, "/room-notifications/read", member.Token, nil)
 	api.requireStatus(status, http.StatusOK, response)
 	status, response = api.request(http.MethodGet, "/room-notifications", member.Token, nil)
@@ -262,6 +305,39 @@ func TestRoomEventNotifications(t *testing.T) {
 	selfDemotion := notifications[0].(map[string]any)
 	if selfDemotion["type"] != roomNotificationCreatorTransferDemoted || selfDemotion["actor"] != nil || selfDemotion["to_role"] != "admin" {
 		t.Fatalf("creator transfer demotion notification mismatch: %v", selfDemotion)
+	}
+
+	status, response = api.request(http.MethodPost, "/rooms/"+roomID+"/leave", owner.Token, nil)
+	api.requireStatus(status, http.StatusOK, response)
+	status, response = api.request(http.MethodGet, "/room-notifications", member.Token, nil)
+	api.requireStatus(status, http.StatusOK, response)
+	notifications = response["notifications"].([]any)
+	promotion = notificationByType(notifications, roomNotificationRolePromoted)
+	promotionActor = promotion["actor"].(map[string]any)
+	if promotionActor["id"] != owner.User["id"] || promotionActor["room_role"] != "owner" {
+		t.Fatalf("notification should retain the actor snapshot after the actor leaves: %v", promotion)
+	}
+
+	if _, err := api.db.Exec(
+		`UPDATE room_notifications
+		 SET room_name = '', actor_username = NULL
+		 WHERE id = ?`,
+		promotion["id"],
+	); err != nil {
+		t.Fatalf("simulate legacy notification without snapshots: %v", err)
+	}
+	status, response = api.request(http.MethodGet, "/room-notifications", member.Token, nil)
+	api.requireStatus(status, http.StatusOK, response)
+	notifications = response["notifications"].([]any)
+	promotion = notificationByType(notifications, roomNotificationRolePromoted)
+	promotionActor = promotion["actor"].(map[string]any)
+	if promotionActor["display_name"] != "Current Owner Name" || promotionActor["avatar_url"] != "/current-owner.png" {
+		t.Fatalf("legacy notification should fall back to the current actor profile: %v", promotionActor)
+	}
+	if roomPayload := promotion["room"].(map[string]any); roomPayload["name"] != "Current Event Room" ||
+		roomPayload["description"] != "Current room bio" ||
+		roomPayload["avatar_url"] != "/current-room.png" {
+		t.Fatalf("legacy notification should fall back to the current room profile: %v", roomPayload)
 	}
 }
 
