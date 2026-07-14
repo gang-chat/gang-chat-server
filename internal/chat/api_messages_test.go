@@ -233,6 +233,19 @@ func TestMessageQuoteUsesImmutableSingleLevelSnapshot(t *testing.T) {
 	}
 }
 
+func TestQuotedMessageSenderNameOmitsSystemSender(t *testing.T) {
+	msg := message{
+		Type: systemMessageType,
+		Sender: userSummary{
+			Username:    "system_subject",
+			DisplayName: "System Subject",
+		},
+	}
+	if got := quotedMessageSenderName(msg); got != "" {
+		t.Fatalf("system message quote should omit its sender name, got %q", got)
+	}
+}
+
 func findMessageInList(t *testing.T, messages []map[string]any, messageID string) map[string]any {
 	t.Helper()
 	for _, message := range messages {

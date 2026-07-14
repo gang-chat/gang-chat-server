@@ -237,6 +237,9 @@ func normalizedQuoteMessageIDs(req sendMessageRequest) []string {
 }
 
 func quotedMessageSenderName(msg message) string {
+	if msg.Type == systemMessageType {
+		return ""
+	}
 	return firstNonEmptyString(
 		dereferenceString(msg.Sender.RoomDisplayName),
 		msg.Sender.DisplayName,
