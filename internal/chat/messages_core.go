@@ -249,12 +249,112 @@ func quotedMessageSenderName(msg message) string {
 }
 
 func quotedMessageBodySnapshot(msg message) string {
-	if msg.Type == "text" || msg.Type == systemMessageType {
+	if msg.Type == systemMessageType {
+		if body := systemMessageQuoteBody(msg); body != "" {
+			return body
+		}
+	}
+	if msg.Type == "text" {
 		if body := strings.TrimSpace(msg.Body); body != "" {
 			return body
 		}
 	}
 	return lastMessageBodyPreview(msg.Type, msg.Body, mustJSON(msg.Attachments))
+}
+
+func systemMessageQuoteBody(msg message) string {
+	subject := firstNonEmptyString(
+		dereferenceString(msg.Sender.RoomDisplayName),
+		msg.Sender.DisplayName,
+		msg.Sender.Username,
+		"用户",
+	)
+	body := strings.TrimSpace(msg.Body)
+	for _, raw := range msg.Attachments {
+		attachment, ok := raw.(map[string]any)
+		if !ok || strings.ToLower(stringFromMap(attachment, "type")) != systemMessageType {
+			continue
+		}
+		if target := systemAttachmentDisplayName(attachment, "target"); target != "" {
+			subject = target
+		} else if user := systemAttachmentDisplayName(attachment, "user"); user != "" {
+			subject = user
+		}
+		actor := systemAttachmentDisplayName(attachment, "actor")
+		profileActor := actor
+		if profileActor == "" {
+			profileActor = systemAttachmentDisplayName(attachment, "user")
+		}
+		switch stringFromMap(attachment, "event") {
+		case systemEventRoomMemberJoined:
+			return subject + " 加入了房间"
+		case systemEventRoomMemberLeft:
+			return subject + " 离开了房间"
+		case systemEventRoomMemberRemoved:
+			if actor == "" {
+				return subject + " 被踢出了房间"
+			}
+			return subject + " 被 " + actor + " 踢出了房间"
+		case systemEventLiveJoined:
+			return subject + " 进入了语音频道"
+		case systemEventLiveLeft:
+			return subject + " 退出了语音频道"
+		case systemEventRoomRoleChanged:
+			fromRole := stringFromMap(attachment, "from_role")
+			toRole := stringFromMap(attachment, "to_role")
+			change := systemRoleChangeVerb(fromRole, toRole) + " " + systemRoleLabel(toRole)
+			if actor != "" && !(fromRole == "owner" && toRole == "admin") {
+				return subject + " 被 " + actor + " " + change
+			}
+			return subject + " " + change
+		case systemEventRoomNameChanged:
+			return systemRoomProfileChangeQuoteBody(
+				"房间名称",
+				profileActor,
+				stringFromMap(attachment, "new_value"),
+				false,
+			)
+		case systemEventRoomBioChanged:
+			return systemRoomProfileChangeQuoteBody(
+				"房间简介",
+				profileActor,
+				stringFromMap(attachment, "new_value"),
+				true,
+			)
+		case systemEventRoomVisibilityChanged:
+			return systemRoomProfileChangeQuoteBody(
+				"房间可见性",
+				profileActor,
+				systemVisibilityLabel(stringFromMap(attachment, "new_value")),
+				false,
+			)
+		case systemEventRoomJoinPolicyChanged:
+			return systemRoomProfileChangeQuoteBody(
+				"房间加入方式",
+				profileActor,
+				systemJoinPolicyLabel(stringFromMap(attachment, "new_value")),
+				false,
+			)
+		}
+	}
+	if body == "" {
+		return subject
+	}
+	return subject + " " + body
+}
+
+func systemRoomProfileChangeQuoteBody(subject, actor, value string, multiline bool) string {
+	if value == "" {
+		value = "（空）"
+	}
+	separator := " "
+	if multiline {
+		separator = "\n"
+	}
+	if actor == "" {
+		return subject + " 修改为" + separator + value
+	}
+	return subject + " 被 " + actor + " 修改为" + separator + value
 }
 
 func quotedMessagePreviewAttachment(msg message) any {

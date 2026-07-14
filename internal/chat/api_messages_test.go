@@ -233,16 +233,100 @@ func TestMessageQuoteUsesImmutableSingleLevelSnapshot(t *testing.T) {
 	}
 }
 
-func TestQuotedMessageSenderNameOmitsSystemSender(t *testing.T) {
+func TestQuotedSystemMessageSnapshotOmitsHeaderSenderAndKeepsBodySubject(t *testing.T) {
 	msg := message{
 		Type: systemMessageType,
+		Body: "加入了房间",
 		Sender: userSummary{
 			Username:    "system_subject",
 			DisplayName: "System Subject",
 		},
+		Attachments: []any{
+			map[string]any{
+				"type":  systemMessageType,
+				"event": systemEventRoomMemberJoined,
+				"user": map[string]any{
+					"username":          "system_subject",
+					"display_name":      "System Subject",
+					"room_display_name": "Room Subject",
+				},
+			},
+		},
 	}
 	if got := quotedMessageSenderName(msg); got != "" {
 		t.Fatalf("system message quote should omit its sender name, got %q", got)
+	}
+	if got := quotedMessageBodySnapshot(msg); got != "Room Subject 加入了房间" {
+		t.Fatalf("system message quote should retain its subject in the body, got %q", got)
+	}
+
+	roleChanged := message{
+		Type: systemMessageType,
+		Attachments: []any{
+			map[string]any{
+				"type":      systemMessageType,
+				"event":     systemEventRoomRoleChanged,
+				"from_role": "member",
+				"to_role":   "admin",
+				"target": map[string]any{
+					"room_display_name": "Room Target",
+				},
+				"actor": map[string]any{
+					"room_display_name": "Room Owner",
+				},
+			},
+		},
+	}
+	if got := quotedMessageBodySnapshot(roleChanged); got != "Room Target 被 Room Owner 晋升为 管理员" {
+		t.Fatalf("role-change quote should preserve its rendered participants, got %q", got)
+	}
+
+	descriptionChanged := message{
+		Type: systemMessageType,
+		Attachments: []any{
+			map[string]any{
+				"type":      systemMessageType,
+				"event":     systemEventRoomBioChanged,
+				"new_value": "New description",
+				"user": map[string]any{
+					"room_display_name": "Room Owner",
+				},
+			},
+		},
+	}
+	if got := quotedMessageBodySnapshot(descriptionChanged); got != "房间简介 被 Room Owner 修改为\nNew description" {
+		t.Fatalf("room-profile quote should preserve its rendered actor and value, got %q", got)
+	}
+}
+
+func TestQuotedSystemMessageKeepsRenderedBodyAfterSending(t *testing.T) {
+	api := newAPIHarness(t)
+	owner := api.register("system_quote_owner")
+	member := api.register("system_quote_member")
+	room := api.createRoom(owner.Token, map[string]any{
+		"name":        "System Quote Room",
+		"join_policy": "open",
+	})
+	roomID := room["id"].(string)
+	status, response := api.request(http.MethodPost, "/rooms/"+roomID+"/join", member.Token, nil)
+	api.requireStatus(status, http.StatusOK, response)
+	source := requireSystemMessage(
+		t,
+		listRoomMessages(t, api, owner.Token, roomID),
+		systemEventRoomMemberJoined,
+		member.User["id"].(string),
+	)
+
+	status, response = api.request(http.MethodPost, "/rooms/"+roomID+"/messages", owner.Token, map[string]any{
+		"client_message_id": "system_quote_reply",
+		"body":              "reply",
+		"quote_message_id":  source["id"],
+	})
+	api.requireStatus(status, http.StatusCreated, response)
+	quote := response["message"].(map[string]any)["quote"].(map[string]any)
+	if quote["sender_display_name"] != "" ||
+		quote["body"] != member.User["username"].(string)+" 加入了房间" {
+		t.Fatalf("sent system quote should show time-only header and retain the subject body: %v", quote)
 	}
 }
 
