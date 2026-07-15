@@ -52,11 +52,15 @@ func (h *Handler) listStickerPacks(c *gin.Context) {
 	var err error
 	switch scope {
 	case "personal":
+		ownerUserID, ok := h.personalStickerOwner(c, c.Query("owner_user_id"))
+		if !ok {
+			return
+		}
 		rows, err = h.DB.Query(
 			`SELECT id, scope, room_id, name, sort_order, updated_at FROM sticker_packs
 			 WHERE scope = 'personal' AND owner_user_id = ?
 			 ORDER BY sort_order ASC, created_at ASC, id ASC`,
-			currentUserID(c),
+			ownerUserID,
 		)
 	case "room":
 		if !h.requireRoomAccess(c, roomID) {
@@ -118,15 +122,23 @@ func (h *Handler) createStickerPack(c *gin.Context) {
 		h.jsonError(c, http.StatusBadRequest, "validation_failed", "invalid sticker pack scope")
 		return
 	}
+	personalOwnerID := currentUserID(c)
+	if req.Scope == "personal" {
+		var ok bool
+		personalOwnerID, ok = h.personalStickerOwner(c, req.OwnerUserID)
+		if !ok {
+			return
+		}
+	}
 	id := newID("stkp")
 	now := nowMillis()
-	var ownerID any = currentUserID(c)
+	var ownerID any = personalOwnerID
 	var roomID any
 	if req.Scope == "room" {
 		ownerID = nil
 		roomID = req.RoomID
 	}
-	namespaceOwnerID := currentUserID(c)
+	namespaceOwnerID := personalOwnerID
 	namespaceRoomID := ""
 	if req.Scope == "room" {
 		namespaceOwnerID = ""
@@ -678,7 +690,7 @@ func (h *Handler) canManageStickerPack(packID, userID string) bool {
 		return false
 	}
 	if scope == "personal" {
-		return ownerID.Valid && ownerID.String == userID
+		return ownerID.Valid && (ownerID.String == userID || h.isSuperuser(userID))
 	}
 	return roomID.Valid && h.isAdmin(roomID.String, userID)
 }
@@ -1028,10 +1040,32 @@ func (h *Handler) downloadableSticker(stickerID, userID string) (downloadableSti
 		       OR ? = 1
 		     )
 		   )
+		   OR ? = 1
 		 )`,
-		stickerID, userID, userID, boolToInt(h.isSuperuser(userID)),
+		stickerID, userID, userID, boolToInt(h.isSuperuser(userID)), boolToInt(h.isSuperuser(userID)),
 	).Scan(&item.ID, &item.Name, &item.AssetID, &item.Filename, &item.MimeType, &item.StorageKey)
 	return item, err == nil
+}
+
+func (h *Handler) personalStickerOwner(c *gin.Context, requestedUserID string) (string, bool) {
+	actorID := currentUserID(c)
+	targetID := strings.TrimSpace(requestedUserID)
+	if targetID == "" || targetID == actorID {
+		return actorID, true
+	}
+	if !h.isSuperuser(actorID) {
+		h.jsonError(c, http.StatusForbidden, "forbidden", "super user required")
+		return "", false
+	}
+	var exists int
+	if err := h.DB.QueryRow(
+		`SELECT COUNT(*) FROM users WHERE id = ? AND status IN ('active', 'suspended')`,
+		targetID,
+	).Scan(&exists); err != nil || exists == 0 {
+		h.jsonError(c, http.StatusNotFound, "not_found", "user not found")
+		return "", false
+	}
+	return targetID, true
 }
 
 func (h *Handler) downloadableStickerBytes(ctx context.Context, item downloadableSticker) ([]byte, error) {

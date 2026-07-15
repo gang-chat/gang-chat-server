@@ -76,8 +76,9 @@ func TestSuperuserCanManageOtherUserCloudSettingsAndPassword(t *testing.T) {
 			"display_name":        "Managed Display",
 			"bio":                 "Managed Bio",
 			"gender":              "female",
+			"email":               "managed-settings-updated@example.test",
 			"email_public":        true,
-			"email_verified":      false,
+			"email_verified":      true,
 			"phone_number":        "+86 13800000000",
 			"phone_number_public": true,
 			"language":            "en",
@@ -88,7 +89,8 @@ func TestSuperuserCanManageOtherUserCloudSettingsAndPassword(t *testing.T) {
 	if user["display_name"] != "Managed Display" ||
 		user["bio"] != "Managed Bio" ||
 		user["gender"] != "female" ||
-		user["email_verified"] != false ||
+		user["email"] != "managed-settings-updated@example.test" ||
+		user["email_verified"] != true ||
 		user["email_public"] != true ||
 		user["phone_number_public"] != true ||
 		user["language"] != "en" {

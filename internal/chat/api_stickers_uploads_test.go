@@ -9,6 +9,7 @@ import (
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"sync"
 	"testing"
@@ -491,6 +492,174 @@ func TestListStickerPacksRespectsScopeAndRoom(t *testing.T) {
 	personalPacks := response["packs"].([]any)
 	if len(personalPacks) != 1 || personalPacks[0].(map[string]any)["scope"] != "personal" {
 		t.Fatalf("personal list should include only personal packs: %v", response)
+	}
+}
+
+func TestSuperuserManagesTargetPersonalStickerPacks(t *testing.T) {
+	api := newAPIHarness(t)
+	admin := api.register("sticker_target_admin")
+	target := api.register("sticker_target_user")
+	other := api.register("sticker_target_other")
+	adminID := admin.User["id"].(string)
+	targetID := target.User["id"].(string)
+	if _, err := api.db.Exec(`UPDATE users SET is_superuser = 1 WHERE id = ?`, adminID); err != nil {
+		t.Fatalf("make test user superuser: %v", err)
+	}
+
+	status, response := api.request(http.MethodPost, "/sticker-packs", other.Token, map[string]any{
+		"scope":         "personal",
+		"owner_user_id": targetID,
+		"name":          "Denied",
+	})
+	api.requireStatus(status, http.StatusForbidden, response)
+
+	status, response = api.request(http.MethodPost, "/sticker-packs", admin.Token, map[string]any{
+		"scope":         "personal",
+		"owner_user_id": targetID,
+		"name":          "Target Pack",
+	})
+	api.requireStatus(status, http.StatusCreated, response)
+	packID := response["pack"].(map[string]any)["id"].(string)
+
+	var storedOwner string
+	if err := api.db.QueryRow(`SELECT owner_user_id FROM sticker_packs WHERE id = ?`, packID).Scan(&storedOwner); err != nil {
+		t.Fatalf("read target pack owner: %v", err)
+	}
+	if storedOwner != targetID {
+		t.Fatalf("target pack owner = %q, want %q", storedOwner, targetID)
+	}
+
+	status, response = api.request(
+		http.MethodGet,
+		"/sticker-packs?scope=personal&owner_user_id="+url.QueryEscape(targetID),
+		admin.Token,
+		nil,
+	)
+	api.requireStatus(status, http.StatusOK, response)
+	packs := response["packs"].([]any)
+	if len(packs) != 1 || packs[0].(map[string]any)["id"] != packID {
+		t.Fatalf("superuser target list returned wrong packs: %v", response)
+	}
+
+	assetID := "asset_target_managed_sticker"
+	filename := "target.webp"
+	body := []byte("target-sticker")
+	api.putAsset(assetID, filename, "image/webp", body)
+	if _, err := api.db.Exec(
+		`INSERT INTO assets (id, owner_user_id, purpose, filename, mime_type, size_bytes, url, created_at)
+		 VALUES (?, ?, 'sticker', ?, 'image/webp', ?, ?, ?)`,
+		assetID, adminID, filename, len(body), "/assets/"+assetID+"/"+filename, nowMillis(),
+	); err != nil {
+		t.Fatalf("insert target managed asset: %v", err)
+	}
+	status, response = api.request(http.MethodPost, "/sticker-packs/"+packID+"/stickers", admin.Token, map[string]any{
+		"asset_id": assetID,
+		"name":     "target",
+	})
+	api.requireStatus(status, http.StatusCreated, response)
+	stickerID := response["sticker"].(map[string]any)["id"].(string)
+
+	download := api.rawRequest(http.MethodGet, "/stickers/download?ids="+stickerID, admin.Token, nil, nil)
+	if download.Code != http.StatusOK || !bytes.Equal(download.Body.Bytes(), body) {
+		t.Fatalf("superuser target sticker download status=%d body=%q", download.Code, download.Body.String())
+	}
+
+	status, response = api.request(http.MethodGet, "/sticker-packs?scope=personal", target.Token, nil)
+	api.requireStatus(status, http.StatusOK, response)
+	targetPacks := response["packs"].([]any)
+	if len(targetPacks) != 1 || targetPacks[0].(map[string]any)["id"] != packID {
+		t.Fatalf("target user should see superuser-managed pack: %v", response)
+	}
+}
+
+func TestSuperuserReadsTargetAccountSessions(t *testing.T) {
+	api := newAPIHarness(t)
+	admin := api.register("session_target_admin")
+	target := api.register("session_target_user")
+	other := api.register("session_target_other")
+	adminID := admin.User["id"].(string)
+	targetID := target.User["id"].(string)
+	if _, err := api.db.Exec(`UPDATE users SET is_superuser = 1 WHERE id = ?`, adminID); err != nil {
+		t.Fatalf("make test user superuser: %v", err)
+	}
+
+	denied := api.rawRequest(
+		http.MethodGet,
+		"/users/"+targetID+"/sessions",
+		other.Token,
+		nil,
+		nil,
+	)
+	if denied.Code != http.StatusForbidden {
+		t.Fatalf("ordinary user target sessions status=%d body=%q", denied.Code, denied.Body.String())
+	}
+
+	allowed := api.rawRequest(
+		http.MethodGet,
+		"/users/"+targetID+"/sessions",
+		admin.Token,
+		nil,
+		nil,
+	)
+	if allowed.Code != http.StatusOK {
+		t.Fatalf("superuser target sessions status=%d body=%q", allowed.Code, allowed.Body.String())
+	}
+	var sessions []map[string]any
+	if err := json.Unmarshal(allowed.Body.Bytes(), &sessions); err != nil {
+		t.Fatalf("decode target sessions: %v", err)
+	}
+	if len(sessions) == 0 {
+		t.Fatalf("target registration session missing: %s", allowed.Body.String())
+	}
+	if sessions[0]["is_current"] != false {
+		t.Fatalf("target session must not be marked as the admin's current session: %v", sessions[0])
+	}
+	if _, ok := sessions[0]["ip_address"]; !ok {
+		t.Fatalf("target session should expose its cloud IP field: %v", sessions[0])
+	}
+}
+
+func TestSuperuserDeletesTargetAccountThroughSharedRetentionPath(t *testing.T) {
+	api := newAPIHarness(t)
+	admin := api.register("delete_target_admin")
+	target := api.register("delete_target_user")
+	other := api.register("delete_target_other")
+	adminID := admin.User["id"].(string)
+	targetID := target.User["id"].(string)
+	if _, err := api.db.Exec(`UPDATE users SET is_superuser = 1 WHERE id = ?`, adminID); err != nil {
+		t.Fatalf("make test user superuser: %v", err)
+	}
+
+	status, response := api.request(
+		http.MethodDelete,
+		"/users/"+targetID+"/account",
+		other.Token,
+		map[string]any{"confirm": true},
+	)
+	api.requireStatus(status, http.StatusForbidden, response)
+
+	status, response = api.request(
+		http.MethodDelete,
+		"/users/"+adminID+"/account",
+		admin.Token,
+		map[string]any{"confirm": true},
+	)
+	api.requireStatus(status, http.StatusForbidden, response)
+
+	status, response = api.request(
+		http.MethodDelete,
+		"/users/"+targetID+"/account",
+		admin.Token,
+		map[string]any{"confirm": true},
+	)
+	api.requireStatus(status, http.StatusOK, response)
+
+	var remaining int
+	if err := api.db.QueryRow(`SELECT COUNT(*) FROM users WHERE id = ?`, targetID).Scan(&remaining); err != nil {
+		t.Fatalf("count deleted target user: %v", err)
+	}
+	if remaining != 0 {
+		t.Fatalf("target user still exists after confirmed superuser deletion")
 	}
 }
 

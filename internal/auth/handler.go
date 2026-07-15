@@ -90,6 +90,8 @@ func RegisterRoutes(g *gin.RouterGroup, db *sql.DB, cfg *config.Config) *Handler
 	g.DELETE("/users/me/account", h.Authed(), h.deleteAccount)
 	g.GET("/users/:user_id/settings", h.Authed(), h.getForcedUserSettings)
 	g.PATCH("/users/:user_id/settings", h.Authed(), h.forceUpdateUserSettings)
+	g.GET("/users/:user_id/sessions", h.Authed(), h.listForcedUserSessions)
+	g.DELETE("/users/:user_id/account", h.Authed(), h.forceDeleteUserAccount)
 	g.GET("/users/:user_id/audio-settings", h.Authed(), h.getForcedUserAudioSettings)
 	g.PATCH("/users/:user_id/audio-settings", h.Authed(), h.updateForcedUserAudioSettings)
 	g.POST("/users/:user_id/password", h.Authed(), h.forceResetUserPassword)

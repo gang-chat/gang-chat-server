@@ -359,6 +359,10 @@ func (h *Handler) deleteAccount(c *gin.Context) {
 		errorJSON(c, http.StatusForbidden, "forbidden", "super user account cannot be deleted")
 		return
 	}
+	h.deleteUserAccount(c, user)
+}
+
+func (h *Handler) deleteUserAccount(c *gin.Context, user *model.User) {
 	// Account deletion must fail closed if the retention migration cannot be
 	// applied; otherwise legacy CASCADE constraints could erase message history
 	// and the assets referenced by it.

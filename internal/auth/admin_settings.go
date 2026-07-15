@@ -33,6 +33,59 @@ func (h *Handler) getForcedUserSettings(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"user": userResponse(target)})
 }
 
+func (h *Handler) listForcedUserSessions(c *gin.Context) {
+	if !h.requireSuperuser(c) {
+		return
+	}
+	userID := c.Param("user_id")
+	if _, err := model.GetUserByID(h.DB, userID); err != nil {
+		errorJSON(c, http.StatusNotFound, "not_found", "user not found")
+		return
+	}
+	sessions, err := model.ListRecentSessions(h.DB, userID, 20)
+	if err != nil {
+		errorJSON(c, http.StatusInternalServerError, "internal_error", "query failed")
+		return
+	}
+
+	resp := make([]SessionResponse, 0, len(sessions))
+	for _, session := range sessions {
+		resp = append(resp, SessionResponse{
+			ID:         session.ID,
+			UserAgent:  session.UserAgent,
+			IPAddress:  session.IPAddress,
+			Location:   h.sessionLocation(session.IPAddress),
+			CreatedAt:  session.CreatedAt,
+			LastUsedAt: session.LastUsedAt,
+			ExpiresAt:  session.ExpiresAt,
+			RevokedAt:  session.RevokedAt,
+			IsCurrent:  false,
+		})
+	}
+	c.JSON(http.StatusOK, resp)
+}
+
+func (h *Handler) forceDeleteUserAccount(c *gin.Context) {
+	if !h.requireSuperuser(c) {
+		return
+	}
+	var req deleteAccountRequest
+	if err := c.ShouldBindJSON(&req); err != nil || !req.Confirm {
+		errorJSON(c, http.StatusBadRequest, "validation_failed", "confirm must be true")
+		return
+	}
+	target, err := model.GetUserByID(h.DB, c.Param("user_id"))
+	if err != nil {
+		errorJSON(c, http.StatusNotFound, "not_found", "user not found")
+		return
+	}
+	if target.IsSuperuser {
+		errorJSON(c, http.StatusForbidden, "forbidden", "super user account cannot be deleted")
+		return
+	}
+	h.deleteUserAccount(c, target)
+}
+
 func (h *Handler) getForcedUserAudioSettings(c *gin.Context) {
 	if !h.requireSuperuser(c) {
 		return

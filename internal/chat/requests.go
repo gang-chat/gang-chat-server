@@ -71,10 +71,11 @@ type liveModerationRequest struct {
 }
 
 type stickerPackRequest struct {
-	Scope     string `json:"scope"`
-	RoomID    string `json:"room_id"`
-	Name      string `json:"name"`
-	SortOrder *int   `json:"sort_order"`
+	Scope       string `json:"scope"`
+	RoomID      string `json:"room_id"`
+	OwnerUserID string `json:"owner_user_id"`
+	Name        string `json:"name"`
+	SortOrder   *int   `json:"sort_order"`
 }
 
 type stickerRequest struct {
