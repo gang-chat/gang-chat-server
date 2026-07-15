@@ -5,6 +5,7 @@ import (
 	"errors"
 	"log"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -253,10 +254,40 @@ func (h *Handler) searchUsers(c *gin.Context) {
 			limit = n
 		}
 	}
+	offset := 0
+	if raw := strings.TrimSpace(c.Query("cursor")); raw != "" {
+		n, err := strconv.Atoi(raw)
+		if err != nil || n < 0 {
+			errorJSON(c, http.StatusBadRequest, "validation_failed", "invalid user search cursor")
+			return
+		}
+		offset = n
+	}
+	matchArgs := []any{q, strings.ToLower(q), q, q}
+	statusPredicate := "status = 'active'"
+	if c.Query("include_suspended") == "true" && model.IsSuperuser(h.DB, getUserID(c)) {
+		statusPredicate = "status IN ('active', 'suspended')"
+	}
+	var totalCount int
+	if err := h.DB.QueryRow(
+		`SELECT COUNT(*)
+		 FROM users
+		 WHERE `+statusPredicate+`
+		   AND (
+		     uid = ?
+		     OR username_normalized = ?
+		     OR instr(username_normalized, lower(?)) > 0
+		     OR instr(lower(COALESCE(display_name, username)), lower(?)) > 0
+		   )`,
+		matchArgs...,
+	).Scan(&totalCount); err != nil {
+		errorJSON(c, http.StatusInternalServerError, "internal_error", "user search failed")
+		return
+	}
 	rows, err := h.DB.Query(
 		`SELECT id, uid, username, display_name, avatar_url, default_avatar_key, is_superuser
 		 FROM users
-		 WHERE status = 'active'
+		 WHERE `+statusPredicate+`
 		   AND (
 		     uid = ?
 		     OR username_normalized = ?
@@ -271,8 +302,8 @@ func (h *Handler) searchUsers(c *gin.Context) {
 		     ELSE 3
 		   END,
 		   username ASC
-		 LIMIT ?`,
-		q, strings.ToLower(q), q, q, q, strings.ToLower(q), q, limit,
+		 LIMIT ? OFFSET ?`,
+		q, strings.ToLower(q), q, q, q, strings.ToLower(q), q, limit, offset,
 	)
 	if err != nil {
 		errorJSON(c, http.StatusInternalServerError, "internal_error", "user search failed")
@@ -297,7 +328,17 @@ func (h *Handler) searchUsers(c *gin.Context) {
 			"is_superuser":       isSuperuser != 0,
 		})
 	}
-	c.JSON(http.StatusOK, gin.H{"users": users, "next_cursor": nil})
+	if err := rows.Err(); err != nil {
+		errorJSON(c, http.StatusInternalServerError, "internal_error", "read user failed")
+		return
+	}
+	var nextCursor any
+	if nextOffset := offset + len(users); nextOffset < totalCount {
+		nextCursor = strconv.Itoa(nextOffset)
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"users": users, "next_cursor": nextCursor, "total_count": totalCount,
+	})
 }
 
 type deleteAccountRequest struct {
@@ -356,6 +397,7 @@ func (h *Handler) deleteAccount(c *gin.Context) {
 type forceUserSettingsRequest struct {
 	Username          *string `json:"username"`
 	Email             *string `json:"email"`
+	EmailVerified     *bool   `json:"email_verified"`
 	EmailPublic       *bool   `json:"email_public"`
 	PhoneNumber       *string `json:"phone_number"`
 	PhoneNumberPublic *bool   `json:"phone_number_public"`
@@ -378,7 +420,7 @@ func (h *Handler) forceUpdateUserSettings(c *gin.Context) {
 		errorJSON(c, http.StatusBadRequest, "bad_request", "invalid JSON body")
 		return
 	}
-	if req.Username == nil && req.Email == nil && req.EmailPublic == nil &&
+	if req.Username == nil && req.Email == nil && req.EmailVerified == nil && req.EmailPublic == nil &&
 		req.PhoneNumber == nil && req.PhoneNumberPublic == nil &&
 		req.DisplayName == nil && req.Bio == nil && req.Gender == nil &&
 		req.AvatarAssetID == nil && req.DefaultAvatarKey == nil &&
@@ -406,6 +448,10 @@ func (h *Handler) forceUpdateUserSettings(c *gin.Context) {
 		}
 		sets = append(sets, "email = ?", "email_normalized = ?", "email_verified = 0")
 		args = append(args, email, strings.ToLower(email))
+	}
+	if req.EmailVerified != nil {
+		sets = append(sets, "email_verified = ?")
+		args = append(args, *req.EmailVerified)
 	}
 	if req.EmailPublic != nil {
 		sets = append(sets, "email_public = ?")
@@ -510,9 +556,15 @@ func (h *Handler) forceUpdateUserSettings(c *gin.Context) {
 		return
 	}
 	args = append(args, targetID)
-	res, err := h.DB.Exec(`UPDATE users SET `+strings.Join(sets, ", ")+` WHERE id = ?`, args...)
+	tx, err := h.DB.Begin()
 	if err != nil {
-		if strings.Contains(err.Error(), "UNIQUE constraint failed") {
+		errorJSON(c, http.StatusInternalServerError, "internal_error", "force update user failed")
+		return
+	}
+	defer tx.Rollback()
+	res, err := tx.Exec(`UPDATE users SET `+strings.Join(sets, ", ")+` WHERE id = ?`, args...)
+	if err != nil {
+		if isDuplicateEntryError(err) {
 			errorJSON(c, http.StatusConflict, "conflict", "username, email or phone number already taken")
 			return
 		}
@@ -521,6 +573,16 @@ func (h *Handler) forceUpdateUserSettings(c *gin.Context) {
 	}
 	if n, _ := res.RowsAffected(); n == 0 {
 		errorJSON(c, http.StatusNotFound, "not_found", "user not found")
+		return
+	}
+	if req.Status != nil && strings.TrimSpace(*req.Status) != "active" {
+		if _, err := tx.Exec(`UPDATE user_sessions SET revoked_at = ? WHERE user_id = ? AND revoked_at IS NULL`, time.Now().Unix(), targetID); err != nil {
+			errorJSON(c, http.StatusInternalServerError, "internal_error", "force update user failed")
+			return
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		errorJSON(c, http.StatusInternalServerError, "internal_error", "force update user failed")
 		return
 	}
 	user, err := model.GetUserByID(h.DB, targetID)
