@@ -14,12 +14,13 @@ type roomSettingsRequest struct {
 }
 
 type myRoomSettingsRequest struct {
-	RemarkName         *string `json:"remark_name"`
-	RoomDisplayName    *string `json:"room_display_name"`
-	NotificationLevel  *string `json:"notification_level"`
-	NotificationPolicy *string `json:"notification_policy"`
-	IsPinned           *bool   `json:"is_pinned"`
-	Pinned             *bool   `json:"pinned"`
+	RemarkName                  *string `json:"remark_name"`
+	RoomDisplayName             *string `json:"room_display_name"`
+	NotificationLevel           *string `json:"notification_level"`
+	NotificationPolicy          *string `json:"notification_policy"`
+	IsPinned                    *bool   `json:"is_pinned"`
+	Pinned                      *bool   `json:"pinned"`
+	AIVoiceAnnouncementsEnabled *bool   `json:"ai_voice_announcements_enabled"`
 }
 
 type userIDRequest struct {

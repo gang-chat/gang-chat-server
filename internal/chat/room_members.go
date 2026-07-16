@@ -107,16 +107,8 @@ func (h *Handler) updateMyRoomSettings(c *gin.Context) {
 		return
 	}
 	userID := currentUserID(c)
-	if !h.isRoomMember(roomID, userID) {
-		if h.isSuperuser(userID) && h.roomIDExists(roomID) {
-			detail, err := h.buildRoomDetail(roomID, userID)
-			if err != nil {
-				h.jsonError(c, http.StatusInternalServerError, "internal_error", "failed to read room")
-				return
-			}
-			c.JSON(http.StatusOK, gin.H{"settings": h.myRoomSettingsPayload(roomID, userID), "room": detail})
-			return
-		}
+	isMember := h.isRoomMember(roomID, userID)
+	if !isMember && !(h.isSuperuser(userID) && h.roomIDExists(roomID)) {
 		h.jsonError(c, http.StatusNotFound, "not_found", "room not found")
 		return
 	}
@@ -153,12 +145,30 @@ func (h *Handler) updateMyRoomSettings(c *gin.Context) {
 		sets = append(sets, "is_pinned = ?")
 		args = append(args, boolToInt(*isPinned))
 	}
-	if len(sets) == 0 {
+	if len(sets) == 0 && req.AIVoiceAnnouncementsEnabled == nil {
 		h.jsonError(c, http.StatusBadRequest, "validation_failed", "at least one setting is required")
 		return
 	}
-	args = append(args, roomID, userID)
-	if _, err := h.DB.Exec(`UPDATE room_memberships SET `+strings.Join(sets, ", ")+` WHERE room_id = ? AND user_id = ?`, args...); err != nil {
+	tx, err := h.DB.Begin()
+	if err != nil {
+		h.jsonError(c, http.StatusInternalServerError, "internal_error", "update room settings failed")
+		return
+	}
+	defer tx.Rollback()
+	if isMember && len(sets) > 0 {
+		args = append(args, roomID, userID)
+		if _, err := tx.Exec(`UPDATE room_memberships SET `+strings.Join(sets, ", ")+` WHERE room_id = ? AND user_id = ?`, args...); err != nil {
+			h.jsonError(c, http.StatusInternalServerError, "internal_error", "update room settings failed")
+			return
+		}
+	}
+	if req.AIVoiceAnnouncementsEnabled != nil {
+		if err := upsertAIVoiceAnnouncementsPreference(tx, roomID, userID, *req.AIVoiceAnnouncementsEnabled, nowMillis()); err != nil {
+			h.jsonError(c, http.StatusInternalServerError, "internal_error", "update room settings failed")
+			return
+		}
+	}
+	if err := tx.Commit(); err != nil {
 		h.jsonError(c, http.StatusInternalServerError, "internal_error", "update room settings failed")
 		return
 	}
@@ -173,11 +183,12 @@ func (h *Handler) updateMyRoomSettings(c *gin.Context) {
 
 func (h *Handler) getRoomSettings(c *gin.Context) {
 	roomID := c.Param("room_id")
-	if !h.isAdmin(roomID, currentUserID(c)) {
+	userID := currentUserID(c)
+	if !h.isAdmin(roomID, userID) {
 		h.jsonError(c, http.StatusForbidden, "forbidden", "admin required")
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"settings": h.roomSettingsPayload(roomID)})
+	c.JSON(http.StatusOK, gin.H{"settings": h.roomSettingsPayload(roomID, userID)})
 }
 
 func (h *Handler) updateRoomSettings(c *gin.Context) {
@@ -257,10 +268,6 @@ func (h *Handler) updateRoomSettings(c *gin.Context) {
 	if req.AIVoiceAnnouncementsEnabled != nil {
 		aiVoiceAnnounceEnabled = req.AIVoiceAnnouncementsEnabled
 	}
-	if aiVoiceAnnounceEnabled != nil {
-		sets = append(sets, "ai_voice_announce_enabled = ?")
-		args = append(args, boolToInt(*aiVoiceAnnounceEnabled))
-	}
 	if req.AvatarAssetID != nil {
 		assetID := strings.TrimSpace(*req.AvatarAssetID)
 		if assetID == "" {
@@ -310,6 +317,15 @@ func (h *Handler) updateRoomSettings(c *gin.Context) {
 	if _, err := tx.Exec(`UPDATE rooms SET `+strings.Join(sets, ", ")+` WHERE id = ?`, args...); err != nil {
 		h.jsonError(c, http.StatusInternalServerError, "internal_error", "update room settings failed")
 		return
+	}
+	// Older clients sent this field through the room-management endpoint.
+	// Preserve compatibility by treating it as the caller's personal
+	// preference instead of mutating a room-wide switch.
+	if aiVoiceAnnounceEnabled != nil {
+		if err := upsertAIVoiceAnnouncementsPreference(tx, roomID, userID, *aiVoiceAnnounceEnabled, updatedAt); err != nil {
+			h.jsonError(c, http.StatusInternalServerError, "internal_error", "update room settings failed")
+			return
+		}
 	}
 	nextSystemMessageCreatedAt := updatedAt
 	nextCreatedAt := func() int64 {
@@ -404,7 +420,7 @@ func (h *Handler) updateRoomSettings(c *gin.Context) {
 		h.jsonError(c, http.StatusInternalServerError, "internal_error", "failed to read room")
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"settings": h.roomSettingsPayload(roomID), "room": detail})
+	c.JSON(http.StatusOK, gin.H{"settings": h.roomSettingsPayload(roomID, userID), "room": detail})
 }
 
 type roomJoinPolicyAutoReviewResult struct {
@@ -1697,7 +1713,7 @@ func (h *Handler) deleteRoom(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"ok": true})
 }
 
-func (h *Handler) roomSettingsPayload(roomID string) gin.H {
+func (h *Handler) roomSettingsPayload(roomID, userID string) gin.H {
 	var rid, name, defaultAvatar, visibility, joinPolicy, recallPolicy, description string
 	var avatarAssetID, avatarURL sql.NullString
 	var ai int
@@ -1710,12 +1726,14 @@ func (h *Handler) roomSettingsPayload(roomID string) gin.H {
 		 FROM rooms WHERE id = ?`,
 		roomID,
 	).Scan(&rid, &name, &avatarAssetID, &avatarURL, &defaultAvatar, &visibility, &joinPolicy, &ai, &recallPolicy, &recallWindow, &description, &createdAt, &updatedAt)
+	aiVoiceAnnouncementsEnabled := h.aiVoiceAnnouncementsEnabled(roomID, userID)
 	return gin.H{
 		"id": roomID, "rid": rid, "name": name, "avatar_asset_id": nullableString(avatarAssetID),
 		"avatar_url": nullableString(avatarURL), "default_avatar_key": defaultAvatar,
 		"description": description,
-		"visibility":  visibility, "join_policy": joinPolicy, "ai_voice_announce_enabled": ai != 0,
-		"ai_voice_announcements_enabled": ai != 0,
+		"visibility":  visibility, "join_policy": joinPolicy,
+		"ai_voice_announce_enabled":      aiVoiceAnnouncementsEnabled,
+		"ai_voice_announcements_enabled": aiVoiceAnnouncementsEnabled,
 		"message_recall_policy":          recallPolicy, "message_recall_window_seconds": nullableInt64(recallWindow),
 		"created_at": formatMillis(createdAt), "updated_at": formatMillis(updatedAt),
 	}
@@ -1734,6 +1752,7 @@ func (h *Handler) myRoomSettingsPayload(roomID, userID string) gin.H {
 		"remark_name": nullableString(remark), "room_display_name": nullableString(display),
 		"notification_level":  notification,
 		"notification_policy": notification, "is_pinned": isPinned != 0,
+		"ai_voice_announcements_enabled": h.aiVoiceAnnouncementsEnabled(roomID, userID),
 	}
 }
 

@@ -3,9 +3,58 @@ package chat
 import (
 	"fmt"
 	"github.com/zhuangkaiyi/gang-chat/server/internal/idgen"
+	"github.com/zhuangkaiyi/gang-chat/server/internal/model"
 	"net/http"
 	"testing"
 )
+
+func TestRoomAIVoicePreferenceMigrationAndNewMemberDefault(t *testing.T) {
+	api := newAPIHarness(t)
+	owner := api.register("voice_migration_owner")
+	member := api.register("voice_migration_member")
+	lateMember := api.register("voice_migration_late")
+	room := api.createRoom(owner.Token, map[string]any{
+		"name":        "Voice Migration",
+		"join_policy": "open",
+	})
+	roomID := room["id"].(string)
+	status, response := api.request(http.MethodPost, "/rooms/"+roomID+"/join", member.Token, nil)
+	api.requireStatus(status, http.StatusOK, response)
+
+	if _, err := api.db.Exec(`DELETE FROM room_ai_voice_preferences WHERE room_id = ?`, roomID); err != nil {
+		t.Fatalf("clear new preferences before migration: %v", err)
+	}
+	if _, err := api.db.Exec(`UPDATE rooms SET ai_voice_announce_enabled = 1 WHERE id = ?`, roomID); err != nil {
+		t.Fatalf("seed legacy room preference: %v", err)
+	}
+	if err := model.EnsureRoomAIVoicePreferencesSchema(api.db); err != nil {
+		t.Fatalf("migrate room AI voice preferences: %v", err)
+	}
+
+	for _, user := range []testSession{owner, member} {
+		var enabled int
+		if err := api.db.QueryRow(
+			`SELECT enabled FROM room_ai_voice_preferences WHERE room_id = ? AND user_id = ?`,
+			roomID,
+			user.User["id"],
+		).Scan(&enabled); err != nil || enabled != 1 {
+			t.Fatalf("existing member should inherit the legacy enabled value: enabled=%d err=%v", enabled, err)
+		}
+	}
+	var legacyEnabled int
+	if err := api.db.QueryRow(`SELECT ai_voice_announce_enabled FROM rooms WHERE id = ?`, roomID).Scan(&legacyEnabled); err != nil {
+		t.Fatalf("read normalized legacy preference: %v", err)
+	}
+	if legacyEnabled != 0 {
+		t.Fatalf("legacy room preference should be normalized after migration: %d", legacyEnabled)
+	}
+
+	status, response = api.request(http.MethodPost, "/rooms/"+roomID+"/join", lateMember.Token, nil)
+	api.requireStatus(status, http.StatusOK, response)
+	if response["room"].(map[string]any)["ai_voice_announcements_enabled"] != false {
+		t.Fatalf("members joining after migration should use the disabled default: %v", response)
+	}
+}
 
 func TestSuperuserCanSeeAndJoinPrivateRooms(t *testing.T) {
 	api := newAPIHarness(t)
@@ -316,15 +365,19 @@ func TestRoomInfoManagementEndpoints(t *testing.T) {
 	api := newAPIHarness(t)
 	owner := api.register("manage_owner")
 	member := api.register("manage_member")
+	defaultRoom := api.createRoom(owner.Token, map[string]any{"name": "Default Quiet"})
+	if defaultRoom["ai_voice_announcements_enabled"] != false {
+		t.Fatalf("AI voice announcements should default to disabled: %v", defaultRoom)
+	}
 
 	room := api.createRoom(owner.Token, map[string]any{
 		"name":                           "Manage Me",
 		"description":                    "old intro",
 		"join_policy":                    "open",
-		"ai_voice_announcements_enabled": false,
+		"ai_voice_announcements_enabled": true,
 		"default_avatar_key":             "green-2",
 	})
-	if room["description"] != "old intro" || room["ai_voice_announcements_enabled"] != false || room["default_avatar_key"] != "green-2" {
+	if room["description"] != "old intro" || room["ai_voice_announcements_enabled"] != true || room["default_avatar_key"] != "green-2" {
 		t.Fatalf("create room response missing management fields: %v", room)
 	}
 	roomID := room["id"].(string)
@@ -389,17 +442,21 @@ func TestRoomInfoManagementEndpoints(t *testing.T) {
 	}
 
 	status, response = api.request(http.MethodPatch, "/rooms/"+roomID+"/me", member.Token, map[string]any{
-		"remark_name":         "My Managed Room",
-		"room_display_name":   "Local Nick",
-		"default_avatar_key":  "red-4",
-		"notification_policy": "silent",
-		"is_pinned":           true,
+		"remark_name":                    "My Managed Room",
+		"room_display_name":              "Local Nick",
+		"default_avatar_key":             "red-4",
+		"notification_policy":            "silent",
+		"is_pinned":                      true,
+		"ai_voice_announcements_enabled": true,
 	})
 	api.requireStatus(status, http.StatusOK, response)
 	personalRoom := response["room"].(map[string]any)
 	profile := personalRoom["personal_profile"].(map[string]any)
 	if personalRoom["remark_name"] != "My Managed Room" || personalRoom["notification_policy"] != "silent" || personalRoom["is_pinned"] != true {
 		t.Fatalf("room personal fields not returned on detail: %v", personalRoom)
+	}
+	if personalRoom["ai_voice_announcements_enabled"] != true {
+		t.Fatalf("member AI voice preference should be enabled independently: %v", personalRoom)
 	}
 	if profile["display_name"] != "Local Nick" {
 		t.Fatalf("room personal profile not returned: %v", profile)
@@ -411,8 +468,14 @@ func TestRoomInfoManagementEndpoints(t *testing.T) {
 		t.Fatalf("room personal profile should not expose default_avatar_key: %v", profile)
 	}
 	settings := response["settings"].(map[string]any)
-	if settings["notification_policy"] != "silent" || settings["is_pinned"] != true {
+	if settings["notification_policy"] != "silent" || settings["is_pinned"] != true || settings["ai_voice_announcements_enabled"] != true {
 		t.Fatalf("settings should expose notification_policy alias: %v", settings)
+	}
+
+	status, response = api.request(http.MethodGet, "/rooms/"+roomID, owner.Token, nil)
+	api.requireStatus(status, http.StatusOK, response)
+	if response["room"].(map[string]any)["ai_voice_announcements_enabled"] != false {
+		t.Fatalf("member preference must not change the owner's preference: %v", response)
 	}
 
 	status, response = api.request(http.MethodPatch, "/rooms/"+roomID+"/members/"+member.User["id"].(string), member.Token, map[string]any{"role": "admin"})

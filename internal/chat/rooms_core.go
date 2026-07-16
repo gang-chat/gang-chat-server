@@ -163,7 +163,7 @@ func (h *Handler) createRoom(c *gin.Context) {
 		h.jsonError(c, http.StatusBadRequest, "validation_failed", "description must be at most 500 characters")
 		return
 	}
-	aiVoiceAnnounceEnabled := true
+	aiVoiceAnnounceEnabled := false
 	if req.AIVoiceAnnounceEnabled != nil {
 		aiVoiceAnnounceEnabled = *req.AIVoiceAnnounceEnabled
 	}
@@ -200,7 +200,7 @@ func (h *Handler) createRoom(c *gin.Context) {
 		   visibility, join_policy, ai_voice_announce_enabled, message_recall_policy,
 		   message_recall_window_seconds, description, created_at, updated_at
 		 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'time_limited', 120, ?, ?, ?)`,
-		roomID, rid, name, avatarAssetID, avatarURL, defaultAvatarKey, userID, visibility, joinPolicy, boolToInt(aiVoiceAnnounceEnabled), description, now, now,
+		roomID, rid, name, avatarAssetID, avatarURL, defaultAvatarKey, userID, visibility, joinPolicy, 0, description, now, now,
 	)
 	if err != nil {
 		h.jsonError(c, http.StatusInternalServerError, "internal_error", "failed to create room")
@@ -215,6 +215,10 @@ func (h *Handler) createRoom(c *gin.Context) {
 			h.jsonError(c, http.StatusInternalServerError, "internal_error", "failed to join room")
 			return
 		}
+	}
+	if err := upsertAIVoiceAnnouncementsPreference(tx, roomID, userID, aiVoiceAnnounceEnabled, now); err != nil {
+		h.jsonError(c, http.StatusInternalServerError, "internal_error", "failed to save room preferences")
+		return
 	}
 	if err := tx.Commit(); err != nil {
 		h.jsonError(c, http.StatusInternalServerError, "internal_error", "failed to save room")
@@ -362,6 +366,7 @@ func (h *Handler) buildRoomCard(rec roomRecord, userID string) (roomCard, error)
 	if notificationLevel == "blocked" {
 		lastMessage = nil
 	}
+	aiVoiceAnnouncementsEnabled := h.aiVoiceAnnouncementsEnabled(rec.ID, userID)
 	return roomCard{
 		ID:                          rec.ID,
 		RID:                         rec.RID.String,
@@ -370,8 +375,8 @@ func (h *Handler) buildRoomCard(rec roomRecord, userID string) (roomCard, error)
 		Description:                 rec.Description,
 		Visibility:                  rec.Visibility,
 		JoinPolicy:                  rec.JoinPolicy,
-		AIVoiceAnnounceEnabled:      rec.AIVoiceAnnounceEnabled != 0,
-		AIVoiceAnnouncementsEnabled: rec.AIVoiceAnnounceEnabled != 0,
+		AIVoiceAnnounceEnabled:      aiVoiceAnnouncementsEnabled,
+		AIVoiceAnnouncementsEnabled: aiVoiceAnnouncementsEnabled,
 		AvatarURL:                   nullableString(rec.AvatarURL),
 		DefaultAvatarKey:            rec.DefaultAvatarKey,
 		MemberCount:                 memberCount,
@@ -482,6 +487,7 @@ func (h *Handler) buildRoomDetail(roomID, userID string) (roomDetail, error) {
 		return roomDetail{}, err
 	}
 
+	aiVoiceAnnouncementsEnabled := h.aiVoiceAnnouncementsEnabled(roomID, userID)
 	return roomDetail{
 		ID:                          rec.ID,
 		RID:                         rec.RID.String,
@@ -491,8 +497,8 @@ func (h *Handler) buildRoomDetail(roomID, userID string) (roomDetail, error) {
 		DefaultAvatarKey:            rec.DefaultAvatarKey,
 		Visibility:                  rec.Visibility,
 		JoinPolicy:                  rec.JoinPolicy,
-		AIVoiceAnnounceEnabled:      rec.AIVoiceAnnounceEnabled != 0,
-		AIVoiceAnnouncementsEnabled: rec.AIVoiceAnnounceEnabled != 0,
+		AIVoiceAnnounceEnabled:      aiVoiceAnnouncementsEnabled,
+		AIVoiceAnnouncementsEnabled: aiVoiceAnnouncementsEnabled,
 		MessageRecallPolicy:         rec.MessageRecallPolicy,
 		MessageRecallWindowSeconds:  nullableInt64(rec.MessageRecallWindowSeconds),
 		MemberCount:                 memberCount,
@@ -506,12 +512,13 @@ func (h *Handler) buildRoomDetail(roomID, userID string) (roomDetail, error) {
 		},
 		CanDeleteRoom: role == "owner" || role == "superuser" || h.isSuperuser(userID),
 		MyMembership: roomMembership{
-			Role:              role,
-			JoinedAt:          formatMillis(joinedAt),
-			RemarkName:        nullableString(remarkName),
-			RoomDisplayName:   nullableString(roomDisplayName),
-			NotificationLevel: notificationLevel,
-			IsPinned:          isPinned != 0,
+			Role:                        role,
+			JoinedAt:                    formatMillis(joinedAt),
+			RemarkName:                  nullableString(remarkName),
+			RoomDisplayName:             nullableString(roomDisplayName),
+			NotificationLevel:           notificationLevel,
+			IsPinned:                    isPinned != 0,
+			AIVoiceAnnouncementsEnabled: aiVoiceAnnouncementsEnabled,
 		},
 		Live:      live,
 		CreatedAt: formatMillis(rec.CreatedAt),

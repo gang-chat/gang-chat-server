@@ -254,6 +254,15 @@ CREATE TABLE `room_memberships` (
   CONSTRAINT `fk_room_memberships_room` FOREIGN KEY (`room_id`) REFERENCES `rooms` (`id`) ON DELETE CASCADE,
   CONSTRAINT `fk_room_memberships_user` FOREIGN KEY (`user_id`) REFERENCES `users` (`id`) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+CREATE TABLE `room_ai_voice_preferences` (
+  `room_id` varchar(128) NOT NULL,
+  `user_id` varchar(128) NOT NULL,
+  `enabled` tinyint(1) NOT NULL DEFAULT '0',
+  `updated_at` bigint NOT NULL,
+  PRIMARY KEY (`room_id`,`user_id`),
+  CONSTRAINT `fk_room_ai_voice_preferences_room` FOREIGN KEY (`room_id`) REFERENCES `rooms` (`id`) ON DELETE CASCADE,
+  CONSTRAINT `fk_room_ai_voice_preferences_user` FOREIGN KEY (`user_id`) REFERENCES `users` (`id`) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 CREATE TABLE `room_notification_deletions` (
   `user_id` varchar(128) NOT NULL,
   `notification_type` varchar(32) NOT NULL,

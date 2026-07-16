@@ -135,12 +135,13 @@ type messageSearchResult struct {
 }
 
 type roomMembership struct {
-	Role              string  `json:"role,omitempty"`
-	JoinedAt          string  `json:"joined_at"`
-	RemarkName        *string `json:"remark_name"`
-	RoomDisplayName   *string `json:"room_display_name"`
-	NotificationLevel string  `json:"notification_level,omitempty"`
-	IsPinned          bool    `json:"is_pinned"`
+	Role                        string  `json:"role,omitempty"`
+	JoinedAt                    string  `json:"joined_at"`
+	RemarkName                  *string `json:"remark_name"`
+	RoomDisplayName             *string `json:"room_display_name"`
+	NotificationLevel           string  `json:"notification_level,omitempty"`
+	IsPinned                    bool    `json:"is_pinned"`
+	AIVoiceAnnouncementsEnabled bool    `json:"ai_voice_announcements_enabled"`
 }
 
 type roomPersonalProfile struct {

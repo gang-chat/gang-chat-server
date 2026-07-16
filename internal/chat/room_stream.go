@@ -176,6 +176,8 @@ func (h *Handler) applyRoomSnapshotPersonalFields(snapshot *roomSnapshot, roomID
 	snapshot.RemarkName = nullableString(remarkName)
 	snapshot.NotificationPolicy = notificationPolicy
 	snapshot.IsPinned = isPinned != 0
+	snapshot.AIVoiceAnnounceEnabled = h.aiVoiceAnnouncementsEnabled(roomID, userID)
+	snapshot.AIVoiceAnnouncementsEnabled = snapshot.AIVoiceAnnounceEnabled
 	snapshot.UnreadCount = h.unreadCount(roomID, userID)
 	snapshot.UnreadMentionCount = h.unreadMentionCount(roomID, userID)
 	snapshot.HasPendingJoinRequests = h.hasPendingJoinRequestsForViewer(
