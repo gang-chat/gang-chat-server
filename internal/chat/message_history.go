@@ -115,7 +115,7 @@ func (h *Handler) listMessageHistory(c *gin.Context) {
 		rows, err := h.DB.Query(
 			`SELECT `+messageSelectColumnsSQL+`
 			 FROM messages m
-			 LEFT JOIN users u ON u.id = m.sender_user_id
+			 `+messageSenderUserJoinSQL+`
 			 LEFT JOIN room_memberships sender_rm ON sender_rm.room_id = m.room_id AND sender_rm.user_id = m.sender_user_id
 			 WHERE `+strings.Join(queryConditions, " AND ")+`
 			 ORDER BY m.created_at DESC, m.id DESC

@@ -11,6 +11,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/gin-gonic/gin"
+	"github.com/zhuangkaiyi/gang-chat/server/internal/eventbus"
 	"github.com/zhuangkaiyi/gang-chat/server/internal/model"
 )
 
@@ -285,7 +286,7 @@ func (h *Handler) searchUsers(c *gin.Context) {
 		return
 	}
 	rows, err := h.DB.Query(
-		`SELECT id, uid, username, display_name, avatar_url, default_avatar_key, is_superuser
+		`SELECT id, uid, username, display_name, avatar_url, default_avatar_key, is_superuser, status
 		 FROM users
 		 WHERE `+statusPredicate+`
 		   AND (
@@ -316,7 +317,8 @@ func (h *Handler) searchUsers(c *gin.Context) {
 		var id, uid, username string
 		var displayName, avatarURL, defaultAvatar sql.NullString
 		var isSuperuser int
-		if err := rows.Scan(&id, &uid, &username, &displayName, &avatarURL, &defaultAvatar, &isSuperuser); err != nil {
+		var status string
+		if err := rows.Scan(&id, &uid, &username, &displayName, &avatarURL, &defaultAvatar, &isSuperuser, &status); err != nil {
 			errorJSON(c, http.StatusInternalServerError, "internal_error", "read user failed")
 			return
 		}
@@ -326,6 +328,7 @@ func (h *Handler) searchUsers(c *gin.Context) {
 			"avatar_url":         nullablePtrString(avatarURL),
 			"default_avatar_key": nullableOr(defaultAvatar, "blue-3"),
 			"is_superuser":       isSuperuser != 0,
+			"is_suspended":       status == "suspended",
 		})
 	}
 	if err := rows.Err(); err != nil {
@@ -588,6 +591,12 @@ func (h *Handler) forceUpdateUserSettings(c *gin.Context) {
 	if err := tx.Commit(); err != nil {
 		errorJSON(c, http.StatusInternalServerError, "internal_error", "force update user failed")
 		return
+	}
+	if req.Status != nil && strings.TrimSpace(*req.Status) == "suspended" && h.Bus != nil {
+		h.Bus.PublishUser(targetID, eventbus.Event{
+			Type: "account_suspended",
+			Data: map[string]any{"reason": "账号已被封禁"},
+		})
 	}
 	user, err := model.GetUserByID(h.DB, targetID)
 	if err != nil {

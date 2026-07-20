@@ -156,6 +156,64 @@ func TestSuperuserSettingsProtectSuperuserPasswordAndStatus(t *testing.T) {
 	api.requireStatus(status, http.StatusForbidden, response)
 }
 
+func TestSuperuserCanSuspendAndRestoreAccount(t *testing.T) {
+	api := newAPIHarness(t)
+	super := api.login("GANG", "64n9-Ch47")
+	target := api.register("managed_suspension_user")
+	targetID := target.User["id"].(string)
+	stream := api.connectStream(targetID)
+
+	status, response := api.request(
+		http.MethodPatch,
+		"/users/"+targetID+"/settings",
+		super.Token,
+		map[string]any{"status": "suspended"},
+	)
+	api.requireStatus(status, http.StatusOK, response)
+	if user := response["user"].(map[string]any); user["status"] != "suspended" || user["display_name"] != "managed_suspension_user" {
+		t.Fatalf("suspension should preserve the target profile: %v", user)
+	}
+	if payload := stream.await("account_suspended"); payload["reason"] != "账号已被封禁" {
+		t.Fatalf("suspension should force every connected client to log out: %v", payload)
+	}
+
+	status, response = api.request(http.MethodGet, "/me", target.Token, nil)
+	api.requireStatus(status, http.StatusUnauthorized, response)
+	for attempt := 0; attempt < api.cfg.LoginMaxAttempts+1; attempt++ {
+		status, response = api.request(http.MethodPost, "/auth/login", "", map[string]any{
+			"login": "managed_suspension_user", "password": "correct horse battery staple",
+		})
+		api.requireStatus(status, http.StatusForbidden, response)
+		if body := response["error"].(map[string]any); body["code"] != "account_suspended" || body["message"] != "账号已被封禁" {
+			t.Fatalf("suspended login should return a specific error: %v", body)
+		}
+	}
+
+	status, response = api.request(http.MethodGet, "/users/"+targetID+"/profile", super.Token, nil)
+	api.requireStatus(status, http.StatusOK, response)
+	profileUser := response["profile"].(map[string]any)["user"].(map[string]any)
+	if profileUser["display_name"] != "managed_suspension_user" || profileUser["is_suspended"] != true || profileUser["is_deleted"] == true {
+		t.Fatalf("suspended account should retain its normal profile with a suspension marker: %v", profileUser)
+	}
+
+	status, response = api.request(
+		http.MethodPatch,
+		"/users/"+targetID+"/settings",
+		super.Token,
+		map[string]any{"status": "active"},
+	)
+	api.requireStatus(status, http.StatusOK, response)
+	if user := response["user"].(map[string]any); user["status"] != "active" {
+		t.Fatalf("restored account should be active: %v", user)
+	}
+
+	// Restoring an account must not silently revive a session revoked by the
+	// suspension; the user signs in again to establish a new session.
+	status, response = api.request(http.MethodGet, "/me", target.Token, nil)
+	api.requireStatus(status, http.StatusUnauthorized, response)
+	api.login("managed_suspension_user", "correct horse battery staple")
+}
+
 func TestSuperuserUserSearchCanFindSuspendedButNotDeletedUsers(t *testing.T) {
 	api := newAPIHarness(t)
 	super := api.login("GANG", "64n9-Ch47")
@@ -184,6 +242,9 @@ func TestSuperuserUserSearchCanFindSuspendedButNotDeletedUsers(t *testing.T) {
 	api.requireStatus(status, http.StatusOK, response)
 	if got := len(response["users"].([]any)); got != 1 {
 		t.Fatalf("superuser should find suspended account: %v", response)
+	}
+	if user := response["users"].([]any)[0].(map[string]any); user["is_suspended"] != true {
+		t.Fatalf("superuser search should identify the suspended account: %v", user)
 	}
 
 	status, response = api.request(http.MethodGet, "/users/search?q=status_search_deleted", super.Token, nil)

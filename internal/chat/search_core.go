@@ -381,7 +381,7 @@ func (h *Handler) searchMessageRows(userID, predicate string, predicateArgs []an
 	if err := h.DB.QueryRow(
 		`SELECT COUNT(*)
 		 FROM messages m
-		 LEFT JOIN users u ON u.id = m.sender_user_id
+		 `+messageSenderUserJoinSQL+`
 		 JOIN rooms r ON r.id = m.room_id
 		 LEFT JOIN room_memberships sender_rm ON sender_rm.room_id = m.room_id AND sender_rm.user_id = m.sender_user_id
 		 `+accessJoin+`
@@ -398,7 +398,7 @@ func (h *Handler) searchMessageRows(userID, predicate string, predicateArgs []an
 		`SELECT `+messageSelectColumnsSQL+`,
 		        r.id, r.rid, r.name, r.avatar_url, r.default_avatar_key, `+viewerRemarkSelect+`
 		 FROM messages m
-		 LEFT JOIN users u ON u.id = m.sender_user_id
+		 `+messageSenderUserJoinSQL+`
 		 JOIN rooms r ON r.id = m.room_id
 		 LEFT JOIN room_memberships sender_rm ON sender_rm.room_id = m.room_id AND sender_rm.user_id = m.sender_user_id
 		 `+accessJoin+`

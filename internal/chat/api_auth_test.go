@@ -129,6 +129,20 @@ func TestDeletedAccountRetainsMessageSenderSnapshotsAndAssets(t *testing.T) {
 	if _, ok := tombstone["common_rooms"]; ok {
 		t.Fatalf("deleted user profile must not expose common rooms: %v", tombstone)
 	}
+	status, response = api.request(
+		http.MethodGet,
+		"/rooms/"+roomID+"/members/"+senderID+"/profile",
+		owner.Token,
+		nil,
+	)
+	api.requireStatus(status, http.StatusOK, response)
+	roomTombstone := response["profile"].(map[string]any)
+	if roomTombstone["role"] != "deleted" || roomTombstone["room_display_name"] != nil {
+		t.Fatalf("deleted historical sender should have no live room identity: %v", roomTombstone)
+	}
+	if user := roomTombstone["user"].(map[string]any); user["display_name"] != "用户已注销" || user["is_deleted"] != true {
+		t.Fatalf("deleted historical sender should remain a room tombstone: %v", user)
+	}
 
 	status, response = api.request(http.MethodGet, "/users/search?q=history_snapshot_sender", owner.Token, nil)
 	api.requireStatus(status, http.StatusOK, response)

@@ -29,7 +29,7 @@ func (h *Handler) listMessages(c *gin.Context) {
 		rows, err = h.DB.Query(
 			`SELECT `+messageSelectColumnsSQL+`
 			 FROM messages m
-			 LEFT JOIN users u ON u.id = m.sender_user_id
+			 `+messageSenderUserJoinSQL+`
 			 LEFT JOIN room_memberships sender_rm ON sender_rm.room_id = m.room_id AND sender_rm.user_id = m.sender_user_id
 			 WHERE m.room_id = ? AND `+visibleMessageSQL("m")+`
 			 ORDER BY m.created_at DESC, m.id DESC
@@ -47,7 +47,7 @@ func (h *Handler) listMessages(c *gin.Context) {
 			rows, err = h.DB.Query(
 				`SELECT `+messageSelectColumnsSQL+`
 				 FROM messages m
-				 LEFT JOIN users u ON u.id = m.sender_user_id
+				 `+messageSenderUserJoinSQL+`
 				 LEFT JOIN room_memberships sender_rm ON sender_rm.room_id = m.room_id AND sender_rm.user_id = m.sender_user_id
 				 WHERE m.room_id = ?
 				   AND (m.created_at < ? OR (m.created_at = ? AND m.id < ?))
@@ -466,7 +466,7 @@ func (h *Handler) messageByID(messageID string) (message, error) {
 	return h.queryMessage(
 		`SELECT `+messageSelectColumnsSQL+`
 		 FROM messages m
-		 LEFT JOIN users u ON u.id = m.sender_user_id
+		 `+messageSenderUserJoinSQL+`
 		 LEFT JOIN room_memberships sender_rm ON sender_rm.room_id = m.room_id AND sender_rm.user_id = m.sender_user_id
 		 WHERE m.id = ?`,
 		messageID,
@@ -485,7 +485,7 @@ func (h *Handler) messageByClientID(roomID, userID, clientMessageID string) (mes
 	return h.queryMessage(
 		`SELECT `+messageSelectColumnsSQL+`
 		 FROM messages m
-		 LEFT JOIN users u ON u.id = m.sender_user_id
+		 `+messageSenderUserJoinSQL+`
 		 LEFT JOIN room_memberships sender_rm ON sender_rm.room_id = m.room_id AND sender_rm.user_id = m.sender_user_id
 		 WHERE m.room_id = ? AND m.sender_user_id = ? AND m.client_message_id = ?`,
 		roomID, userID, clientMessageID,

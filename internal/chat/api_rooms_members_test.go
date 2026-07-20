@@ -254,6 +254,131 @@ func TestMemberProfileIncludesBioAndRoomLinks(t *testing.T) {
 	}
 }
 
+func TestFormerRoomMemberProfileUsesAccountStateNotMembership(t *testing.T) {
+	api := newAPIHarness(t)
+	owner := api.register("former_profile_owner")
+	former := api.register("former_profile_user")
+	unrelated := api.register("former_profile_unrelated")
+	formerID := former.User["id"].(string)
+	room := api.createRoom(owner.Token, map[string]any{
+		"name":        "Former Profile",
+		"join_policy": "open",
+	})
+	roomID := room["id"].(string)
+
+	status, response := api.request(http.MethodPost, "/rooms/"+roomID+"/join", former.Token, nil)
+	api.requireStatus(status, http.StatusOK, response)
+	status, response = api.request(http.MethodPatch, "/rooms/"+roomID+"/me", former.Token, map[string]any{
+		"room_display_name": "发送时房间名",
+	})
+	api.requireStatus(status, http.StatusOK, response)
+	if _, err := api.db.Exec(
+		`UPDATE users
+		 SET display_name = '发送时默认名', avatar_url = '/sent-avatar.png', default_avatar_key = 'blue-1'
+		 WHERE id = ?`,
+		formerID,
+	); err != nil {
+		t.Fatalf("set send-time profile: %v", err)
+	}
+	message := api.sendMessage(former.Token, roomID, "former member message")
+	if _, err := api.db.Exec(
+		`UPDATE users
+		 SET display_name = '当前默认名', avatar_url = NULL, default_avatar_key = 'green-2'
+		 WHERE id = ?`,
+		formerID,
+	); err != nil {
+		t.Fatalf("set current default profile: %v", err)
+	}
+	status, response = api.request(
+		http.MethodDelete,
+		"/rooms/"+roomID+"/members/"+formerID,
+		owner.Token,
+		nil,
+	)
+	api.requireStatus(status, http.StatusOK, response)
+
+	assertCurrentDefault := func(response map[string]any) {
+		t.Helper()
+		profile := response["profile"].(map[string]any)
+		user := profile["user"].(map[string]any)
+		if profile["role"] != "left" || profile["room_display_name"] != nil {
+			t.Fatalf("former member should have no current room identity: %v", profile)
+		}
+		if user["display_name"] != "当前默认名" || user["avatar_url"] != nil || user["default_avatar_key"] != "green-2" {
+			t.Fatalf("former member should expose the current default profile: %v", user)
+		}
+		if deleted, _ := user["is_deleted"].(bool); deleted {
+			t.Fatalf("former member must not be marked as deleted: %v", user)
+		}
+	}
+
+	status, response = api.request(
+		http.MethodGet,
+		"/rooms/"+roomID+"/members/"+formerID+"/profile",
+		owner.Token,
+		nil,
+	)
+	api.requireStatus(status, http.StatusOK, response)
+	assertCurrentDefault(response)
+
+	status, response = api.request(
+		http.MethodGet,
+		"/rooms/"+roomID+"/members/"+unrelated.User["id"].(string)+"/profile",
+		owner.Token,
+		nil,
+	)
+	api.requireStatus(status, http.StatusNotFound, response)
+
+	if _, err := api.db.Exec(`UPDATE users SET status = 'suspended' WHERE id = ?`, formerID); err != nil {
+		t.Fatalf("suspend former member: %v", err)
+	}
+	status, response = api.request(
+		http.MethodGet,
+		"/rooms/"+roomID+"/members/"+formerID+"/profile",
+		owner.Token,
+		nil,
+	)
+	api.requireStatus(status, http.StatusOK, response)
+	assertCurrentDefault(response)
+	status, response = api.request(http.MethodGet, "/users/"+formerID+"/profile", owner.Token, nil)
+	api.requireStatus(status, http.StatusOK, response)
+	if user := response["profile"].(map[string]any)["user"].(map[string]any); user["display_name"] != "当前默认名" || user["is_deleted"] == true || user["is_suspended"] != true {
+		t.Fatalf("suspended account must not be presented as deleted: %v", user)
+	}
+
+	if _, err := api.db.Exec(
+		`UPDATE users SET status = 'deleted', deleted_at = ? WHERE id = ?`,
+		nowMillis(),
+		formerID,
+	); err != nil {
+		t.Fatalf("soft-delete former member: %v", err)
+	}
+	status, response = api.request(
+		http.MethodGet,
+		"/rooms/"+roomID+"/members/"+formerID+"/profile",
+		owner.Token,
+		nil,
+	)
+	api.requireStatus(status, http.StatusOK, response)
+	deletedUser := response["profile"].(map[string]any)["user"].(map[string]any)
+	if deletedUser["display_name"] != "用户已注销" || deletedUser["is_deleted"] != true {
+		t.Fatalf("deleted account should expose a tombstone: %v", deletedUser)
+	}
+
+	messages := listRoomMessages(t, api, owner.Token, roomID)
+	for _, candidate := range messages {
+		if candidate["id"] != message["id"] {
+			continue
+		}
+		sender := candidate["sender"].(map[string]any)
+		if sender["display_name"] != "发送时默认名" || sender["is_deleted"] != true {
+			t.Fatalf("soft-deleted sender should retain its snapshot and deletion state: %v", sender)
+		}
+		return
+	}
+	t.Fatalf("former member message not found: %v", messages)
+}
+
 func TestRoomOnlineMemberCountUsesActiveConnections(t *testing.T) {
 	api := newAPIHarness(t)
 	owner := api.register("online_owner")

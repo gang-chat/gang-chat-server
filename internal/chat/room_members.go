@@ -24,7 +24,9 @@ func (h *Handler) getMemberProfile(c *gin.Context) {
 		`SELECT u.id,
 		        rm.room_display_name,
 		        rm.role, rm.text_muted_until, rm.joined_at
-		 FROM room_memberships rm JOIN users u ON u.id = rm.user_id
+		 FROM room_memberships rm
+		 JOIN users u ON u.id = rm.user_id
+		   AND u.status IN ('active', 'suspended') AND u.deleted_at IS NULL
 		 WHERE rm.room_id = ? AND rm.user_id = ?`,
 		roomID, targetID,
 	).Scan(&id, &roomDisplayName, &role, &textMutedUntil, &joinedAt)
@@ -33,18 +35,44 @@ func (h *Handler) getMemberProfile(c *gin.Context) {
 			h.jsonError(c, http.StatusInternalServerError, "internal_error", "failed to read member profile")
 			return
 		}
-		if deleted, exists, deletedErr := h.deletedMessageSender(targetID, roomID); deletedErr == nil && exists && h.roomIDExists(roomID) {
+		roomExists := h.roomIDExists(roomID)
+		if deleted, exists, deletedErr := h.deletedMessageSender(targetID, roomID); deletedErr == nil && exists && roomExists {
 			c.JSON(http.StatusOK, gin.H{"profile": gin.H{
 				"user":              deleted,
 				"room_display_name": nil,
-				"role":              "",
+				"role":              "deleted",
 				"text_muted_until":  nil,
 				"joined_at":         formatMillis(0),
 			}})
 			return
+		} else if deletedErr != nil {
+			h.jsonError(c, http.StatusInternalServerError, "internal_error", "failed to read member profile")
+			return
+		}
+		historical, historicalErr := h.historicalMessageSenderExists(targetID, roomID)
+		if historicalErr != nil {
+			h.jsonError(c, http.StatusInternalServerError, "internal_error", "failed to read member profile")
+			return
+		}
+		if historical && roomExists {
+			user, userErr := h.profileUserSummary(targetID, viewerID)
+			if userErr == nil {
+				c.JSON(http.StatusOK, gin.H{"profile": gin.H{
+					"user":              user,
+					"room_display_name": nil,
+					"role":              "left",
+					"text_muted_until":  nil,
+					"joined_at":         formatMillis(0),
+				}})
+				return
+			}
+			if !errors.Is(userErr, sql.ErrNoRows) {
+				h.jsonError(c, http.StatusInternalServerError, "internal_error", "failed to read member profile")
+				return
+			}
 		}
 		user, userErr := h.profileUserSummary(targetID, viewerID)
-		if userErr != nil || !user.IsSuperuser || !h.roomIDExists(roomID) {
+		if userErr != nil || !user.IsSuperuser || !roomExists {
 			h.jsonError(c, http.StatusNotFound, "not_found", "member not found")
 			return
 		}

@@ -47,6 +47,7 @@ type userSummary struct {
 	IsOnline          *bool            `json:"is_online,omitempty"`
 	CommonRooms       []userCommonRoom `json:"common_rooms,omitempty"`
 	IsDeleted         bool             `json:"is_deleted,omitempty"`
+	IsSuspended       bool             `json:"is_suspended,omitempty"`
 }
 
 type userCommonRoom struct {
@@ -357,18 +358,19 @@ func (h *Handler) userSummaryForRoom(roomID, userID string) (userSummary, error)
 }
 
 func (h *Handler) profileUserSummary(userID, viewerID string) (userSummary, error) {
-	var id, uid, username string
+	var id, uid, username, status string
 	var displayName, avatarURL, defaultAvatar, bio, gender, phoneNumber sql.NullString
 	var email string
 	var isSuperuser, emailPublic, phoneNumberPublic int
 	err := h.DB.QueryRow(
 		`SELECT id, uid, username, display_name, avatar_url, default_avatar_key, bio, gender,
-		        email, email_public, phone_number, phone_number_public, is_superuser
-		 FROM users WHERE id = ? AND status = 'active'`,
+		        email, email_public, phone_number, phone_number_public, is_superuser, status
+		 FROM users
+		 WHERE id = ? AND status IN ('active', 'suspended') AND deleted_at IS NULL`,
 		userID,
 	).Scan(
 		&id, &uid, &username, &displayName, &avatarURL, &defaultAvatar, &bio, &gender,
-		&email, &emailPublic, &phoneNumber, &phoneNumberPublic, &isSuperuser,
+		&email, &emailPublic, &phoneNumber, &phoneNumberPublic, &isSuperuser, &status,
 	)
 	if err != nil {
 		return userSummary{}, err
@@ -379,7 +381,8 @@ func (h *Handler) profileUserSummary(userID, viewerID string) (userSummary, erro
 		summary.Gender = gender.String
 	}
 	summary.IsSuperuser = isSuperuser != 0
-	isOnline := h.isUserOnlineForViewer(id, viewerID)
+	summary.IsSuspended = status == "suspended"
+	isOnline := status != "suspended" && h.isUserOnlineForViewer(id, viewerID)
 	summary.IsOnline = &isOnline
 	if err := h.applyVisibleContactFields(&summary, id, viewerID, email, emailPublic != 0, phoneNumber, phoneNumberPublic != 0); err != nil {
 		return userSummary{}, err
@@ -736,7 +739,24 @@ func deletedUserSummary(id string) userSummary {
 	}
 }
 
-func (h *Handler) deletedMessageSender(userID string, roomID ...string) (userSummary, bool, error) {
+func (h *Handler) userAccountDeletionState(userID string) (exists, deleted bool, err error) {
+	var status string
+	var deletedAt sql.NullInt64
+	err = h.DB.QueryRow(
+		`SELECT status, deleted_at FROM users WHERE id = ?`,
+		userID,
+	).Scan(&status, &deletedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, true, nil
+	}
+	if err != nil {
+		return false, false, err
+	}
+	deleted = strings.EqualFold(strings.TrimSpace(status), "deleted") || deletedAt.Valid
+	return true, deleted, nil
+}
+
+func (h *Handler) historicalMessageSenderExists(userID string, roomID ...string) (bool, error) {
 	query := `SELECT EXISTS(SELECT 1 FROM messages WHERE sender_user_id = ?`
 	args := []any{userID}
 	if len(roomID) > 0 && strings.TrimSpace(roomID[0]) != "" {
@@ -746,9 +766,27 @@ func (h *Handler) deletedMessageSender(userID string, roomID ...string) (userSum
 	query += ` LIMIT 1)`
 	var exists int
 	if err := h.DB.QueryRow(query, args...).Scan(&exists); err != nil {
+		return false, err
+	}
+	return exists != 0, nil
+}
+
+func (h *Handler) deletedMessageSender(userID string, roomID ...string) (userSummary, bool, error) {
+	accountExists, accountDeleted, err := h.userAccountDeletionState(userID)
+	if err != nil {
 		return userSummary{}, false, err
 	}
-	if exists == 0 {
+	if accountExists {
+		if accountDeleted {
+			return deletedUserSummary(userID), true, nil
+		}
+		return userSummary{}, false, nil
+	}
+	historical, err := h.historicalMessageSenderExists(userID, roomID...)
+	if err != nil {
+		return userSummary{}, false, err
+	}
+	if !historical {
 		return userSummary{}, false, nil
 	}
 	return deletedUserSummary(userID), true, nil

@@ -121,7 +121,8 @@ func newAPIHarness(t *testing.T) *apiHarness {
 
 	router := gin.New()
 	api := router.Group("/api/v1")
-	authHandler := auth.RegisterRoutes(api, pool, cfg)
+	bus := eventbus.New()
+	authHandler := auth.RegisterRoutes(api, pool, cfg, bus)
 	verificationEmail := &fakeVerificationEmailSender{}
 	authHandler.VerificationEmailSender = verificationEmail
 
@@ -129,7 +130,6 @@ func newAPIHarness(t *testing.T) *apiHarness {
 	chatGroup := api.Group("")
 	chatGroup.Use(authMW.Handle)
 	live := &fakeLiveController{}
-	bus := eventbus.New()
 	assetStore := storage.NewMemoryAssetStorage()
 	chatHandler := RegisterRoutes(chatGroup, pool, cfg, bus, live, nil, assetStore)
 

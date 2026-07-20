@@ -16,6 +16,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/zhuangkaiyi/gang-chat/server/internal/apierrors"
 	"github.com/zhuangkaiyi/gang-chat/server/internal/config"
+	"github.com/zhuangkaiyi/gang-chat/server/internal/eventbus"
 	"github.com/zhuangkaiyi/gang-chat/server/internal/idgen"
 	"github.com/zhuangkaiyi/gang-chat/server/internal/model"
 )
@@ -26,9 +27,10 @@ type Handler struct {
 	Limit                   *RateLimiter
 	LocationResolver        *SessionLocationResolver
 	VerificationEmailSender VerificationEmailSender
+	Bus                     *eventbus.Bus
 }
 
-func NewHandler(db *sql.DB, cfg *config.Config) *Handler {
+func NewHandler(db *sql.DB, cfg *config.Config, bus *eventbus.Bus) *Handler {
 	locationResolver, err := NewSessionLocationResolver(cfg.GeoIPDatabasePath)
 	if err != nil {
 		// A missing/corrupt GeoIP database must not take down the whole
@@ -43,11 +45,12 @@ func NewHandler(db *sql.DB, cfg *config.Config) *Handler {
 		Limit:                   NewRateLimiter(cfg.LoginMaxAttempts, cfg.LoginWindowSeconds),
 		LocationResolver:        locationResolver,
 		VerificationEmailSender: newVerificationEmailSender(cfg),
+		Bus:                     bus,
 	}
 }
 
-func RegisterRoutes(g *gin.RouterGroup, db *sql.DB, cfg *config.Config) *Handler {
-	h := NewHandler(db, cfg)
+func RegisterRoutes(g *gin.RouterGroup, db *sql.DB, cfg *config.Config, bus *eventbus.Bus) *Handler {
+	h := NewHandler(db, cfg, bus)
 	if err := h.ensureSuperUser(); err != nil {
 		panic(err)
 	}
@@ -229,6 +232,10 @@ func (h *Handler) login(c *gin.Context) {
 	if err != nil {
 		h.Limit.RecordFailure(loginNorm)
 		errorJSON(c, http.StatusUnauthorized, "unauthorized", "invalid credentials")
+		return
+	}
+	if user.Status == "suspended" {
+		errorJSON(c, http.StatusForbidden, "account_suspended", "账号已被封禁")
 		return
 	}
 	if user.Status != "active" {

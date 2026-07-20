@@ -103,7 +103,7 @@ func main() {
 	chat.RegisterAssetRoutes(r, pool, cfg, assetStore)
 
 	api := r.Group("/api/v1")
-	auth.RegisterRoutes(api, pool, cfg)
+	auth.RegisterRoutes(api, pool, cfg, bus)
 
 	authMW := &auth.AuthMiddleware{DB: pool, JWTSecret: cfg.JWTSecret}
 	chatGroup := api.Group("")

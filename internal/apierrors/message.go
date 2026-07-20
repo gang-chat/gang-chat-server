@@ -48,6 +48,8 @@ func UserMessage(code, message string, status int) string {
 		return "请先验证绑定邮箱"
 	case "account_not_found":
 		return "该用户名或邮箱对应的账号不存在"
+	case "account_suspended":
+		return "账号已被封禁"
 	case "verification_expired", "challenge_not_found":
 		return "验证码已失效，请重新获取"
 	case "invalid_verification_code":
@@ -93,6 +95,8 @@ func knownMessage(message string) string {
 		return "登录状态无效，请重新登录"
 	case strings.Contains(message, "user inactive"):
 		return "账号当前不可用"
+	case strings.Contains(message, "account suspended"):
+		return "账号已被封禁"
 	case strings.Contains(message, "current password incorrect"):
 		return "当前密码不正确"
 	case strings.Contains(message, "username or email already taken"):

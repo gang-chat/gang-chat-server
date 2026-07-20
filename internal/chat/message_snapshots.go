@@ -2,6 +2,12 @@ package chat
 
 import "database/sql"
 
+// Only active and suspended accounts still represent a live user identity.
+// Deleted rows are treated the same as hard-deleted rows so every message read
+// path consistently exposes the immutable sender snapshot as a tombstone.
+const messageSenderUserJoinSQL = `LEFT JOIN users u ON u.id = m.sender_user_id
+	AND u.status IN ('active', 'suspended') AND u.deleted_at IS NULL`
+
 // messageSelectColumnsSQL is shared by every message read path. Display fields
 // deliberately come from the immutable send-time snapshot; the live users join
 // is used only to mark whether opening the sender card is still meaningful.
