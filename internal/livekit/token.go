@@ -1,10 +1,13 @@
 package livekit
 
 import (
+	"strings"
 	"time"
 
 	"github.com/livekit/protocol/auth"
 )
+
+const clientLiveSessionMetadataPrefix = "gang-chat-client-live-session:"
 
 type TokenParams struct {
 	APIKey       string
@@ -12,9 +15,28 @@ type TokenParams struct {
 	Room         string
 	Identity     string
 	Name         string
+	Metadata     string
 	CanPublish   bool
 	CanSubscribe bool
 	TTL          time.Duration
+}
+
+func ClientLiveSessionMetadata(clientLiveSessionID string) string {
+	clientLiveSessionID = strings.TrimSpace(clientLiveSessionID)
+	if clientLiveSessionID == "" {
+		return ""
+	}
+	return clientLiveSessionMetadataPrefix + clientLiveSessionID
+}
+
+func ClientLiveSessionIDFromMetadata(metadata string) (string, bool) {
+	if !strings.HasPrefix(metadata, clientLiveSessionMetadataPrefix) {
+		return "", false
+	}
+	clientLiveSessionID := strings.TrimSpace(
+		strings.TrimPrefix(metadata, clientLiveSessionMetadataPrefix),
+	)
+	return clientLiveSessionID, clientLiveSessionID != ""
 }
 
 func GenerateJoinToken(params TokenParams) (string, error) {
@@ -36,6 +58,9 @@ func GenerateJoinToken(params TokenParams) (string, error) {
 		SetIdentity(params.Identity).
 		SetName(params.Name).
 		SetValidFor(ttl)
+	if params.Metadata != "" {
+		at.SetMetadata(params.Metadata)
+	}
 
 	return at.ToJWT()
 }

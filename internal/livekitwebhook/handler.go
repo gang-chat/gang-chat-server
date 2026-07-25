@@ -16,6 +16,7 @@ import (
 	"github.com/livekit/protocol/webhook"
 	"github.com/zhuangkaiyi/gang-chat/server/internal/config"
 	"github.com/zhuangkaiyi/gang-chat/server/internal/eventbus"
+	livekittoken "github.com/zhuangkaiyi/gang-chat/server/internal/livekit"
 )
 
 type Handler struct {
@@ -58,10 +59,13 @@ func (h *Handler) receive(c *gin.Context) {
 		}
 		// Business room id == LiveKit room name (live_core.go issues tokens
 		// with Room = roomID), and participant identity == user_id.
-		res, err := h.DB.Exec(
-			`DELETE FROM live_participants WHERE room_id = ? AND user_id = ?`,
-			roomName, identity,
+		query, args := participantLeftDelete(
+			roomName,
+			identity,
+			ev.GetParticipant().GetMetadata(),
+			ev.GetParticipant().GetJoinedAtMs(),
 		)
+		res, err := h.DB.Exec(query, args...)
 		if err != nil {
 			log.Printf("livekit webhook: delete participant failed: %v", err)
 			break
@@ -84,6 +88,30 @@ func (h *Handler) receive(c *gin.Context) {
 		h.publish(roomName, "live_room_finished", nil)
 	}
 	c.Status(http.StatusOK)
+}
+
+func participantLeftDelete(
+	roomName,
+	identity,
+	metadata string,
+	joinedAtMillis int64,
+) (string, []any) {
+	if clientLiveSessionID, ok :=
+		livekittoken.ClientLiveSessionIDFromMetadata(metadata); ok {
+		return `DELETE FROM live_participants
+		        WHERE room_id = ? AND user_id = ? AND client_live_session_id = ?`,
+			[]any{roomName, identity, clientLiveSessionID}
+	}
+	if joinedAtMillis > 0 {
+		// Compatibility for participants whose token predates session metadata.
+		// A newer reconnect rewrites joined_at, so its row survives a delayed
+		// participant_left webhook from the superseded LiveKit connection.
+		return `DELETE FROM live_participants
+		        WHERE room_id = ? AND user_id = ? AND joined_at <= ?`,
+			[]any{roomName, identity, joinedAtMillis}
+	}
+	return `DELETE FROM live_participants WHERE room_id = ? AND user_id = ?`,
+		[]any{roomName, identity}
 }
 
 func (h *Handler) publish(roomID, eventType string, extra map[string]any) {

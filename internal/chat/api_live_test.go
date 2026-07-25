@@ -90,6 +90,98 @@ func TestLiveJoinTokenUsesLongLivedRoomToken(t *testing.T) {
 	}
 }
 
+func TestLiveReconnectReplacesSessionAndClearsTransientMedia(t *testing.T) {
+	api := newAPIHarness(t)
+	owner := api.register("live_reconnect_owner")
+	room := api.createRoom(owner.Token, map[string]any{
+		"name":        "Live Reconnect Room",
+		"join_policy": "open",
+	})
+	roomID := room["id"].(string)
+	userID := owner.User["id"].(string)
+
+	status, response := api.request(
+		http.MethodPost,
+		"/rooms/"+roomID+"/live/join",
+		owner.Token,
+		map[string]any{
+			"client_live_session_id": "clive_reconnect_old",
+			"source":                 "live_panel",
+		},
+	)
+	api.requireStatus(status, http.StatusOK, response)
+	status, response = api.request(
+		http.MethodPatch,
+		"/rooms/"+roomID+"/live/me",
+		owner.Token,
+		map[string]any{
+			"mic_muted":        true,
+			"headphones_muted": true,
+			"camera_on":        true,
+			"connection_state": "online",
+		},
+	)
+	api.requireStatus(status, http.StatusOK, response)
+
+	var oldLiveSessionID string
+	var oldJoinedAt int64
+	if err := api.db.QueryRow(
+		`SELECT live_session_id, joined_at
+		 FROM live_participants WHERE room_id = ? AND user_id = ?`,
+		roomID,
+		userID,
+	).Scan(&oldLiveSessionID, &oldJoinedAt); err != nil {
+		t.Fatalf("read first live session: %v", err)
+	}
+	time.Sleep(2 * time.Millisecond)
+
+	status, response = api.request(
+		http.MethodPost,
+		"/rooms/"+roomID+"/live/join",
+		owner.Token,
+		map[string]any{
+			"client_live_session_id": "clive_reconnect_new",
+			"source":                 "reconnect",
+		},
+	)
+	api.requireStatus(status, http.StatusOK, response)
+
+	var newLiveSessionID, clientLiveSessionID string
+	var newJoinedAt int64
+	if err := api.db.QueryRow(
+		`SELECT live_session_id, client_live_session_id, joined_at
+		 FROM live_participants WHERE room_id = ? AND user_id = ?`,
+		roomID,
+		userID,
+	).Scan(
+		&newLiveSessionID,
+		&clientLiveSessionID,
+		&newJoinedAt,
+	); err != nil {
+		t.Fatalf("read replacement live session: %v", err)
+	}
+	if newLiveSessionID == oldLiveSessionID {
+		t.Fatalf("reconnect should replace live_session_id: %q", newLiveSessionID)
+	}
+	if clientLiveSessionID != "clive_reconnect_new" {
+		t.Fatalf("unexpected client live session id: %q", clientLiveSessionID)
+	}
+	if newJoinedAt <= oldJoinedAt {
+		t.Fatalf("reconnect joined_at should advance: old=%d new=%d", oldJoinedAt, newJoinedAt)
+	}
+
+	participant := response["participant"].(map[string]any)
+	if participant["connection_state"] != "joining" ||
+		participant["camera_on"] != false ||
+		participant["screen_sharing"] != false {
+		t.Fatalf("reconnect should clear transient media state: %v", participant)
+	}
+	if participant["mic_muted"] != true ||
+		participant["headphones_muted"] != true {
+		t.Fatalf("reconnect should preserve local audio choices: %v", participant)
+	}
+}
+
 func TestLiveParticipantsUseRoomDisplayNames(t *testing.T) {
 	api := newAPIHarness(t)
 	owner := api.register("live_alias_owner")

@@ -65,8 +65,12 @@ func (h *Handler) joinLive(c *gin.Context) {
 		   voice_blocked, camera_on, screen_sharing, watching_screen_user_id, connection_state
 		 ) VALUES (?, ?, ?, ?, ?, ?, 1, 0, 0, 0, 0, 0, 0, NULL, 'joining')
 		 ON DUPLICATE KEY UPDATE
+		   live_session_id = VALUES(live_session_id),
 		   client_live_session_id = VALUES(client_live_session_id),
+		   joined_at = VALUES(joined_at),
 		   updated_at = VALUES(updated_at),
+		   camera_on = 0,
+		   screen_sharing = 0,
 		   watching_screen_user_id = NULL,
 		   connection_state = 'joining'`,
 		liveSessionID, roomID, userID, req.ClientLiveSessionID, now, now,
@@ -108,7 +112,11 @@ func (h *Handler) joinLive(c *gin.Context) {
 		return
 	}
 
-	token, expiresAt, err := h.liveKitToken(roomID, userID)
+	token, expiresAt, err := h.liveKitToken(
+		roomID,
+		userID,
+		req.ClientLiveSessionID,
+	)
 	if err != nil {
 		h.jsonError(c, http.StatusServiceUnavailable, "livekit_unavailable", "LiveKit cannot issue media sessions")
 		return
@@ -480,7 +488,11 @@ func (h *Handler) activeScreenViewers(roomID string) (map[string][]userSummary, 
 	return viewers, rows.Err()
 }
 
-func (h *Handler) liveKitToken(roomID, userID string) (string, time.Time, error) {
+func (h *Handler) liveKitToken(
+	roomID,
+	userID,
+	clientLiveSessionID string,
+) (string, time.Time, error) {
 	expiresAt := time.Now().UTC().Add(liveKitJoinTokenTTL)
 	canPublish, canSubscribe := h.liveKitMediaPermissions(roomID, userID)
 	if h.Cfg.LiveKitAPIKey == "" || h.Cfg.LiveKitAPISecret == "" {
@@ -492,6 +504,7 @@ func (h *Handler) liveKitToken(roomID, userID string) (string, time.Time, error)
 		Room:         roomID,
 		Identity:     userID,
 		Name:         currentUsernameFromDB(h.DB, userID),
+		Metadata:     livekittoken.ClientLiveSessionMetadata(clientLiveSessionID),
 		CanPublish:   canPublish,
 		CanSubscribe: canSubscribe,
 		TTL:          liveKitJoinTokenTTL,
