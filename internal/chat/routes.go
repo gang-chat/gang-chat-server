@@ -9,6 +9,7 @@ import (
 	"github.com/zhuangkaiyi/gang-chat/server/internal/eventbus"
 	"github.com/zhuangkaiyi/gang-chat/server/internal/model"
 	"github.com/zhuangkaiyi/gang-chat/server/internal/musicbox"
+	"github.com/zhuangkaiyi/gang-chat/server/internal/push"
 	"github.com/zhuangkaiyi/gang-chat/server/internal/storage"
 )
 
@@ -42,6 +43,7 @@ type Handler struct {
 	Live     liveMediaController
 	Assets   *storage.AssetStorage
 	MusicBox *musicbox.Manager
+	Push     *push.Dispatcher
 
 	stickerPackLocks    keyedMutexes
 	assetLifecycleLocks keyedMutexes

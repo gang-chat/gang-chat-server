@@ -8,6 +8,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/gin-gonic/gin"
+	"github.com/zhuangkaiyi/gang-chat/server/internal/push"
 )
 
 func (h *Handler) listMessages(c *gin.Context) {
@@ -202,6 +203,16 @@ func (h *Handler) sendMessage(c *gin.Context) {
 	// each recipient while the shared snapshot is published.
 	h.publishRoomMessageUpdated(roomID, userID)
 	h.publishRoomToUser(userID, roomID, "room_updated")
+	if h.Push != nil {
+		h.Push.Enqueue(push.RoomMessage{
+			MessageID:  msg.ID,
+			RoomID:     roomID,
+			SenderID:   userID,
+			SenderName: msg.Sender.DisplayName,
+			Type:       msg.Type,
+			Body:       msg.Body,
+		})
+	}
 	if len(req.Mentions) > 0 {
 		if recipients, err := h.appendMentionRoomNotifications(
 			roomID,

@@ -53,6 +53,14 @@ type Config struct {
 	ResendAPIBaseURL string `json:"resend_api_base_url"`
 	ResendAPIKey     string `json:"resend_api_key"`
 	EmailFrom        string `json:"email_from"`
+
+	// Android offline push is optional. When these values are empty the
+	// registration API remains available, but the FCM sender is disabled.
+	// Keeping provider credentials out of the chat package lets a vendor push
+	// implementation (for example OPPO Push) be added without touching message
+	// persistence or online-presence semantics.
+	FCMProjectID          string `json:"fcm_project_id"`
+	FCMServiceAccountFile string `json:"fcm_service_account_file"`
 }
 
 func parseList(value string) []string {
@@ -106,6 +114,8 @@ func Load() *Config {
 	flag.StringVar(&cfg.ResendAPIBaseURL, "resend-api-base-url", cfg.ResendAPIBaseURL, "Resend API base URL")
 	flag.StringVar(&cfg.ResendAPIKey, "resend-api-key", cfg.ResendAPIKey, "Resend API key")
 	flag.StringVar(&cfg.EmailFrom, "email-from", cfg.EmailFrom, "sender used for account emails")
+	flag.StringVar(&cfg.FCMProjectID, "fcm-project-id", cfg.FCMProjectID, "Firebase project ID used for Android offline push")
+	flag.StringVar(&cfg.FCMServiceAccountFile, "fcm-service-account-file", cfg.FCMServiceAccountFile, "path to a Firebase service-account JSON file")
 	flag.StringVar(&trustedProxies, "trusted-proxies", trustedProxies, "comma-separated trusted proxy IPs/CIDRs")
 	allowedOrigins := strings.Join(cfg.AllowedOrigins, ",")
 	flag.StringVar(&allowedOrigins, "allowed-origins", allowedOrigins, "comma-separated allowed CORS origins, or * for any")

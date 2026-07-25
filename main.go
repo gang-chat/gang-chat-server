@@ -15,6 +15,7 @@ import (
 	"github.com/zhuangkaiyi/gang-chat/server/internal/livekitwebhook"
 	"github.com/zhuangkaiyi/gang-chat/server/internal/middleware"
 	"github.com/zhuangkaiyi/gang-chat/server/internal/musicbox"
+	"github.com/zhuangkaiyi/gang-chat/server/internal/push"
 	"github.com/zhuangkaiyi/gang-chat/server/internal/qqmusic"
 	"github.com/zhuangkaiyi/gang-chat/server/internal/storage"
 
@@ -109,6 +110,17 @@ func main() {
 	chatGroup := api.Group("")
 	chatGroup.Use(authMW.Handle)
 	chatHandler := chat.RegisterRoutes(chatGroup, pool, cfg, bus, liveController, musicBox, assetStore)
+	pushHandler := push.RegisterRoutes(chatGroup, pool)
+	if err := pushHandler.Store.EnsureSchema(); err != nil {
+		log.Fatalf("push: ensure device schema: %v", err)
+	}
+	fcmSender, err := push.NewFCMSender(cfg.FCMProjectID, cfg.FCMServiceAccountFile)
+	if err != nil {
+		log.Fatalf("push: configure FCM: %v", err)
+	}
+	pushDispatcher := push.NewDispatcher(pool, fcmSender)
+	chatHandler.Push = pushDispatcher
+	go pushDispatcher.Run(context.Background())
 	go chatHandler.RunStickerAssetCleanup(context.Background())
 
 	lkGroup := r.Group("/livekit")

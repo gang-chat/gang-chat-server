@@ -452,4 +452,21 @@ CREATE TABLE `users` (
   UNIQUE KEY `uq_users_phone_number_normalized` (`phone_number_normalized`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
+CREATE TABLE `push_devices` (
+  `provider` varchar(32) NOT NULL,
+  `installation_id` varchar(128) NOT NULL,
+  `user_id` varchar(128) NOT NULL,
+  `session_id` varchar(128) NOT NULL,
+  `token` varchar(1024) NOT NULL,
+  `platform` varchar(32) NOT NULL DEFAULT 'android',
+  `notifications_enabled` tinyint(1) NOT NULL DEFAULT '1',
+  `created_at` bigint NOT NULL,
+  `updated_at` bigint NOT NULL,
+  PRIMARY KEY (`provider`,`installation_id`),
+  KEY `idx_push_devices_user` (`user_id`,`notifications_enabled`),
+  KEY `idx_push_devices_session` (`session_id`),
+  CONSTRAINT `fk_push_devices_user` FOREIGN KEY (`user_id`) REFERENCES `users` (`id`) ON DELETE CASCADE,
+  CONSTRAINT `fk_push_devices_session` FOREIGN KEY (`session_id`) REFERENCES `user_sessions` (`id`) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+
 SET FOREIGN_KEY_CHECKS = 1;
