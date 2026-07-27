@@ -37,6 +37,11 @@ jobs:
       - name: UTF-8 encoding check
         run: go run ./tools/check_utf8.go
 
+      - name: Test server and deployment rollback
+        run: |
+          go test ./... -count=1
+          bash deploy/activate-gang_test.sh
+
       - name: Build gang-server (linux/amd64, CGO)
         run: |
           go version
@@ -72,7 +77,7 @@ jobs:
 
           ssh "${SSH_OPTS[@]}" -p "$PORT" "$TARGET" "mkdir -p '$DEPLOY_PATH'"
           # Scripts + livekit config (overwrites in place).
-          rsync -az --partial -e "$RSYNC_SSH" deploy/lib.sh deploy/start.sh deploy/stop.sh deploy/restart.sh \
+          rsync -az --partial -e "$RSYNC_SSH" deploy/lib.sh deploy/start.sh deploy/stop.sh deploy/restart.sh deploy/activate-gang.sh \
                "$TARGET:$DEPLOY_PATH/"
           rsync -az --partial -e "$RSYNC_SSH" livekit-server/livekit.yaml "$TARGET:$DEPLOY_PATH/"
           # New binary lands as .new, swapped in atomically in the next step.
@@ -92,6 +97,5 @@ jobs:
             -p "$PORT" \
             "$DEPLOY_USER@$DEPLOY_HOST" \
             "cd '$DEPLOY_PATH' \
-             && chmod +x lib.sh start.sh stop.sh restart.sh gang-server.new \
-             && mv -f gang-server.new gang-server \
-             && ./restart.sh gang"
+             && chmod +x lib.sh start.sh stop.sh restart.sh activate-gang.sh gang-server.new \
+             && ./activate-gang.sh"

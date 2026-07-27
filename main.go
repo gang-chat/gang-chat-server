@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"log"
-	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/zhuangkaiyi/gang-chat/server/internal/auth"
@@ -16,7 +15,6 @@ import (
 	"github.com/zhuangkaiyi/gang-chat/server/internal/middleware"
 	"github.com/zhuangkaiyi/gang-chat/server/internal/musicbox"
 	"github.com/zhuangkaiyi/gang-chat/server/internal/push"
-	"github.com/zhuangkaiyi/gang-chat/server/internal/qqmusic"
 	"github.com/zhuangkaiyi/gang-chat/server/internal/storage"
 
 	lksdk "github.com/livekit/server-sdk-go/v2"
@@ -46,25 +44,15 @@ func main() {
 
 	bus := eventbus.New()
 
-	// QQ音乐 integration is optional: enabled only when qqmusic_base_url and
-	// qqmusic_password are set in config.json. A failed login (service down or
-	// wrong password) aborts startup, so a misconfiguration is loud rather than
-	// silently off.
-	var qqClient *qqmusic.Client
-	if cfg.QQMusicBaseURL != "" && cfg.QQMusicPassword != "" {
-		qc, err := qqmusic.New(cfg.QQMusicBaseURL, cfg.QQMusicPassword)
-		if err != nil {
-			log.Fatalf("qqmusic: init client: %v", err)
-		}
-		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
-		if err := qc.Login(ctx); err != nil {
-			cancel()
-			log.Fatalf("qqmusic: startup health check failed: %v", err)
-		}
-		cancel()
-		qqClient = qc
-		log.Printf("qqmusic: connected to %s", cfg.QQMusicBaseURL)
-	}
+	// QQ音乐 is an optional source. Its availability must never prevent the
+	// chat API from starting; when its startup probe fails, the manager receives
+	// a nil client and exposes the remaining music sources normally.
+	qqClient := initOptionalQQMusic(
+		cfg.QQMusicBaseURL,
+		cfg.QQMusicPassword,
+		defaultQQMusicStartupTimeout,
+		log.Printf,
+	)
 
 	// Music box: server-side download/transcode/broadcast of room music. It
 	// needs LiveKit to publish a bot track, so it's only enabled when LiveKit
