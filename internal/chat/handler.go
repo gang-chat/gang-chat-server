@@ -269,6 +269,8 @@ type markReadRequest struct {
 type joinLiveRequest struct {
 	ClientLiveSessionID string `json:"client_live_session_id"`
 	Source              string `json:"source"`
+	MicMuted            *bool  `json:"mic_muted"`
+	HeadphonesMuted     *bool  `json:"headphones_muted"`
 }
 
 type updateLiveRequest struct {

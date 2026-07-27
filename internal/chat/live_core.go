@@ -58,23 +58,50 @@ func (h *Handler) joinLive(c *gin.Context) {
 
 	now := nowMillis()
 	liveSessionID := newID("live")
+	policy := h.liveVoicePolicy(roomID, userID)
+	micMuted := true
+	if req.MicMuted != nil {
+		micMuted = *req.MicMuted
+	}
+	if policy.MicBlocked {
+		micMuted = true
+	}
+	headphonesMuted := false
+	if req.HeadphonesMuted != nil {
+		headphonesMuted = *req.HeadphonesMuted
+	}
+	if policy.HeadphonesBlocked {
+		headphonesMuted = true
+	}
+	duplicateUpdates := []string{
+		"live_session_id = VALUES(live_session_id)",
+		"client_live_session_id = VALUES(client_live_session_id)",
+		"joined_at = VALUES(joined_at)",
+		"updated_at = VALUES(updated_at)",
+		"camera_on = 0",
+		"camera_mirrored = 0",
+		"screen_sharing = 0",
+		"watching_screen_user_id = NULL",
+		"connection_state = 'joining'",
+	}
+	// Older clients omit these fields, so preserve their established rejoin
+	// behavior. New clients send both choices and make the first join snapshot
+	// authoritative instead of publishing a temporary default audio state.
+	if req.MicMuted != nil {
+		duplicateUpdates = append(duplicateUpdates, "mic_muted = VALUES(mic_muted)")
+	}
+	if req.HeadphonesMuted != nil {
+		duplicateUpdates = append(duplicateUpdates, "headphones_muted = VALUES(headphones_muted)")
+	}
 	_, err := h.DB.Exec(
 		`INSERT INTO live_participants (
 		   live_session_id, room_id, user_id, client_live_session_id, joined_at, updated_at,
 		   mic_muted, mic_blocked, headphones_muted, headphones_blocked,
 		   voice_blocked, camera_on, camera_mirrored, screen_sharing, watching_screen_user_id, connection_state
-		 ) VALUES (?, ?, ?, ?, ?, ?, 1, 0, 0, 0, 0, 0, 0, 0, NULL, 'joining')
-		 ON DUPLICATE KEY UPDATE
-		   live_session_id = VALUES(live_session_id),
-		   client_live_session_id = VALUES(client_live_session_id),
-		   joined_at = VALUES(joined_at),
-		   updated_at = VALUES(updated_at),
-		   camera_on = 0,
-		   camera_mirrored = 0,
-		   screen_sharing = 0,
-		   watching_screen_user_id = NULL,
-		   connection_state = 'joining'`,
+		 ) VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, 0, 0, 0, 0, 0, NULL, 'joining')
+		 ON DUPLICATE KEY UPDATE `+strings.Join(duplicateUpdates, ", "),
 		liveSessionID, roomID, userID, req.ClientLiveSessionID, now, now,
+		boolToInt(micMuted), boolToInt(headphonesMuted),
 	)
 	if err != nil {
 		h.jsonError(c, http.StatusInternalServerError, "internal_error", "failed to join live")
@@ -84,7 +111,6 @@ func (h *Handler) joinLive(c *gin.Context) {
 	// row so a user who rejoins the same room comes back microphone/headphones
 	// muted. The token issued below already reflects the same policy via
 	// liveKitMediaPermissions.
-	policy := h.liveVoicePolicy(roomID, userID)
 	if policy.MicBlocked || policy.HeadphonesBlocked {
 		sets := []string{"updated_at = ?"}
 		args := []any{now}
@@ -518,12 +544,12 @@ func (h *Handler) liveKitToken(
 }
 
 func (h *Handler) liveKitMediaPermissions(roomID, userID string) (bool, bool) {
-	var micBlocked, headphonesMuted, headphonesBlocked int
+	var micBlocked, headphonesBlocked int
 	_ = h.DB.QueryRow(
-		`SELECT mic_blocked, headphones_muted, headphones_blocked
+		`SELECT mic_blocked, headphones_blocked
 		 FROM live_participants WHERE room_id = ? AND user_id = ?`,
 		roomID, userID,
-	).Scan(&micBlocked, &headphonesMuted, &headphonesBlocked)
+	).Scan(&micBlocked, &headphonesBlocked)
 	// Persistent voice moderation is room-scoped (room_voice_bans), so it must
 	// also constrain fresh tokens rather than relying only on the live row.
 	policy := h.liveVoicePolicy(roomID, userID)
@@ -534,7 +560,10 @@ func (h *Handler) liveKitMediaPermissions(roomID, userID string) (bool, bool) {
 		headphonesBlocked = 1
 	}
 	canPublish := micBlocked == 0
-	canSubscribe := headphonesBlocked == 0 && headphonesMuted == 0
+	// A user's headphones mute is a local output choice. Keep subscription
+	// permission available so they can unmute without reconnecting; only room
+	// moderation is allowed to revoke LiveKit subscribe permission.
+	canSubscribe := headphonesBlocked == 0
 	return canPublish, canSubscribe
 }
 

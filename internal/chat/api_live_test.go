@@ -90,6 +90,76 @@ func TestLiveJoinTokenUsesLongLivedRoomToken(t *testing.T) {
 	}
 }
 
+func TestLiveJoinUsesRequestedAudioStateInInitialSnapshot(t *testing.T) {
+	api := newAPIHarness(t)
+	owner := api.register("live_initial_audio_owner")
+	room := api.createRoom(owner.Token, map[string]any{
+		"name":        "Initial Audio Room",
+		"join_policy": "open",
+	})
+	roomID := room["id"].(string)
+	userID := owner.User["id"].(string)
+
+	join := func(sessionID string, micMuted, headphonesMuted bool) map[string]any {
+		t.Helper()
+		status, response := api.request(
+			http.MethodPost,
+			"/rooms/"+roomID+"/live/join",
+			owner.Token,
+			map[string]any{
+				"client_live_session_id": sessionID,
+				"source":                 "live_panel",
+				"mic_muted":              micMuted,
+				"headphones_muted":       headphonesMuted,
+			},
+		)
+		api.requireStatus(status, http.StatusOK, response)
+		participant := response["participant"].(map[string]any)
+		if participant["mic_muted"] != micMuted ||
+			participant["headphones_muted"] != headphonesMuted {
+			t.Fatalf("join participant published stale audio state: %v", participant)
+		}
+		liveParticipant := participantByUserID(
+			t,
+			response["live"].(map[string]any),
+			userID,
+		)
+		if liveParticipant["mic_muted"] != micMuted ||
+			liveParticipant["headphones_muted"] != headphonesMuted {
+			t.Fatalf("initial live snapshot published stale audio state: %v", liveParticipant)
+		}
+		return response
+	}
+
+	join("clive_initial_audio_muted", true, true)
+	canPublish, canSubscribe := api.chat.liveKitMediaPermissions(roomID, userID)
+	if !canPublish || !canSubscribe {
+		t.Fatalf(
+			"personal mute choices must not revoke reusable LiveKit permissions: publish=%v subscribe=%v",
+			canPublish,
+			canSubscribe,
+		)
+	}
+	join("clive_initial_audio_open", false, false)
+
+	// Requests from an older client omit the new fields. A reconnect must keep
+	// the row's current audio state instead of resetting it.
+	status, response := api.request(
+		http.MethodPost,
+		"/rooms/"+roomID+"/live/join",
+		owner.Token,
+		map[string]any{
+			"client_live_session_id": "clive_initial_audio_legacy",
+			"source":                 "reconnect",
+		},
+	)
+	api.requireStatus(status, http.StatusOK, response)
+	participant := response["participant"].(map[string]any)
+	if participant["mic_muted"] != false || participant["headphones_muted"] != false {
+		t.Fatalf("legacy reconnect should preserve established audio state: %v", participant)
+	}
+}
+
 func TestLiveReconnectReplacesSessionAndClearsTransientMedia(t *testing.T) {
 	api := newAPIHarness(t)
 	owner := api.register("live_reconnect_owner")
