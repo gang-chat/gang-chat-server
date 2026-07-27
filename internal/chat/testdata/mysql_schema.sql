@@ -106,6 +106,7 @@ CREATE TABLE `live_participants` (
   `headphones_blocked` tinyint(1) NOT NULL DEFAULT '0',
   `voice_blocked` tinyint(1) NOT NULL DEFAULT '0',
   `camera_on` tinyint(1) NOT NULL DEFAULT '0',
+  `camera_mirrored` tinyint(1) NOT NULL DEFAULT '0',
   `screen_sharing` tinyint(1) NOT NULL DEFAULT '0',
   `watching_screen_user_id` varchar(128) DEFAULT NULL,
   `connection_state` varchar(32) NOT NULL DEFAULT 'joining',

@@ -73,6 +73,9 @@ func RegisterRoutes(g *gin.RouterGroup, db *sql.DB, cfg *config.Config, bus *eve
 	if err := model.EnsureLiveScreenViewerSchema(db); err != nil {
 		log.Printf("chat: ensure live screen viewer schema: %v", err)
 	}
+	if err := model.EnsureLiveCameraMirrorSchema(db); err != nil {
+		log.Printf("chat: ensure live camera mirror schema: %v", err)
+	}
 	if err := model.EnsureRoomAIVoicePreferencesSchema(db); err != nil {
 		log.Printf("chat: ensure room AI voice preferences schema: %v", err)
 	}

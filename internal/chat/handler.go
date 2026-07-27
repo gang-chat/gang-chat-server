@@ -221,6 +221,7 @@ type liveParticipant struct {
 	HeadphonesListening bool          `json:"headphones_listening"`
 	VoiceBlocked        bool          `json:"voice_blocked"`
 	CameraOn            bool          `json:"camera_on"`
+	CameraMirrored      bool          `json:"camera_mirrored"`
 	ScreenSharing       bool          `json:"screen_sharing"`
 	ScreenViewers       []userSummary `json:"screen_viewers"`
 	ConnectionState     string        `json:"connection_state"`
@@ -274,6 +275,7 @@ type updateLiveRequest struct {
 	MicMuted        *bool   `json:"mic_muted"`
 	HeadphonesMuted *bool   `json:"headphones_muted"`
 	CameraOn        *bool   `json:"camera_on"`
+	CameraMirrored  *bool   `json:"camera_mirrored"`
 	ScreenSharing   *bool   `json:"screen_sharing"`
 	ConnectionState *string `json:"connection_state"`
 }
@@ -653,7 +655,7 @@ func scanLiveParticipant(row scanner) (liveParticipant, int64, error) {
 	var userID, uid, username string
 	var displayName, avatarURL, defaultAvatar, roomDisplayName, roomRole sql.NullString
 	var joinedAt, updatedAt int64
-	var micMuted, micBlocked, headphonesMuted, headphonesBlocked, voiceBlocked, cameraOn, screenSharing int
+	var micMuted, micBlocked, headphonesMuted, headphonesBlocked, voiceBlocked, cameraOn, cameraMirrored, screenSharing int
 	err := row.Scan(
 		&participant.LiveSessionID,
 		&joinedAt,
@@ -664,6 +666,7 @@ func scanLiveParticipant(row scanner) (liveParticipant, int64, error) {
 		&headphonesBlocked,
 		&voiceBlocked,
 		&cameraOn,
+		&cameraMirrored,
 		&screenSharing,
 		&participant.ConnectionState,
 		&userID,
@@ -691,6 +694,7 @@ func scanLiveParticipant(row scanner) (liveParticipant, int64, error) {
 	participant.VoiceBlocked = voiceBlocked != 0
 	participant.HeadphonesListening = !participant.HeadphonesMuted && !participant.HeadphonesBlocked
 	participant.CameraOn = cameraOn != 0
+	participant.CameraMirrored = cameraMirrored != 0
 	participant.ScreenSharing = screenSharing != 0
 	return participant, updatedAt, nil
 }

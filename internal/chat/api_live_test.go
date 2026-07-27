@@ -466,6 +466,48 @@ func TestLiveCameraAndScreenShareAreExclusive(t *testing.T) {
 	}
 }
 
+func TestLiveCameraMirrorStateIsSharedAndResetsOnJoin(t *testing.T) {
+	api := newAPIHarness(t)
+	owner := api.register("camera_mirror_owner")
+	room := api.createRoom(owner.Token, map[string]any{"name": "Mirror Room", "join_policy": "open"})
+	roomID := room["id"].(string)
+
+	join := func(clientSessionID string) map[string]any {
+		status, response := api.request(http.MethodPost, "/rooms/"+roomID+"/live/join", owner.Token, map[string]any{
+			"client_live_session_id": clientSessionID,
+			"source":                 "live_panel",
+		})
+		api.requireStatus(status, http.StatusOK, response)
+		return response["participant"].(map[string]any)
+	}
+
+	participant := join("clive_camera_mirror_1")
+	if participant["camera_mirrored"] != false {
+		t.Fatalf("camera mirror should default to false: %v", participant)
+	}
+
+	status, response := api.request(http.MethodPatch, "/rooms/"+roomID+"/live/me", owner.Token, map[string]any{
+		"camera_on":       true,
+		"camera_mirrored": true,
+	})
+	api.requireStatus(status, http.StatusOK, response)
+	participant = response["participant"].(map[string]any)
+	if participant["camera_mirrored"] != true {
+		t.Fatalf("camera mirror update should be returned to every snapshot consumer: %v", participant)
+	}
+	status, response = api.request(http.MethodGet, "/rooms/"+roomID+"/live", owner.Token, nil)
+	api.requireStatus(status, http.StatusOK, response)
+	participant = participantByUserID(t, response["live"].(map[string]any), owner.User["id"].(string))
+	if participant["camera_mirrored"] != true {
+		t.Fatalf("camera mirror should be present in the shared live snapshot: %v", participant)
+	}
+
+	participant = join("clive_camera_mirror_2")
+	if participant["camera_mirrored"] != false {
+		t.Fatalf("a new live session should reset camera mirror state: %v", participant)
+	}
+}
+
 func TestLiveScreenViewersTrackOnlyActiveRemoteWatchers(t *testing.T) {
 	api := newAPIHarness(t)
 	broadcaster := api.register("screen_view_broadcaster")

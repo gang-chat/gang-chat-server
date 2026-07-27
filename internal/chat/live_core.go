@@ -62,14 +62,15 @@ func (h *Handler) joinLive(c *gin.Context) {
 		`INSERT INTO live_participants (
 		   live_session_id, room_id, user_id, client_live_session_id, joined_at, updated_at,
 		   mic_muted, mic_blocked, headphones_muted, headphones_blocked,
-		   voice_blocked, camera_on, screen_sharing, watching_screen_user_id, connection_state
-		 ) VALUES (?, ?, ?, ?, ?, ?, 1, 0, 0, 0, 0, 0, 0, NULL, 'joining')
+		   voice_blocked, camera_on, camera_mirrored, screen_sharing, watching_screen_user_id, connection_state
+		 ) VALUES (?, ?, ?, ?, ?, ?, 1, 0, 0, 0, 0, 0, 0, 0, NULL, 'joining')
 		 ON DUPLICATE KEY UPDATE
 		   live_session_id = VALUES(live_session_id),
 		   client_live_session_id = VALUES(client_live_session_id),
 		   joined_at = VALUES(joined_at),
 		   updated_at = VALUES(updated_at),
 		   camera_on = 0,
+		   camera_mirrored = 0,
 		   screen_sharing = 0,
 		   watching_screen_user_id = NULL,
 		   connection_state = 'joining'`,
@@ -236,7 +237,7 @@ func (h *Handler) updateMyLiveState(c *gin.Context) {
 		h.jsonError(c, http.StatusBadRequest, "bad_request", "invalid JSON body")
 		return
 	}
-	if req.MicMuted == nil && req.HeadphonesMuted == nil && req.CameraOn == nil && req.ScreenSharing == nil && req.ConnectionState == nil {
+	if req.MicMuted == nil && req.HeadphonesMuted == nil && req.CameraOn == nil && req.CameraMirrored == nil && req.ScreenSharing == nil && req.ConnectionState == nil {
 		h.jsonError(c, http.StatusBadRequest, "validation_failed", "at least one live state field is required")
 		return
 	}
@@ -295,6 +296,10 @@ func (h *Handler) updateMyLiveState(c *gin.Context) {
 	if req.CameraOn != nil {
 		sets = append(sets, "camera_on = ?")
 		args = append(args, boolToInt(*req.CameraOn))
+	}
+	if req.CameraMirrored != nil {
+		sets = append(sets, "camera_mirrored = ?")
+		args = append(args, boolToInt(*req.CameraMirrored))
 	}
 	if req.ScreenSharing != nil {
 		sets = append(sets, "screen_sharing = ?")
@@ -356,7 +361,7 @@ func (h *Handler) buildLiveState(roomID string, fallbackUpdatedAt int64) (liveSt
 		`SELECT lp.live_session_id, lp.joined_at, lp.updated_at,
 		        lp.mic_muted, lp.mic_blocked,
 		        lp.headphones_muted, lp.headphones_blocked,
-		        lp.voice_blocked, lp.camera_on,
+		        lp.voice_blocked, lp.camera_on, lp.camera_mirrored,
 		        lp.screen_sharing, lp.connection_state, u.id, u.uid, u.username,
 		        u.display_name, u.avatar_url, u.default_avatar_key,
 		        rm.room_display_name, rm.role
@@ -411,7 +416,7 @@ func (h *Handler) liveParticipantForUser(roomID, userID string) (liveParticipant
 		`SELECT lp.live_session_id, lp.joined_at, lp.updated_at,
 		        lp.mic_muted, lp.mic_blocked,
 		        lp.headphones_muted, lp.headphones_blocked,
-		        lp.voice_blocked, lp.camera_on,
+		        lp.voice_blocked, lp.camera_on, lp.camera_mirrored,
 		        lp.screen_sharing, lp.connection_state, u.id, u.uid, u.username,
 		        u.display_name, u.avatar_url, u.default_avatar_key,
 		        rm.room_display_name, rm.role
