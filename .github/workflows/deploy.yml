@@ -129,8 +129,18 @@ jobs:
              ss -ltn 2>/dev/null | grep -E "(:80|:443|:21116)[[:space:]]" || true
              echo "--- nginx state ---"
              systemctl is-active nginx 2>/dev/null || true
+             echo "--- nginx local TLS route ---"
+             curl --insecure --silent --show-error --max-time 5 \
+               --resolve ky-z.com:443:127.0.0.1 \
+               --output /dev/null --write-out "HTTP %{http_code}\n" \
+               https://ky-z.com/health || true
+             echo "--- DNS route ---"
+             getent ahostsv4 ky-z.com 2>/dev/null | head -n 3 || true
              echo "--- configured proxy targets ---"
              grep -RhsE "^[[:space:]]*proxy_pass[[:space:]]+" /etc/nginx/sites-enabled /etc/nginx/conf.d 2>/dev/null || true
+             echo "--- nginx routing summary ---"
+             grep -RhsE "^[[:space:]]*(server_name|location|proxy_pass|return[[:space:]]+503|error_page)" \
+               /etc/nginx/sites-enabled /etc/nginx/conf.d 2>/dev/null || true
              echo "--- recent nginx errors ---"
              tail -n 30 /var/log/nginx/error.log 2>/dev/null || true'
           exit 1
