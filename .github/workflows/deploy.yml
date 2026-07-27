@@ -99,3 +99,38 @@ jobs:
             "cd '$DEPLOY_PATH' \
              && chmod +x lib.sh start.sh stop.sh restart.sh activate-gang.sh gang-server.new \
              && ./activate-gang.sh"
+
+      - name: Verify public reverse proxy
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_PORT: ${{ secrets.DEPLOY_PORT }}
+          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+          PUBLIC_HEALTH_URL: https://ky-z.com/health
+        run: |
+          for attempt in $(seq 1 10); do
+            if curl --fail --silent --max-time 5 "$PUBLIC_HEALTH_URL" >/dev/null; then
+              echo "Public health check passed on attempt $attempt"
+              exit 0
+            fi
+            sleep 2
+          done
+
+          echo "Public reverse proxy remained unhealthy; collecting safe diagnostics" >&2
+          PORT="${DEPLOY_PORT:-22}"
+          ssh \
+            -i ~/.ssh/id_deploy \
+            -o BatchMode=yes \
+            -p "$PORT" \
+            "$DEPLOY_USER@$DEPLOY_HOST" \
+            'echo "--- local app health ---"
+             curl --fail --silent --show-error --max-time 5 http://127.0.0.1:21116/health || true
+             echo
+             echo "--- listening ports ---"
+             ss -ltn 2>/dev/null | grep -E "(:80|:443|:21116)[[:space:]]" || true
+             echo "--- nginx state ---"
+             systemctl is-active nginx 2>/dev/null || true
+             echo "--- configured proxy targets ---"
+             grep -RhsE "^[[:space:]]*proxy_pass[[:space:]]+" /etc/nginx/sites-enabled /etc/nginx/conf.d 2>/dev/null || true
+             echo "--- recent nginx errors ---"
+             tail -n 30 /var/log/nginx/error.log 2>/dev/null || true'
+          exit 1
