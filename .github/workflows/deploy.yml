@@ -105,7 +105,7 @@ jobs:
           DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
           DEPLOY_PORT: ${{ secrets.DEPLOY_PORT }}
           DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
-          PUBLIC_HEALTH_URL: https://ky-z.com/health
+          PUBLIC_HEALTH_URL: https://ky-z.com/gang-chat/health
         run: |
           for attempt in $(seq 1 10); do
             if curl --fail --silent --max-time 5 "$PUBLIC_HEALTH_URL" >/dev/null; then
