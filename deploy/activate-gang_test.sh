@@ -34,13 +34,15 @@ write_service "$TEST_ROOT/gang-server" old run
 APP_DIR="$TEST_ROOT" "$TEST_ROOT/start.sh" gang
 
 write_service "$TEST_ROOT/gang-server.new" new run
-APP_DIR="$TEST_ROOT" "$TEST_ROOT/activate-gang.sh"
+APP_DIR="$TEST_ROOT" GANG_HEALTH_URL='' GANG_HEALTH_ATTEMPTS=2 \
+  GANG_HEALTH_DELAY_SECONDS=0.1 "$TEST_ROOT/activate-gang.sh"
 grep -qx 'new' <(tail -n 1 "$TEST_ROOT/started")
 test ! -e "$TEST_ROOT/gang-server.previous"
 APP_DIR="$TEST_ROOT" "$TEST_ROOT/stop.sh" gang
 
 write_service "$TEST_ROOT/gang-server.new" broken fail
-if APP_DIR="$TEST_ROOT" "$TEST_ROOT/activate-gang.sh"; then
+if APP_DIR="$TEST_ROOT" GANG_HEALTH_URL='' GANG_HEALTH_ATTEMPTS=2 \
+  GANG_HEALTH_DELAY_SECONDS=0.1 "$TEST_ROOT/activate-gang.sh"; then
   echo "expected the failed candidate activation to return non-zero" >&2
   exit 1
 fi
