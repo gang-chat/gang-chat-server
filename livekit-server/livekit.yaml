@@ -7,6 +7,12 @@ rtc:
   node_ip: 45.205.28.177
   stun_servers:
     - 45.205.28.177:3478
+audio:
+  # Keep active-speaker highlighting responsive without changing the noise
+  # threshold. LiveKit defaults to 500 ms updates smoothed over 4 intervals;
+  # this reduces the visible transition to roughly half a second.
+  update_interval: 250
+  smooth_intervals: 2
 keys:
   ikun: yingmianzoulaidenirangworucichunchunyudong
 webhook:
