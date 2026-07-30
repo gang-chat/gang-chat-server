@@ -118,12 +118,15 @@ func main() {
 	// LiveKit webhooks authenticate via their own signed token, not our JWT,
 	// so they must NOT go through authMW.
 	webhookGroup := r.Group("/webhooks")
-	livekitwebhook.RegisterRoutes(webhookGroup, &livekitwebhook.Handler{
+	livekitWebhookHandler := &livekitwebhook.Handler{
 		DB:          pool,
 		Cfg:         cfg,
 		Bus:         bus,
+		RoomClient:  roomClient,
 		PublishLive: chatHandler.PublishLiveSnapshot,
-	})
+	}
+	livekitwebhook.RegisterRoutes(webhookGroup, livekitWebhookHandler)
+	go livekitWebhookHandler.Run(context.Background())
 
 	log.Printf("api server listening on %s", cfg.Bind)
 	if err := r.Run(cfg.Bind); err != nil {

@@ -7,27 +7,37 @@
 package livekitwebhook
 
 import (
+	"context"
 	"database/sql"
 	"log"
 	"net/http"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/livekit/protocol/auth"
+	"github.com/livekit/protocol/livekit"
 	"github.com/livekit/protocol/webhook"
+	lksdk "github.com/livekit/server-sdk-go/v2"
 	"github.com/zhuangkaiyi/gang-chat/server/internal/config"
 	"github.com/zhuangkaiyi/gang-chat/server/internal/eventbus"
 	livekittoken "github.com/zhuangkaiyi/gang-chat/server/internal/livekit"
 )
 
 type Handler struct {
-	DB  *sql.DB
-	Cfg *config.Config
-	Bus *eventbus.Bus
+	DB         *sql.DB
+	Cfg        *config.Config
+	Bus        *eventbus.Bus
+	RoomClient *lksdk.RoomServiceClient
 	// PublishLive lets the webhook reuse the chat handler's snapshot builder
 	// (buildLiveState / livePreview) without an import cycle. Injected from
 	// main.go as chatHandler.PublishLiveSnapshot.
 	PublishLive func(roomID, eventType string, extra map[string]any)
 }
+
+const (
+	liveReconnectGracePeriod = 30 * time.Second
+	liveReconnectSweepPeriod = 5 * time.Second
+)
 
 func RegisterRoutes(g *gin.RouterGroup, h *Handler) {
 	g.POST("/livekit", h.receive)
@@ -59,21 +69,45 @@ func (h *Handler) receive(c *gin.Context) {
 		}
 		// Business room id == LiveKit room name (live_core.go issues tokens
 		// with Room = roomID), and participant identity == user_id.
-		query, args := participantLeftDelete(
+		query, args := participantLeftReconnectUpdate(
 			roomName,
 			identity,
 			ev.GetParticipant().GetMetadata(),
 			ev.GetParticipant().GetJoinedAtMs(),
+			time.Now().UnixMilli(),
 		)
 		res, err := h.DB.Exec(query, args...)
 		if err != nil {
-			log.Printf("livekit webhook: delete participant failed: %v", err)
+			log.Printf("livekit webhook: mark participant reconnecting failed: %v", err)
 			break
 		}
 		if affected, _ := res.RowsAffected(); affected > 0 {
-			h.publish(roomName, "live_participant_left", map[string]any{
+			h.publish(roomName, "live_participant_reconnecting", map[string]any{
 				"user_id": identity,
 				"reason":  "livekit_disconnected",
+			})
+		}
+	case "participant_joined":
+		roomName := ev.GetRoom().GetName()
+		identity := ev.GetParticipant().GetIdentity()
+		if roomName == "" || identity == "" {
+			break
+		}
+		query, args := participantRejoinedUpdate(
+			roomName,
+			identity,
+			ev.GetParticipant().GetMetadata(),
+			ev.GetParticipant().GetJoinedAtMs(),
+			time.Now().UnixMilli(),
+		)
+		res, err := h.DB.Exec(query, args...)
+		if err != nil {
+			log.Printf("livekit webhook: restore reconnected participant failed: %v", err)
+			break
+		}
+		if affected, _ := res.RowsAffected(); affected > 0 {
+			h.publish(roomName, "live_participant_reconnected", map[string]any{
+				"user_id": identity,
 			})
 		}
 	case "room_finished":
@@ -81,37 +115,215 @@ func (h *Handler) receive(c *gin.Context) {
 		if roomName == "" {
 			break
 		}
-		if _, err := h.DB.Exec(`DELETE FROM live_participants WHERE room_id = ?`, roomName); err != nil {
-			log.Printf("livekit webhook: clear room failed: %v", err)
+		res, err := h.DB.Exec(
+			`UPDATE live_participants
+			    SET connection_state = 'reconnecting', updated_at = ?
+			  WHERE room_id = ? AND connection_state != 'left'`,
+			time.Now().UnixMilli(),
+			roomName,
+		)
+		if err != nil {
+			log.Printf("livekit webhook: mark finished room reconnecting failed: %v", err)
 			break
 		}
-		h.publish(roomName, "live_room_finished", nil)
+		_, _ = h.DB.Exec(
+			`DELETE FROM live_participants WHERE room_id = ? AND connection_state = 'left'`,
+			roomName,
+		)
+		if affected, _ := res.RowsAffected(); affected > 0 {
+			h.publish(roomName, "live_room_reconnecting", nil)
+		} else {
+			h.publish(roomName, "live_room_finished", nil)
+		}
 	}
 	c.Status(http.StatusOK)
 }
 
-func participantLeftDelete(
+func participantLeftReconnectUpdate(
 	roomName,
 	identity,
 	metadata string,
 	joinedAtMillis int64,
+	updatedAtMillis int64,
 ) (string, []any) {
 	if clientLiveSessionID, ok :=
 		livekittoken.ClientLiveSessionIDFromMetadata(metadata); ok {
-		return `DELETE FROM live_participants
-		        WHERE room_id = ? AND user_id = ? AND client_live_session_id = ?`,
-			[]any{roomName, identity, clientLiveSessionID}
+		return `UPDATE live_participants
+		           SET connection_state = 'reconnecting', updated_at = ?
+		         WHERE room_id = ? AND user_id = ? AND client_live_session_id = ?
+		           AND connection_state != 'left'`,
+			[]any{updatedAtMillis, roomName, identity, clientLiveSessionID}
 	}
 	if joinedAtMillis > 0 {
-		// Compatibility for participants whose token predates session metadata.
-		// A newer reconnect rewrites joined_at, so its row survives a delayed
-		// participant_left webhook from the superseded LiveKit connection.
-		return `DELETE FROM live_participants
-		        WHERE room_id = ? AND user_id = ? AND joined_at <= ?`,
-			[]any{roomName, identity, joinedAtMillis}
+		return `UPDATE live_participants
+		           SET connection_state = 'reconnecting', updated_at = ?
+		         WHERE room_id = ? AND user_id = ? AND joined_at <= ?
+		           AND connection_state != 'left'`,
+			[]any{updatedAtMillis, roomName, identity, joinedAtMillis}
 	}
-	return `DELETE FROM live_participants WHERE room_id = ? AND user_id = ?`,
-		[]any{roomName, identity}
+	return `UPDATE live_participants
+	           SET connection_state = 'reconnecting', updated_at = ?
+	         WHERE room_id = ? AND user_id = ? AND connection_state != 'left'`,
+		[]any{updatedAtMillis, roomName, identity}
+}
+
+func participantRejoinedUpdate(
+	roomName,
+	identity,
+	metadata string,
+	joinedAtMillis int64,
+	updatedAtMillis int64,
+) (string, []any) {
+	if clientLiveSessionID, ok :=
+		livekittoken.ClientLiveSessionIDFromMetadata(metadata); ok {
+		return `UPDATE live_participants
+		           SET connection_state = 'online', updated_at = ?
+		         WHERE room_id = ? AND user_id = ? AND client_live_session_id = ?
+		           AND connection_state = 'reconnecting'`,
+			[]any{updatedAtMillis, roomName, identity, clientLiveSessionID}
+	}
+	if joinedAtMillis > 0 {
+		return `UPDATE live_participants
+		           SET connection_state = 'online', updated_at = ?
+		         WHERE room_id = ? AND user_id = ? AND joined_at <= ?
+		           AND connection_state = 'reconnecting'`,
+			[]any{updatedAtMillis, roomName, identity, joinedAtMillis}
+	}
+	return `UPDATE live_participants
+	           SET connection_state = 'online', updated_at = ?
+	         WHERE room_id = ? AND user_id = ? AND connection_state = 'reconnecting'`,
+		[]any{updatedAtMillis, roomName, identity}
+}
+
+type reconnectingParticipant struct {
+	roomID              string
+	userID              string
+	clientLiveSessionID string
+}
+
+// Run removes participants only after LiveKit has exhausted its own reconnect
+// window. A successful internal SDK restart emits participant_joined with the
+// same client session id and changes the row back to online without requiring a
+// second business-layer /live/join request.
+func (h *Handler) Run(ctx context.Context) {
+	ticker := time.NewTicker(liveReconnectSweepPeriod)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			h.cleanupExpiredReconnects(ctx)
+		}
+	}
+}
+
+func (h *Handler) cleanupExpiredReconnects(ctx context.Context) {
+	cutoff := time.Now().Add(-liveReconnectGracePeriod).UnixMilli()
+	rows, err := h.DB.QueryContext(
+		ctx,
+		`SELECT room_id, user_id, client_live_session_id
+		   FROM live_participants
+		  WHERE connection_state = 'reconnecting' AND updated_at <= ?`,
+		cutoff,
+	)
+	if err != nil {
+		log.Printf("livekit webhook: list expired reconnects failed: %v", err)
+		return
+	}
+	defer rows.Close()
+
+	byRoom := make(map[string][]reconnectingParticipant)
+	for rows.Next() {
+		var participant reconnectingParticipant
+		if err := rows.Scan(
+			&participant.roomID,
+			&participant.userID,
+			&participant.clientLiveSessionID,
+		); err != nil {
+			log.Printf("livekit webhook: scan expired reconnect failed: %v", err)
+			return
+		}
+		byRoom[participant.roomID] = append(byRoom[participant.roomID], participant)
+	}
+	if err := rows.Err(); err != nil {
+		log.Printf("livekit webhook: iterate expired reconnects failed: %v", err)
+		return
+	}
+
+	for roomID, participants := range byRoom {
+		active, known := h.activeParticipantIdentities(ctx, roomID)
+		if !known {
+			// A transient LiveKit admin-API failure must not evict users from the
+			// business roster. Leave the rows for the next sweep.
+			continue
+		}
+		changed := false
+		for _, participant := range participants {
+			var res sql.Result
+			if _, isActive := active[participant.userID]; isActive {
+				res, err = h.DB.ExecContext(
+					ctx,
+					`UPDATE live_participants
+					    SET connection_state = 'online', updated_at = ?
+					  WHERE room_id = ? AND user_id = ? AND client_live_session_id = ?
+					    AND connection_state = 'reconnecting'`,
+					time.Now().UnixMilli(),
+					participant.roomID,
+					participant.userID,
+					participant.clientLiveSessionID,
+				)
+			} else {
+				res, err = h.DB.ExecContext(
+					ctx,
+					`DELETE FROM live_participants
+					  WHERE room_id = ? AND user_id = ? AND client_live_session_id = ?
+					    AND connection_state = 'reconnecting' AND updated_at <= ?`,
+					participant.roomID,
+					participant.userID,
+					participant.clientLiveSessionID,
+					cutoff,
+				)
+			}
+			if err != nil {
+				log.Printf("livekit webhook: reconcile expired participant failed: %v", err)
+				continue
+			}
+			if affected, _ := res.RowsAffected(); affected > 0 {
+				changed = true
+			}
+		}
+		if changed {
+			h.publish(roomID, "live_participants_reconciled", nil)
+		}
+	}
+}
+
+func (h *Handler) activeParticipantIdentities(
+	ctx context.Context,
+	roomID string,
+) (map[string]struct{}, bool) {
+	if h.RoomClient == nil ||
+		h.Cfg == nil ||
+		h.Cfg.LiveKitAPIKey == "" ||
+		h.Cfg.LiveKitAPISecret == "" {
+		return map[string]struct{}{}, true
+	}
+	requestCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	response, err := h.RoomClient.ListParticipants(
+		requestCtx,
+		&livekit.ListParticipantsRequest{Room: roomID},
+	)
+	if err != nil {
+		log.Printf("livekit webhook: list active participants failed: %v", err)
+		return nil, false
+	}
+	active := make(map[string]struct{}, len(response.Participants))
+	for _, participant := range response.Participants {
+		active[participant.GetIdentity()] = struct{}{}
+	}
+	return active, true
 }
 
 func (h *Handler) publish(roomID, eventType string, extra map[string]any) {
