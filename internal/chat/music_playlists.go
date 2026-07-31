@@ -25,6 +25,10 @@ type createMusicPlaylistRequest struct {
 	Name string `json:"name"`
 }
 
+type renameMusicPlaylistRequest struct {
+	Name string `json:"name"`
+}
+
 type addMusicPlaylistItemRequest struct {
 	TrackID    string   `json:"track_id"`
 	Source     string   `json:"source"`
@@ -126,6 +130,37 @@ func (h *Handler) deleteMyMusicPlaylist(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"ok": true})
+}
+
+func (h *Handler) renameMyMusicPlaylist(c *gin.Context) {
+	var req renameMusicPlaylistRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		h.jsonError(c, http.StatusBadRequest, "bad_request", "invalid JSON body")
+		return
+	}
+	name := strings.TrimSpace(req.Name)
+	if name == "" || utf8.RuneCountInString(name) > maxPlaylistNameRunes {
+		h.jsonError(c, http.StatusBadRequest, "validation_failed", "playlist name must contain 1 to 64 characters")
+		return
+	}
+	playlist, err := h.Playlists.RenameUserPlaylist(
+		c.Request.Context(),
+		currentUserID(c),
+		c.Param("playlist_id"),
+		name,
+	)
+	if err != nil {
+		switch {
+		case errors.Is(err, musicbox.ErrPlaylistNotFound):
+			h.jsonError(c, http.StatusNotFound, "not_found", "music playlist not found")
+		case isDuplicateMusicPlaylistName(err):
+			h.jsonError(c, http.StatusConflict, "playlist_name_conflict", "playlist name already exists")
+		default:
+			h.jsonError(c, http.StatusInternalServerError, "internal_error", "rename music playlist failed")
+		}
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"playlist": musicPlaylistPayload(playlist)})
 }
 
 func (h *Handler) reorderMyMusicPlaylists(c *gin.Context) {

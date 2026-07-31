@@ -37,6 +37,34 @@ func TestPersonalMusicPlaylistCRUDAndOwnership(t *testing.T) {
 		t.Fatalf("duplicate name code = %q, response=%v", code, response)
 	}
 
+	status, response = api.request(
+		http.MethodPatch,
+		"/me/music-box/playlists/"+playlistID,
+		owner.Token,
+		map[string]any{"name": "夜间精选"},
+	)
+	api.requireStatus(status, http.StatusOK, response)
+	renamed := response["playlist"].(map[string]any)
+	if renamed["name"] != "夜间精选" || renamed["revision"] != float64(2) {
+		t.Fatalf("unexpected renamed playlist: %v", renamed)
+	}
+
+	status, response = api.request(
+		http.MethodPatch,
+		"/me/music-box/playlists/"+playlistID,
+		other.Token,
+		map[string]any{"name": "越权重命名"},
+	)
+	api.requireStatus(status, http.StatusNotFound, response)
+
+	status, response = api.request(
+		http.MethodPatch,
+		"/me/music-box/playlists/"+playlistID,
+		owner.Token,
+		map[string]any{"name": " "},
+	)
+	api.requireStatus(status, http.StatusBadRequest, response)
+
 	for _, track := range []map[string]any{
 		{
 			"track_id": "track_1",

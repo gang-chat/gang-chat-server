@@ -312,6 +312,53 @@ func (s *PlaylistStore) DeleteUserPlaylist(
 	return affected > 0, err
 }
 
+func (s *PlaylistStore) RenameUserPlaylist(
+	ctx context.Context,
+	ownerUserID, playlistID, name string,
+) (PlaylistSummary, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return PlaylistSummary{}, err
+	}
+	defer tx.Rollback()
+
+	now := nowMillis()
+	result, err := tx.ExecContext(
+		ctx,
+		`UPDATE music_playlists
+		 SET name = ?, revision = revision + 1, updated_at = ?
+		 WHERE id = ? AND scope_type = 'user' AND owner_user_id = ?`,
+		name,
+		now,
+		playlistID,
+		ownerUserID,
+	)
+	if err != nil {
+		return PlaylistSummary{}, err
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return PlaylistSummary{}, err
+	}
+	if affected == 0 {
+		return PlaylistSummary{}, ErrPlaylistNotFound
+	}
+	playlist, err := s.userPlaylistSummary(
+		ctx,
+		tx,
+		ownerUserID,
+		playlistID,
+		false,
+	)
+	if err != nil {
+		return PlaylistSummary{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return PlaylistSummary{}, err
+	}
+	return playlist, nil
+}
+
 // PinUserPlaylists moves the requested playlists to the front of the owner's
 // saved-playlist order. The request order is preserved, as is the relative
 // order of every unselected playlist.
