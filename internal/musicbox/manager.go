@@ -55,6 +55,7 @@ type Manager struct {
 	tc      *transcoder
 	gd      *gdmusic.Client
 	qq      *qqmusic.Client // nil when QQ音乐 integration is disabled
+	search  *searchCoordinator
 	tokenFn TokenFunc
 
 	// onRoomChanged is invoked (room id) whenever a room's music box state or
@@ -85,6 +86,7 @@ func NewManager(db *sql.DB, cfg Config, tokenFn TokenFunc, onRoomChanged func(st
 		onRoomChanged: onRoomChanged,
 		players:       map[string]*player{},
 	}
+	m.search = newSearchCoordinator(m.searchUpstream)
 	// A restart wipes the music box clean: clear every room's queue and state
 	// in the DB and delete all transcoded files on disk. Nothing here is worth
 	// preserving across restarts — playback can't resume mid-track anyway, and
@@ -127,6 +129,13 @@ type SearchTrack struct {
 // meaning the GD default) uses the GD API. Results are normalized so callers
 // don't branch on source.
 func (m *Manager) Search(ctx context.Context, source, keyword string, count, page int) ([]SearchTrack, error) {
+	if m.search == nil {
+		return m.searchUpstream(ctx, source, keyword, count, page)
+	}
+	return m.search.Search(ctx, source, keyword, count, page)
+}
+
+func (m *Manager) searchUpstream(ctx context.Context, source, keyword string, count, page int) ([]SearchTrack, error) {
 	if source == SourceTencent {
 		if m.qq == nil {
 			return nil, fmt.Errorf("musicbox: QQ音乐 source is not configured")
