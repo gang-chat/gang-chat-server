@@ -38,6 +38,12 @@ type deleteMusicPlaylistItemsRequest struct {
 	ItemIDs []string `json:"item_ids"`
 }
 
+type reorderMusicPlaylistsRequest struct {
+	PlaylistIDs []string `json:"playlist_ids"`
+	PlaylistID  string   `json:"playlist_id"`
+	Direction   string   `json:"direction"`
+}
+
 type reorderMusicPlaylistItemsRequest struct {
 	ItemIDs   []string `json:"item_ids"`
 	ItemID    string   `json:"item_id"`
@@ -117,6 +123,59 @@ func (h *Handler) deleteMyMusicPlaylist(c *gin.Context) {
 	}
 	if !deleted {
 		h.jsonError(c, http.StatusNotFound, "not_found", "music playlist not found")
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"ok": true})
+}
+
+func (h *Handler) reorderMyMusicPlaylists(c *gin.Context) {
+	var req reorderMusicPlaylistsRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		h.jsonError(c, http.StatusBadRequest, "bad_request", "invalid JSON body")
+		return
+	}
+	var err error
+	if strings.TrimSpace(req.PlaylistID) != "" ||
+		strings.TrimSpace(req.Direction) != "" {
+		direction := 0
+		switch strings.TrimSpace(req.Direction) {
+		case "up":
+			direction = -1
+		case "down":
+			direction = 1
+		default:
+			h.jsonError(c, http.StatusBadRequest, "validation_failed", "direction must be up or down")
+			return
+		}
+		err = h.Playlists.MoveUserPlaylist(
+			c.Request.Context(),
+			currentUserID(c),
+			strings.TrimSpace(req.PlaylistID),
+			direction,
+		)
+	} else {
+		playlistIDs := uniqueMusicPlaylistStrings(req.PlaylistIDs)
+		if len(playlistIDs) == 0 ||
+			len(playlistIDs) != len(req.PlaylistIDs) ||
+			len(playlistIDs) > musicbox.MaxUserPlaylists {
+			h.jsonError(c, http.StatusBadRequest, "validation_failed", "playlist_ids must contain 1 to 50 unique values")
+			return
+		}
+		err = h.Playlists.PinUserPlaylists(
+			c.Request.Context(),
+			currentUserID(c),
+			playlistIDs,
+		)
+	}
+	if err != nil {
+		switch {
+		case errors.Is(err, musicbox.ErrPlaylistNotFound):
+			h.jsonError(c, http.StatusNotFound, "not_found", "music playlist not found")
+		case errors.Is(err, musicbox.ErrPlaylistOrder):
+			h.jsonError(c, http.StatusConflict, "playlist_order_conflict", "playlist order changed; refresh and try again")
+		default:
+			h.jsonError(c, http.StatusInternalServerError, "internal_error", "reorder music playlists failed")
+		}
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"ok": true})

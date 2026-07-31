@@ -312,6 +312,187 @@ func (s *PlaylistStore) DeleteUserPlaylist(
 	return affected > 0, err
 }
 
+// PinUserPlaylists moves the requested playlists to the front of the owner's
+// saved-playlist order. The request order is preserved, as is the relative
+// order of every unselected playlist.
+func (s *PlaylistStore) PinUserPlaylists(
+	ctx context.Context,
+	ownerUserID string,
+	playlistIDs []string,
+) error {
+	if len(playlistIDs) == 0 || len(playlistIDs) > MaxUserPlaylists {
+		return ErrPlaylistOrder
+	}
+	selected := make(map[string]struct{}, len(playlistIDs))
+	for _, playlistID := range playlistIDs {
+		playlistID = strings.TrimSpace(playlistID)
+		if playlistID == "" {
+			return ErrPlaylistOrder
+		}
+		if _, exists := selected[playlistID]; exists {
+			return ErrPlaylistOrder
+		}
+		selected[playlistID] = struct{}{}
+	}
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	var lockedUserID string
+	if err := tx.QueryRowContext(
+		ctx,
+		`SELECT id FROM users WHERE id = ? FOR UPDATE`,
+		ownerUserID,
+	).Scan(&lockedUserID); err != nil {
+		return err
+	}
+	rows, err := tx.QueryContext(
+		ctx,
+		`SELECT id FROM music_playlists
+		 WHERE scope_type = 'user' AND owner_user_id = ?
+		 ORDER BY sort_order ASC, created_at ASC, id ASC
+		 FOR UPDATE`,
+		ownerUserID,
+	)
+	if err != nil {
+		return err
+	}
+	currentOrder := make([]string, 0, MaxUserPlaylists)
+	for rows.Next() {
+		var playlistID string
+		if err := rows.Scan(&playlistID); err != nil {
+			rows.Close()
+			return err
+		}
+		currentOrder = append(currentOrder, playlistID)
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	for playlistID := range selected {
+		found := false
+		for _, currentID := range currentOrder {
+			if currentID == playlistID {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return ErrPlaylistOrder
+		}
+	}
+
+	nextOrder := make([]string, 0, len(currentOrder))
+	nextOrder = append(nextOrder, playlistIDs...)
+	for _, playlistID := range currentOrder {
+		if _, pinned := selected[playlistID]; !pinned {
+			nextOrder = append(nextOrder, playlistID)
+		}
+	}
+	if sameStringList(currentOrder, nextOrder) {
+		return tx.Commit()
+	}
+	now := nowMillis()
+	for index, playlistID := range nextOrder {
+		if _, err := tx.ExecContext(
+			ctx,
+			`UPDATE music_playlists
+			 SET sort_order = ?, updated_at = ?
+			 WHERE id = ? AND scope_type = 'user' AND owner_user_id = ?`,
+			(index+1)*10,
+			now,
+			playlistID,
+			ownerUserID,
+		); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
+func (s *PlaylistStore) MoveUserPlaylist(
+	ctx context.Context,
+	ownerUserID, playlistID string,
+	direction int,
+) error {
+	if direction != -1 && direction != 1 {
+		return ErrPlaylistOrder
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	var lockedUserID string
+	if err := tx.QueryRowContext(
+		ctx,
+		`SELECT id FROM users WHERE id = ? FOR UPDATE`,
+		ownerUserID,
+	).Scan(&lockedUserID); err != nil {
+		return err
+	}
+	rows, err := tx.QueryContext(
+		ctx,
+		`SELECT id FROM music_playlists
+		 WHERE scope_type = 'user' AND owner_user_id = ?
+		 ORDER BY sort_order ASC, created_at ASC, id ASC
+		 FOR UPDATE`,
+		ownerUserID,
+	)
+	if err != nil {
+		return err
+	}
+	playlistIDs := make([]string, 0, MaxUserPlaylists)
+	for rows.Next() {
+		var currentID string
+		if err := rows.Scan(&currentID); err != nil {
+			rows.Close()
+			return err
+		}
+		playlistIDs = append(playlistIDs, currentID)
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	currentIndex := -1
+	for index, currentID := range playlistIDs {
+		if currentID == playlistID {
+			currentIndex = index
+			break
+		}
+	}
+	if currentIndex < 0 {
+		return ErrPlaylistNotFound
+	}
+	targetIndex := currentIndex + direction
+	if targetIndex < 0 || targetIndex >= len(playlistIDs) {
+		return ErrPlaylistOrder
+	}
+	playlistIDs[currentIndex], playlistIDs[targetIndex] =
+		playlistIDs[targetIndex], playlistIDs[currentIndex]
+
+	now := nowMillis()
+	for index, currentID := range playlistIDs {
+		if _, err := tx.ExecContext(
+			ctx,
+			`UPDATE music_playlists
+			 SET sort_order = ?, updated_at = ?
+			 WHERE id = ? AND scope_type = 'user' AND owner_user_id = ?`,
+			(index+1)*10,
+			now,
+			currentID,
+			ownerUserID,
+		); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
 func (s *PlaylistStore) UserPlaylistItems(
 	ctx context.Context,
 	ownerUserID, playlistID, keyword, source string,
@@ -785,6 +966,18 @@ func sameStringSet(existing, requested []string) bool {
 	}
 	for _, count := range counts {
 		if count != 0 {
+			return false
+		}
+	}
+	return true
+}
+
+func sameStringList(first, second []string) bool {
+	if len(first) != len(second) {
+		return false
+	}
+	for index, value := range first {
+		if second[index] != value {
 			return false
 		}
 	}

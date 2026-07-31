@@ -127,6 +127,7 @@ func RegisterRoutes(g *gin.RouterGroup, db *sql.DB, cfg *config.Config, bus *eve
 	g.GET("/me/music-box/search", h.searchMyMusicPlaylistTracks)
 	g.GET("/me/music-box/playlists", h.listMyMusicPlaylists)
 	g.POST("/me/music-box/playlists", h.createMyMusicPlaylist)
+	g.PATCH("/me/music-box/playlists/order", h.reorderMyMusicPlaylists)
 	g.GET("/me/music-box/playlists/:playlist_id", h.getMyMusicPlaylist)
 	g.DELETE("/me/music-box/playlists/:playlist_id", h.deleteMyMusicPlaylist)
 	g.POST("/me/music-box/playlists/:playlist_id/items", h.addMyMusicPlaylistItem)
