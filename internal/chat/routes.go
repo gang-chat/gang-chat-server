@@ -37,13 +37,14 @@ func (noopLiveController) SetCanSubscribe(string, string, bool) error           
 func (noopLiveController) MuteMicrophone(string, string, bool) error            { return nil }
 
 type Handler struct {
-	DB       *sql.DB
-	Cfg      *config.Config
-	Bus      *eventbus.Bus
-	Live     liveMediaController
-	Assets   *storage.AssetStorage
-	MusicBox *musicbox.Manager
-	Push     *push.Dispatcher
+	DB        *sql.DB
+	Cfg       *config.Config
+	Bus       *eventbus.Bus
+	Live      liveMediaController
+	Assets    *storage.AssetStorage
+	MusicBox  *musicbox.Manager
+	Playlists *musicbox.PlaylistStore
+	Push      *push.Dispatcher
 
 	stickerPackLocks    keyedMutexes
 	assetLifecycleLocks keyedMutexes
@@ -66,7 +67,15 @@ func RegisterRoutes(g *gin.RouterGroup, db *sql.DB, cfg *config.Config, bus *eve
 			panic(err)
 		}
 	}
-	h := &Handler{DB: db, Cfg: cfg, Bus: bus, Live: live, Assets: assetStore, MusicBox: mb}
+	h := &Handler{
+		DB:        db,
+		Cfg:       cfg,
+		Bus:       bus,
+		Live:      live,
+		Assets:    assetStore,
+		MusicBox:  mb,
+		Playlists: musicbox.NewPlaylistStore(db),
+	}
 	if err := model.EnsureHistoricalMessageRetentionSchema(db); err != nil {
 		log.Printf("chat: ensure historical message retention schema: %v", err)
 	}
@@ -87,6 +96,9 @@ func RegisterRoutes(g *gin.RouterGroup, db *sql.DB, cfg *config.Config, bus *eve
 	}
 	if err := h.ensureStickerAssetLifecycleSchema(); err != nil {
 		log.Printf("chat: ensure sticker asset lifecycle schema: %v", err)
+	}
+	if err := h.Playlists.EnsureSchema(); err != nil {
+		log.Printf("chat: ensure music playlist schema: %v", err)
 	}
 
 	// The music box fans out a fresh snapshot whenever a room's queue or
@@ -112,6 +124,15 @@ func RegisterRoutes(g *gin.RouterGroup, db *sql.DB, cfg *config.Config, bus *eve
 	g.DELETE("/sticker-packs/:pack_id/stickers/:sticker_id", h.deleteSticker)
 	g.GET("/stickers/download", h.downloadStickers)
 	g.POST("/rooms/:room_id/stickers/save", h.saveSticker)
+	g.GET("/me/music-box/search", h.searchMyMusicPlaylistTracks)
+	g.GET("/me/music-box/playlists", h.listMyMusicPlaylists)
+	g.POST("/me/music-box/playlists", h.createMyMusicPlaylist)
+	g.GET("/me/music-box/playlists/:playlist_id", h.getMyMusicPlaylist)
+	g.DELETE("/me/music-box/playlists/:playlist_id", h.deleteMyMusicPlaylist)
+	g.POST("/me/music-box/playlists/:playlist_id/items", h.addMyMusicPlaylistItem)
+	g.DELETE("/me/music-box/playlists/:playlist_id/items", h.deleteMyMusicPlaylistItemsBatch)
+	g.PATCH("/me/music-box/playlists/:playlist_id/items/order", h.reorderMyMusicPlaylistItems)
+	g.DELETE("/me/music-box/playlists/:playlist_id/items/:item_id", h.deleteMyMusicPlaylistItem)
 
 	g.GET("/rooms", h.listRooms)
 	g.POST("/rooms", h.createRoom)
