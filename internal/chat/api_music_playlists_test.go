@@ -300,6 +300,138 @@ func TestPersonalMusicPlaylistBatchPinPersistsOrder(t *testing.T) {
 	api.requireStatus(status, http.StatusBadRequest, response)
 }
 
+func TestRoomMusicPlaylistPermissionsAndIsolation(t *testing.T) {
+	api := newAPIHarness(t)
+	owner := api.register("room_playlist_owner")
+	member := api.register("room_playlist_member")
+	outsider := api.register("room_playlist_outsider")
+	room := api.createRoom(owner.Token, map[string]any{
+		"name":        "Room Playlist A",
+		"join_policy": "open",
+	})
+	roomID := room["id"].(string)
+	otherRoom := api.createRoom(owner.Token, map[string]any{
+		"name":        "Room Playlist B",
+		"join_policy": "open",
+	})
+	otherRoomID := otherRoom["id"].(string)
+	status, response := api.request(
+		http.MethodPost,
+		"/rooms/"+roomID+"/join",
+		member.Token,
+		nil,
+	)
+	api.requireStatus(status, http.StatusOK, response)
+
+	status, response = api.request(
+		http.MethodPost,
+		"/rooms/"+roomID+"/music-box/playlists",
+		member.Token,
+		map[string]any{"name": "member cannot create"},
+	)
+	api.requireStatus(status, http.StatusForbidden, response)
+
+	status, response = api.request(
+		http.MethodPost,
+		"/rooms/"+roomID+"/music-box/playlists",
+		owner.Token,
+		map[string]any{"name": "房间精选"},
+	)
+	api.requireStatus(status, http.StatusCreated, response)
+	playlist := response["playlist"].(map[string]any)
+	playlistID := playlist["id"].(string)
+
+	status, response = api.request(
+		http.MethodPost,
+		"/rooms/"+roomID+"/music-box/playlists",
+		owner.Token,
+		map[string]any{"name": "房间精选"},
+	)
+	api.requireStatus(status, http.StatusConflict, response)
+	if code := responseErrorCode(response); code != "playlist_name_conflict" {
+		t.Fatalf("duplicate room playlist name code = %q, response=%v", code, response)
+	}
+
+	status, response = api.request(
+		http.MethodGet,
+		"/rooms/"+roomID+"/music-box/playlists",
+		member.Token,
+		nil,
+	)
+	api.requireStatus(status, http.StatusOK, response)
+	playlists := response["playlists"].([]any)
+	if len(playlists) != 1 || playlists[0].(map[string]any)["id"] != playlistID {
+		t.Fatalf("member should see the room playlist: %v", response)
+	}
+
+	status, response = api.request(
+		http.MethodGet,
+		"/rooms/"+roomID+"/music-box/playlists",
+		outsider.Token,
+		nil,
+	)
+	api.requireStatus(status, http.StatusNotFound, response)
+
+	track := map[string]any{
+		"track_id": "room_track_1",
+		"source":   "netease",
+		"title":    "房间歌曲",
+		"artists":  []string{"歌手"},
+	}
+	status, response = api.request(
+		http.MethodPost,
+		"/rooms/"+roomID+"/music-box/playlists/"+playlistID+"/items",
+		owner.Token,
+		track,
+	)
+	api.requireStatus(status, http.StatusCreated, response)
+	itemID := response["item"].(map[string]any)["id"].(string)
+
+	status, response = api.request(
+		http.MethodGet,
+		"/rooms/"+roomID+"/music-box/playlists/"+playlistID,
+		member.Token,
+		nil,
+	)
+	api.requireStatus(status, http.StatusOK, response)
+	items := response["items"].([]any)
+	if len(items) != 1 || items[0].(map[string]any)["id"] != itemID {
+		t.Fatalf("member should see room playlist items: %v", response)
+	}
+
+	status, response = api.request(
+		http.MethodDelete,
+		"/rooms/"+roomID+"/music-box/playlists/"+playlistID+"/items/"+itemID,
+		member.Token,
+		nil,
+	)
+	api.requireStatus(status, http.StatusForbidden, response)
+
+	status, response = api.request(
+		http.MethodGet,
+		"/rooms/"+otherRoomID+"/music-box/playlists/"+playlistID,
+		owner.Token,
+		nil,
+	)
+	api.requireStatus(status, http.StatusNotFound, response)
+
+	status, response = api.request(
+		http.MethodPatch,
+		"/rooms/"+otherRoomID+"/music-box/playlists/"+playlistID,
+		owner.Token,
+		map[string]any{"name": "cross-room rename"},
+	)
+	api.requireStatus(status, http.StatusNotFound, response)
+
+	status, response = api.request(
+		http.MethodDelete,
+		"/rooms/"+roomID+"/music-box/playlists/"+playlistID,
+		owner.Token,
+		nil,
+	)
+	api.requireStatus(status, http.StatusOK, response)
+}
+
 func responseErrorCode(response map[string]any) string {
 	errorPayload, _ := response["error"].(map[string]any)
 	code, _ := errorPayload["code"].(string)

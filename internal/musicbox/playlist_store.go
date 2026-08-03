@@ -10,6 +10,7 @@ import (
 
 const (
 	MaxUserPlaylists    = 50
+	MaxRoomPlaylists    = 50
 	MaxPlaylistItems    = 500
 	DefaultPlaylistPage = 50
 	MaxPlaylistPage     = 50
@@ -20,6 +21,7 @@ var (
 	ErrPlaylistLimit     = errors.New("music playlist limit reached")
 	ErrPlaylistItemLimit = errors.New("music playlist item limit reached")
 	ErrPlaylistOrder     = errors.New("invalid music playlist item order")
+	ErrPlaylistName      = errors.New("music playlist name already exists")
 )
 
 // PlaylistStore persists reusable playlists independently from the transient
@@ -70,12 +72,45 @@ type PlaylistItemsPage struct {
 
 type AddPlaylistItemParams struct {
 	OwnerUserID     string
+	RoomID          string
+	AddedByUserID   string
 	PlaylistID      string
 	Source          string
 	ExternalTrackID string
 	Title           string
 	Artists         []string
 	DurationMS      int64
+}
+
+type playlistScope struct {
+	kind        string
+	ownerUserID string
+	roomID      string
+}
+
+func userPlaylistScope(ownerUserID string) playlistScope {
+	return playlistScope{
+		kind:        "user",
+		ownerUserID: ownerUserID,
+	}
+}
+
+func roomPlaylistScope(roomID string) playlistScope {
+	return playlistScope{
+		kind:   "room",
+		roomID: roomID,
+	}
+}
+
+func (scope playlistScope) summaryWhere(alias string) (string, []any) {
+	prefix := ""
+	if alias != "" {
+		prefix = alias + "."
+	}
+	if scope.kind == "room" {
+		return prefix + "scope_type = 'room' AND " + prefix + "room_id = ?", []any{scope.roomID}
+	}
+	return prefix + "scope_type = 'user' AND " + prefix + "owner_user_id = ?", []any{scope.ownerUserID}
 }
 
 func NewPlaylistStore(db *sql.DB) *PlaylistStore {
@@ -545,8 +580,41 @@ func (s *PlaylistStore) UserPlaylistItems(
 	ownerUserID, playlistID, keyword, source string,
 	page, pageSize int,
 ) (PlaylistItemsPage, error) {
+	return s.playlistItems(
+		ctx,
+		userPlaylistScope(ownerUserID),
+		playlistID,
+		keyword,
+		source,
+		page,
+		pageSize,
+	)
+}
+
+func (s *PlaylistStore) RoomPlaylistItems(
+	ctx context.Context,
+	roomID, playlistID, keyword, source string,
+	page, pageSize int,
+) (PlaylistItemsPage, error) {
+	return s.playlistItems(
+		ctx,
+		roomPlaylistScope(roomID),
+		playlistID,
+		keyword,
+		source,
+		page,
+		pageSize,
+	)
+}
+
+func (s *PlaylistStore) playlistItems(
+	ctx context.Context,
+	scope playlistScope,
+	playlistID, keyword, source string,
+	page, pageSize int,
+) (PlaylistItemsPage, error) {
 	page, pageSize = normalizePage(page, pageSize)
-	playlist, err := s.userPlaylistSummary(ctx, s.db, ownerUserID, playlistID, false)
+	playlist, err := s.playlistSummary(ctx, s.db, scope, playlistID, false)
 	if err != nil {
 		return PlaylistItemsPage{}, err
 	}
@@ -633,15 +701,33 @@ func (s *PlaylistStore) AddUserPlaylistItem(
 	ctx context.Context,
 	params AddPlaylistItemParams,
 ) (PlaylistItem, error) {
+	if params.AddedByUserID == "" {
+		params.AddedByUserID = params.OwnerUserID
+	}
+	return s.addPlaylistItem(ctx, userPlaylistScope(params.OwnerUserID), params)
+}
+
+func (s *PlaylistStore) AddRoomPlaylistItem(
+	ctx context.Context,
+	params AddPlaylistItemParams,
+) (PlaylistItem, error) {
+	return s.addPlaylistItem(ctx, roomPlaylistScope(params.RoomID), params)
+}
+
+func (s *PlaylistStore) addPlaylistItem(
+	ctx context.Context,
+	scope playlistScope,
+	params AddPlaylistItemParams,
+) (PlaylistItem, error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return PlaylistItem{}, err
 	}
 	defer tx.Rollback()
-	if _, err := s.userPlaylistSummary(
+	if _, err := s.playlistSummary(
 		ctx,
 		tx,
-		params.OwnerUserID,
+		scope,
 		params.PlaylistID,
 		true,
 	); err != nil {
@@ -727,7 +813,7 @@ func (s *PlaylistStore) AddUserPlaylistItem(
 		item.ID,
 		params.PlaylistID,
 		trackID,
-		params.OwnerUserID,
+		params.AddedByUserID,
 		sortOrder,
 		now,
 		now,
@@ -754,6 +840,33 @@ func (s *PlaylistStore) DeleteUserPlaylistItems(
 	ownerUserID, playlistID string,
 	itemIDs []string,
 ) (int64, error) {
+	return s.deletePlaylistItems(
+		ctx,
+		userPlaylistScope(ownerUserID),
+		playlistID,
+		itemIDs,
+	)
+}
+
+func (s *PlaylistStore) DeleteRoomPlaylistItems(
+	ctx context.Context,
+	roomID, playlistID string,
+	itemIDs []string,
+) (int64, error) {
+	return s.deletePlaylistItems(
+		ctx,
+		roomPlaylistScope(roomID),
+		playlistID,
+		itemIDs,
+	)
+}
+
+func (s *PlaylistStore) deletePlaylistItems(
+	ctx context.Context,
+	scope playlistScope,
+	playlistID string,
+	itemIDs []string,
+) (int64, error) {
 	if len(itemIDs) == 0 {
 		return 0, nil
 	}
@@ -762,10 +875,10 @@ func (s *PlaylistStore) DeleteUserPlaylistItems(
 		return 0, err
 	}
 	defer tx.Rollback()
-	if _, err := s.userPlaylistSummary(
+	if _, err := s.playlistSummary(
 		ctx,
 		tx,
-		ownerUserID,
+		scope,
 		playlistID,
 		true,
 	); err != nil {
@@ -812,15 +925,42 @@ func (s *PlaylistStore) ReorderUserPlaylistItems(
 	ownerUserID, playlistID string,
 	itemIDs []string,
 ) error {
+	return s.reorderPlaylistItems(
+		ctx,
+		userPlaylistScope(ownerUserID),
+		playlistID,
+		itemIDs,
+	)
+}
+
+func (s *PlaylistStore) ReorderRoomPlaylistItems(
+	ctx context.Context,
+	roomID, playlistID string,
+	itemIDs []string,
+) error {
+	return s.reorderPlaylistItems(
+		ctx,
+		roomPlaylistScope(roomID),
+		playlistID,
+		itemIDs,
+	)
+}
+
+func (s *PlaylistStore) reorderPlaylistItems(
+	ctx context.Context,
+	scope playlistScope,
+	playlistID string,
+	itemIDs []string,
+) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
-	if _, err := s.userPlaylistSummary(
+	if _, err := s.playlistSummary(
 		ctx,
 		tx,
-		ownerUserID,
+		scope,
 		playlistID,
 		true,
 	); err != nil {
@@ -883,6 +1023,35 @@ func (s *PlaylistStore) MoveUserPlaylistItem(
 	ownerUserID, playlistID, itemID string,
 	direction int,
 ) error {
+	return s.movePlaylistItem(
+		ctx,
+		userPlaylistScope(ownerUserID),
+		playlistID,
+		itemID,
+		direction,
+	)
+}
+
+func (s *PlaylistStore) MoveRoomPlaylistItem(
+	ctx context.Context,
+	roomID, playlistID, itemID string,
+	direction int,
+) error {
+	return s.movePlaylistItem(
+		ctx,
+		roomPlaylistScope(roomID),
+		playlistID,
+		itemID,
+		direction,
+	)
+}
+
+func (s *PlaylistStore) movePlaylistItem(
+	ctx context.Context,
+	scope playlistScope,
+	playlistID, itemID string,
+	direction int,
+) error {
 	if direction != -1 && direction != 1 {
 		return ErrPlaylistOrder
 	}
@@ -891,10 +1060,10 @@ func (s *PlaylistStore) MoveUserPlaylistItem(
 		return err
 	}
 	defer tx.Rollback()
-	if _, err := s.userPlaylistSummary(
+	if _, err := s.playlistSummary(
 		ctx,
 		tx,
-		ownerUserID,
+		scope,
 		playlistID,
 		true,
 	); err != nil {
@@ -973,16 +1142,34 @@ func (s *PlaylistStore) userPlaylistSummary(
 	ownerUserID, playlistID string,
 	forUpdate bool,
 ) (PlaylistSummary, error) {
+	return s.playlistSummary(
+		ctx,
+		db,
+		userPlaylistScope(ownerUserID),
+		playlistID,
+		forUpdate,
+	)
+}
+
+func (s *PlaylistStore) playlistSummary(
+	ctx context.Context,
+	db playlistQuerier,
+	scope playlistScope,
+	playlistID string,
+	forUpdate bool,
+) (PlaylistSummary, error) {
+	where, scopeArgs := scope.summaryWhere("p")
 	query := `SELECT p.id, p.name, p.description, p.revision,
 	                 (SELECT COUNT(*) FROM music_playlist_items i WHERE i.playlist_id = p.id),
 	                 p.created_at, p.updated_at
 	          FROM music_playlists p
-	          WHERE p.id = ? AND p.scope_type = 'user' AND p.owner_user_id = ?`
+	          WHERE p.id = ? AND ` + where
 	if forUpdate {
 		query += " FOR UPDATE"
 	}
+	args := append([]any{playlistID}, scopeArgs...)
 	var item PlaylistSummary
-	err := db.QueryRowContext(ctx, query, playlistID, ownerUserID).Scan(
+	err := db.QueryRowContext(ctx, query, args...).Scan(
 		&item.ID,
 		&item.Name,
 		&item.Description,
