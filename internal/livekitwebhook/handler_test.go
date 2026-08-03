@@ -49,12 +49,24 @@ func TestParticipantRejoinedOnlyRestoresMatchingReconnect(t *testing.T) {
 		789,
 	)
 	if !strings.Contains(query, "connection_state = 'online'") ||
-		!strings.Contains(query, "connection_state = 'reconnecting'") ||
+		!strings.Contains(query, "connection_state IN ('joining', 'reconnecting')") ||
 		!strings.Contains(query, "client_live_session_id = ?") {
 		t.Fatalf("rejoin update is not reconnect-session scoped: %q", query)
 	}
 	want := []any{int64(789), "room-1", "user-1", "clive-current"}
 	if !reflect.DeepEqual(args, want) {
 		t.Fatalf("unexpected args: %#v", args)
+	}
+}
+
+func TestTransitionSweepIncludesAbandonedJoiningRows(t *testing.T) {
+	if !strings.Contains(
+		expiredLiveTransitionsQuery,
+		"connection_state = 'reconnecting'",
+	) || !strings.Contains(
+		expiredLiveTransitionsQuery,
+		"connection_state = 'joining'",
+	) {
+		t.Fatalf("transition sweep does not cover both states: %q", expiredLiveTransitionsQuery)
 	}
 }

@@ -36,8 +36,14 @@ type Handler struct {
 
 const (
 	liveReconnectGracePeriod = 30 * time.Second
+	liveJoiningGracePeriod   = 2 * time.Minute
 	liveReconnectSweepPeriod = 5 * time.Second
 )
+
+const expiredLiveTransitionsQuery = `SELECT room_id, user_id, client_live_session_id, connection_state
+		   FROM live_participants
+		  WHERE (connection_state = 'reconnecting' AND updated_at <= ?)
+		     OR (connection_state = 'joining' AND updated_at <= ?)`
 
 func RegisterRoutes(g *gin.RouterGroup, h *Handler) {
 	g.POST("/livekit", h.receive)
@@ -179,32 +185,34 @@ func participantRejoinedUpdate(
 		return `UPDATE live_participants
 		           SET connection_state = 'online', updated_at = ?
 		         WHERE room_id = ? AND user_id = ? AND client_live_session_id = ?
-		           AND connection_state = 'reconnecting'`,
+		           AND connection_state IN ('joining', 'reconnecting')`,
 			[]any{updatedAtMillis, roomName, identity, clientLiveSessionID}
 	}
 	if joinedAtMillis > 0 {
 		return `UPDATE live_participants
 		           SET connection_state = 'online', updated_at = ?
 		         WHERE room_id = ? AND user_id = ? AND joined_at <= ?
-		           AND connection_state = 'reconnecting'`,
+		           AND connection_state IN ('joining', 'reconnecting')`,
 			[]any{updatedAtMillis, roomName, identity, joinedAtMillis}
 	}
 	return `UPDATE live_participants
 	           SET connection_state = 'online', updated_at = ?
-	         WHERE room_id = ? AND user_id = ? AND connection_state = 'reconnecting'`,
+	         WHERE room_id = ? AND user_id = ?
+	           AND connection_state IN ('joining', 'reconnecting')`,
 		[]any{updatedAtMillis, roomName, identity}
 }
 
-type reconnectingParticipant struct {
+type pendingLiveParticipant struct {
 	roomID              string
 	userID              string
 	clientLiveSessionID string
+	connectionState     string
 }
 
-// Run removes participants only after LiveKit has exhausted its own reconnect
-// window. A successful internal SDK restart emits participant_joined with the
-// same client session id and changes the row back to online without requiring a
-// second business-layer /live/join request.
+// Run reconciles transitional rows against LiveKit. Reconnecting users get a
+// short seamless-recovery window. A client that dies after /live/join but
+// before LiveKit connects has no participant_left webhook, so stale joining
+// rows also need a longer bounded cleanup window.
 func (h *Handler) Run(ctx context.Context) {
 	ticker := time.NewTicker(liveReconnectSweepPeriod)
 	defer ticker.Stop()
@@ -213,41 +221,43 @@ func (h *Handler) Run(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			h.cleanupExpiredReconnects(ctx)
+			h.cleanupExpiredLiveTransitions(ctx)
 		}
 	}
 }
 
-func (h *Handler) cleanupExpiredReconnects(ctx context.Context) {
-	cutoff := time.Now().Add(-liveReconnectGracePeriod).UnixMilli()
+func (h *Handler) cleanupExpiredLiveTransitions(ctx context.Context) {
+	now := time.Now()
+	reconnectCutoff := now.Add(-liveReconnectGracePeriod).UnixMilli()
+	joiningCutoff := now.Add(-liveJoiningGracePeriod).UnixMilli()
 	rows, err := h.DB.QueryContext(
 		ctx,
-		`SELECT room_id, user_id, client_live_session_id
-		   FROM live_participants
-		  WHERE connection_state = 'reconnecting' AND updated_at <= ?`,
-		cutoff,
+		expiredLiveTransitionsQuery,
+		reconnectCutoff,
+		joiningCutoff,
 	)
 	if err != nil {
-		log.Printf("livekit webhook: list expired reconnects failed: %v", err)
+		log.Printf("livekit webhook: list expired live transitions failed: %v", err)
 		return
 	}
 	defer rows.Close()
 
-	byRoom := make(map[string][]reconnectingParticipant)
+	byRoom := make(map[string][]pendingLiveParticipant)
 	for rows.Next() {
-		var participant reconnectingParticipant
+		var participant pendingLiveParticipant
 		if err := rows.Scan(
 			&participant.roomID,
 			&participant.userID,
 			&participant.clientLiveSessionID,
+			&participant.connectionState,
 		); err != nil {
-			log.Printf("livekit webhook: scan expired reconnect failed: %v", err)
+			log.Printf("livekit webhook: scan expired live transition failed: %v", err)
 			return
 		}
 		byRoom[participant.roomID] = append(byRoom[participant.roomID], participant)
 	}
 	if err := rows.Err(); err != nil {
-		log.Printf("livekit webhook: iterate expired reconnects failed: %v", err)
+		log.Printf("livekit webhook: iterate expired live transitions failed: %v", err)
 		return
 	}
 
@@ -260,6 +270,10 @@ func (h *Handler) cleanupExpiredReconnects(ctx context.Context) {
 		}
 		changed := false
 		for _, participant := range participants {
+			transitionCutoff := reconnectCutoff
+			if participant.connectionState == "joining" {
+				transitionCutoff = joiningCutoff
+			}
 			var res sql.Result
 			if _, isActive := active[participant.userID]; isActive {
 				res, err = h.DB.ExecContext(
@@ -267,26 +281,28 @@ func (h *Handler) cleanupExpiredReconnects(ctx context.Context) {
 					`UPDATE live_participants
 					    SET connection_state = 'online', updated_at = ?
 					  WHERE room_id = ? AND user_id = ? AND client_live_session_id = ?
-					    AND connection_state = 'reconnecting'`,
+					    AND connection_state = ?`,
 					time.Now().UnixMilli(),
 					participant.roomID,
 					participant.userID,
 					participant.clientLiveSessionID,
+					participant.connectionState,
 				)
 			} else {
 				res, err = h.DB.ExecContext(
 					ctx,
 					`DELETE FROM live_participants
 					  WHERE room_id = ? AND user_id = ? AND client_live_session_id = ?
-					    AND connection_state = 'reconnecting' AND updated_at <= ?`,
+					    AND connection_state = ? AND updated_at <= ?`,
 					participant.roomID,
 					participant.userID,
 					participant.clientLiveSessionID,
-					cutoff,
+					participant.connectionState,
+					transitionCutoff,
 				)
 			}
 			if err != nil {
-				log.Printf("livekit webhook: reconcile expired participant failed: %v", err)
+				log.Printf("livekit webhook: reconcile expired live transition failed: %v", err)
 				continue
 			}
 			if affected, _ := res.RowsAffected(); affected > 0 {
