@@ -20,6 +20,8 @@ const (
 var defaultSearchRetryDelays = []time.Duration{
 	150 * time.Millisecond,
 	350 * time.Millisecond,
+	700 * time.Millisecond,
+	1200 * time.Millisecond,
 }
 
 type searchFetchFunc func(

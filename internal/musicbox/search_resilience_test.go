@@ -19,7 +19,7 @@ func TestSearchCoordinatorRetriesEmptyResponseAndCachesRecovery(t *testing.T) {
 			int,
 			int,
 		) ([]SearchTrack, error) {
-			if calls.Add(1) < 3 {
+			if calls.Add(1) < 5 {
 				return []SearchTrack{}, nil
 			}
 			return []SearchTrack{testSearchTrack("track_1", "晴天")}, nil
@@ -39,8 +39,8 @@ func TestSearchCoordinatorRetriesEmptyResponseAndCachesRecovery(t *testing.T) {
 	if len(results) != 1 || results[0].Name != "晴天" {
 		t.Fatalf("unexpected results: %#v", results)
 	}
-	if got := calls.Load(); got != 3 {
-		t.Fatalf("backend calls = %d, want 3", got)
+	if got := calls.Load(); got != 5 {
+		t.Fatalf("backend calls = %d, want 5", got)
 	}
 
 	results[0].Name = "mutated"
@@ -55,8 +55,8 @@ func TestSearchCoordinatorRetriesEmptyResponseAndCachesRecovery(t *testing.T) {
 	if err != nil {
 		t.Fatalf("cached Search returned error: %v", err)
 	}
-	if got := calls.Load(); got != 3 {
-		t.Fatalf("cached backend calls = %d, want 3", got)
+	if got := calls.Load(); got != 5 {
+		t.Fatalf("cached backend calls = %d, want 5", got)
 	}
 	if cached[0].Name != "晴天" || cached[0].Artists[0] != "周杰伦" {
 		t.Fatalf("cache was mutated through caller result: %#v", cached)
@@ -214,8 +214,8 @@ func TestSearchCoordinatorDoesNotCacheEmptyResults(t *testing.T) {
 			t.Fatalf("Search results = %#v, want empty", results)
 		}
 	}
-	if got := calls.Load(); got != 6 {
-		t.Fatalf("backend calls = %d, want 6", got)
+	if got := calls.Load(); got != 10 {
+		t.Fatalf("backend calls = %d, want 10", got)
 	}
 }
 
@@ -278,7 +278,7 @@ func newTestSearchCoordinator(fetch searchFetchFunc) *searchCoordinator {
 		staleTTL:   10 * time.Minute,
 		maxEntries: 16,
 		timeout:    time.Second,
-		retryDelay: []time.Duration{0, 0},
+		retryDelay: []time.Duration{0, 0, 0, 0},
 		now:        time.Now,
 		logf:       func(string, ...any) {},
 	})
