@@ -20,6 +20,8 @@ import (
 // control playback (play/pause/resume/skip/stop). Removing a queue item is
 // allowed for the member who added it or any room admin.
 
+const musicBoxRequestQueueDisplayName = "点歌队列"
+
 func (h *Handler) musicBoxReady(c *gin.Context) bool {
 	if h.MusicBox == nil || !h.MusicBox.Enabled() {
 		h.jsonError(c, http.StatusServiceUnavailable, "music_box_unavailable", "music box is not available")
@@ -201,7 +203,7 @@ func (h *Handler) activateMusicBoxPlaylist(c *gin.Context) {
 			roomID,
 			musicbox.ActiveSourceTemporary,
 			"",
-			"临时歌单",
+			musicBoxRequestQueueDisplayName,
 			"",
 			actorID,
 			nil,
@@ -326,7 +328,7 @@ func (h *Handler) musicBoxStatePayload(roomID string) gin.H {
 		"name": st.ActivePlaylistName,
 	}
 	if st.ActiveSourceType == musicbox.ActiveSourceTemporary {
-		activeSource["name"] = "临时歌单"
+		activeSource["name"] = musicBoxRequestQueueDisplayName
 	} else {
 		activeSource["playlist_id"] = st.ActivePlaylistID
 		activeSource["owner_user_id"] = st.ActivePlaylistOwnerID
