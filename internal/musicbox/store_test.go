@@ -51,12 +51,19 @@ func newTestStore(t *testing.T) *store {
 			title TEXT NOT NULL, artist TEXT NOT NULL,
 			duration_ms BIGINT, status VARCHAR(64) NOT NULL DEFAULT 'pending',
 			file_path TEXT, file_size_bytes BIGINT NOT NULL DEFAULT 0, error TEXT,
-			added_by_user_id VARCHAR(128) NOT NULL, sort_order BIGINT NOT NULL DEFAULT 0,
+			added_by_user_id VARCHAR(128) NOT NULL,
+			queue_scope VARCHAR(32) NOT NULL DEFAULT 'temporary', snapshot_id VARCHAR(128),
+			sort_order BIGINT NOT NULL DEFAULT 0,
 			created_at BIGINT NOT NULL, updated_at BIGINT NOT NULL) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
 		`CREATE TABLE room_music_box_state (
 			room_id VARCHAR(128) PRIMARY KEY NOT NULL, state VARCHAR(64) NOT NULL DEFAULT 'stopped',
 			current_item_id VARCHAR(128), position_ms BIGINT NOT NULL DEFAULT 0,
-			volume INT NOT NULL DEFAULT 100, updated_at BIGINT NOT NULL) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
+			volume INT NOT NULL DEFAULT 100, revision BIGINT NOT NULL DEFAULT 0,
+			playback_mode VARCHAR(32) NOT NULL DEFAULT 'sequential',
+			active_source_type VARCHAR(32) NOT NULL DEFAULT 'temporary',
+			active_playlist_id VARCHAR(128), active_playlist_name TEXT,
+			active_playlist_owner_id VARCHAR(128), active_snapshot_id VARCHAR(128),
+			updated_at BIGINT NOT NULL) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
 		`INSERT INTO users (id) VALUES ('u1')`,
 		`INSERT INTO rooms (id) VALUES ('r1')`,
 	}
@@ -304,6 +311,12 @@ func TestStateRoundTrip(t *testing.T) {
 	st.State = StatePlaying
 	st.CurrentItemID = "a"
 	st.PositionMS = 1234
+	st.Revision = 7
+	st.PlaybackMode = ModeRepeatAll
+	st.ActiveSourceType = ActiveSourceRoomPlaylist
+	st.ActivePlaylistID = "playlist-1"
+	st.ActivePlaylistName = "Shared favorites"
+	st.ActiveSnapshotID = "snapshot-1"
 	if err := s.saveState(*st); err != nil {
 		t.Fatalf("saveState: %v", err)
 	}
@@ -311,7 +324,55 @@ func TestStateRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("getState: %v", err)
 	}
-	if got.State != StatePlaying || got.CurrentItemID != "a" || got.PositionMS != 1234 {
+	if got.State != StatePlaying || got.CurrentItemID != "a" || got.PositionMS != 1234 ||
+		got.Revision != 7 || got.PlaybackMode != ModeRepeatAll ||
+		got.ActiveSourceType != ActiveSourceRoomPlaylist ||
+		got.ActivePlaylistID != "playlist-1" ||
+		got.ActivePlaylistName != "Shared favorites" ||
+		got.ActiveSnapshotID != "snapshot-1" {
 		t.Errorf("round trip = %+v", got)
+	}
+}
+
+func TestScopedQueuesKeepTemporaryAndSavedSnapshotIndependent(t *testing.T) {
+	s := newTestStore(t)
+	add(t, s, "temporary", 10)
+	_, err := s.insertItem(QueueItem{
+		ID: "saved", RoomID: "r1", Source: "netease", TrackID: "saved-track",
+		Title: "Saved", AddedByUserID: "u1", SortOrder: 10,
+		QueueScope: QueueScopeSavedPlaylistSnapshot, SnapshotID: "snapshot-1",
+	})
+	if err != nil {
+		t.Fatalf("insert saved snapshot: %v", err)
+	}
+
+	temporary, err := s.listScopedQueue("r1", QueueScopeTemporary, "")
+	if err != nil || len(temporary) != 1 || temporary[0].ID != "temporary" {
+		t.Fatalf("temporary queue = %+v, err=%v", temporary, err)
+	}
+	saved, err := s.listScopedQueue(
+		"r1",
+		QueueScopeSavedPlaylistSnapshot,
+		"snapshot-1",
+	)
+	if err != nil || len(saved) != 1 || saved[0].ID != "saved" {
+		t.Fatalf("saved queue = %+v, err=%v", saved, err)
+	}
+}
+
+func TestDeleteRoomItemDoesNotCrossRoomBoundary(t *testing.T) {
+	s := newTestStore(t)
+	add(t, s, "a", 10)
+
+	deleted, err := s.deleteRoomItem("another-room", "a")
+	if err != nil {
+		t.Fatalf("delete wrong room: %v", err)
+	}
+	if deleted != nil {
+		t.Fatalf("wrong-room delete returned %+v", deleted)
+	}
+	item, err := s.getRoomItem("r1", "a")
+	if err != nil || item == nil {
+		t.Fatalf("item should still exist: item=%+v err=%v", item, err)
 	}
 }

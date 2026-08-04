@@ -95,3 +95,28 @@ func TestHeartbeatExitsOnDone(t *testing.T) {
 		t.Fatalf("heartbeat kept firing after done: %d -> %d", after, got)
 	}
 }
+
+func TestStopWaitsUntilSnapshotIsStopped(t *testing.T) {
+	p := newTestPlayer(nil)
+	p.advance = func(
+		_ *QueueItem,
+		_ playbackTransition,
+		_ int64,
+	) *QueueItem {
+		return nil
+	}
+	go p.run()
+
+	if err := p.stop(); err != nil {
+		t.Fatalf("stop: %v", err)
+	}
+	state, currentID, positionMS := p.snapshot()
+	if state != StateStopped || currentID != "" || positionMS != 0 {
+		t.Fatalf(
+			"snapshot after stop = (%q, %q, %d), want stopped/empty/0",
+			state,
+			currentID,
+			positionMS,
+		)
+	}
+}

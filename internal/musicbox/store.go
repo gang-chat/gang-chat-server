@@ -2,6 +2,7 @@ package musicbox
 
 import (
 	"database/sql"
+	"fmt"
 	"time"
 )
 
@@ -9,6 +10,75 @@ import (
 // match the rest of the schema.
 type store struct {
 	db *sql.DB
+}
+
+type stateColumn struct {
+	name       string
+	definition string
+}
+
+var nextGenerationStateColumns = []stateColumn{
+	{name: "revision", definition: "BIGINT NOT NULL DEFAULT 0"},
+	{name: "playback_mode", definition: "VARCHAR(32) NOT NULL DEFAULT 'sequential'"},
+	{name: "active_source_type", definition: "VARCHAR(32) NOT NULL DEFAULT 'temporary'"},
+	{name: "active_playlist_id", definition: "VARCHAR(128) NULL"},
+	{name: "active_playlist_name", definition: "VARCHAR(255) NULL"},
+	{name: "active_playlist_owner_id", definition: "VARCHAR(128) NULL"},
+	{name: "active_snapshot_id", definition: "VARCHAR(128) NULL"},
+}
+
+var nextGenerationQueueColumns = []stateColumn{
+	{name: "queue_scope", definition: "VARCHAR(32) NOT NULL DEFAULT 'temporary'"},
+	{name: "snapshot_id", definition: "VARCHAR(128) NULL"},
+}
+
+// ensureNextGenerationSchema is an additive migration.  It deliberately does
+// not replace the legacy state table so a rolling deployment can keep serving
+// old clients while the new snapshot fields become available.
+func (s *store) ensureNextGenerationSchema() error {
+	for _, column := range nextGenerationStateColumns {
+		if err := s.ensureColumn("room_music_box_state", column); err != nil {
+			return err
+		}
+	}
+	for _, column := range nextGenerationQueueColumns {
+		if err := s.ensureColumn("room_music_box_queue", column); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (s *store) ensureColumn(table string, column stateColumn) error {
+	hasColumn := func() (bool, error) {
+		var count int
+		err := s.db.QueryRow(
+			`SELECT COUNT(*) FROM information_schema.COLUMNS
+			 WHERE TABLE_SCHEMA = DATABASE()
+			   AND TABLE_NAME = ? AND COLUMN_NAME = ?`,
+			table,
+			column.name,
+		).Scan(&count)
+		return count != 0, err
+	}
+	exists, err := hasColumn()
+	if err != nil {
+		return fmt.Errorf("inspect %s.%s: %w", table, column.name, err)
+	}
+	if exists {
+		return nil
+	}
+	if _, err := s.db.Exec(
+		"ALTER TABLE `" + table + "` ADD COLUMN `" + column.name + "` " + column.definition,
+	); err != nil {
+		// Multiple service instances can race during a rolling deployment. If
+		// the other instance added the column first, the migration succeeded.
+		if existsAfterRace, inspectErr := hasColumn(); inspectErr == nil && existsAfterRace {
+			return nil
+		}
+		return fmt.Errorf("add %s.%s: %w", table, column.name, err)
+	}
+	return nil
 }
 
 func nowMillis() int64 { return time.Now().UTC().UnixMilli() }
@@ -25,17 +95,22 @@ func scanItem(row interface {
 }) (*QueueItem, error) {
 	var it QueueItem
 	var status string
-	var filePath, errMsg sql.NullString
+	var filePath, errMsg, snapshotID sql.NullString
 	var duration sql.NullInt64
 	if err := row.Scan(
 		&it.ID, &it.RoomID, &it.Source, &it.TrackID, &it.Title, &it.Artist,
 		&duration, &status, &filePath, &it.FileSizeBytes, &errMsg,
-		&it.AddedByUserID, &it.SortOrder, &it.CreatedAt, &it.UpdatedAt,
+		&it.AddedByUserID, &it.QueueScope, &snapshotID,
+		&it.SortOrder, &it.CreatedAt, &it.UpdatedAt,
 	); err != nil {
 		return nil, err
 	}
 	it.FilePath = filePath.String
 	it.Error = errMsg.String
+	it.SnapshotID = snapshotID.String
+	if it.QueueScope == "" {
+		it.QueueScope = QueueScopeTemporary
+	}
 	it.DurationMS = duration.Int64
 	it.Status = QueueStatus(status)
 	return &it, nil
@@ -43,7 +118,7 @@ func scanItem(row interface {
 
 const itemColumns = `id, room_id, source, track_id, title, artist,
 	duration_ms, status, file_path, file_size_bytes, error,
-	added_by_user_id, sort_order, created_at, updated_at`
+	added_by_user_id, queue_scope, snapshot_id, sort_order, created_at, updated_at`
 
 // insertItem adds a new queue row in pending status and returns it.
 func (s *store) insertItem(it QueueItem) (*QueueItem, error) {
@@ -53,15 +128,20 @@ func (s *store) insertItem(it QueueItem) (*QueueItem, error) {
 	if it.Status == "" {
 		it.Status = StatusPending
 	}
+	if it.QueueScope == "" {
+		it.QueueScope = QueueScopeTemporary
+	}
 	_, err := s.db.Exec(
 		`INSERT INTO room_music_box_queue
 		 (id, room_id, source, track_id, title, artist,
 		  duration_ms, status, file_path, file_size_bytes, error,
-		  added_by_user_id, sort_order, created_at, updated_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, 0, NULL, ?, ?, ?, ?)`,
+		  added_by_user_id, queue_scope, snapshot_id,
+		  sort_order, created_at, updated_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, 0, NULL, ?, ?, ?, ?, ?, ?)`,
 		it.ID, it.RoomID, it.Source, it.TrackID, it.Title, it.Artist,
 		nullableDuration(it.DurationMS), string(it.Status),
-		it.AddedByUserID, it.SortOrder, it.CreatedAt, it.UpdatedAt,
+		it.AddedByUserID, string(it.QueueScope), ns(it.SnapshotID),
+		it.SortOrder, it.CreatedAt, it.UpdatedAt,
 	)
 	if err != nil {
 		return nil, err
@@ -101,6 +181,45 @@ func (s *store) listQueue(roomID string) ([]*QueueItem, error) {
 	return items, rows.Err()
 }
 
+func (s *store) listScopedQueue(
+	roomID string,
+	scope QueueScope,
+	snapshotID string,
+) ([]*QueueItem, error) {
+	query := `SELECT ` + itemColumns + ` FROM room_music_box_queue
+		 WHERE room_id = ? AND queue_scope = ?`
+	args := []any{roomID, string(scope)}
+	if scope == QueueScopeSavedPlaylistSnapshot {
+		query += ` AND snapshot_id = ?`
+		args = append(args, snapshotID)
+	}
+	query += ` ORDER BY sort_order ASC, created_at ASC`
+	rows, err := s.db.Query(query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := make([]*QueueItem, 0)
+	for rows.Next() {
+		item, err := scanItem(rows)
+		if err != nil {
+			return nil, err
+		}
+		items = append(items, item)
+	}
+	return items, rows.Err()
+}
+
+func (s *store) countTemporaryQueue(roomID string) (int, error) {
+	var count int
+	err := s.db.QueryRow(
+		`SELECT COUNT(*) FROM room_music_box_queue
+		 WHERE room_id = ? AND queue_scope = 'temporary'`,
+		roomID,
+	).Scan(&count)
+	return count, err
+}
+
 // roomBytes sums transcoded bytes already counted against a room's cap:
 // ready files plus an estimate reserved for in-flight (pending/downloading)
 // items. Since pending items have no file yet, only ready bytes are real;
@@ -129,10 +248,26 @@ func (s *store) countDownloading(roomID string) (int, error) {
 // firstPending returns the oldest pending track in a room (queue order), or
 // nil when none are waiting to download.
 func (s *store) firstPending(roomID string) (*QueueItem, error) {
+	return s.firstPendingInScope(roomID, QueueScopeTemporary, "")
+}
+
+func (s *store) firstPendingInScope(
+	roomID string,
+	scope QueueScope,
+	snapshotID string,
+) (*QueueItem, error) {
+	query := `SELECT ` + itemColumns + ` FROM room_music_box_queue
+		 WHERE room_id = ? AND status = 'pending' AND queue_scope = ?`
+	args := []any{roomID, string(scope)}
+	if scope == QueueScopeSavedPlaylistSnapshot {
+		query += ` AND snapshot_id = ?`
+		args = append(args, snapshotID)
+	}
+	query += ` ORDER BY sort_order ASC, created_at ASC LIMIT 1`
 	row := s.db.QueryRow(
-		`SELECT `+itemColumns+` FROM room_music_box_queue
-		 WHERE room_id = ? AND status = 'pending'
-		 ORDER BY sort_order ASC, created_at ASC LIMIT 1`, roomID)
+		query,
+		args...,
+	)
 	it, err := scanItem(row)
 	if err == sql.ErrNoRows {
 		return nil, nil
@@ -143,7 +278,8 @@ func (s *store) firstPending(roomID string) (*QueueItem, error) {
 func (s *store) nextSortOrder(roomID string) (int64, error) {
 	var max sql.NullInt64
 	err := s.db.QueryRow(
-		`SELECT MAX(sort_order) FROM room_music_box_queue WHERE room_id = ?`, roomID).Scan(&max)
+		`SELECT MAX(sort_order) FROM room_music_box_queue
+		 WHERE room_id = ? AND queue_scope = 'temporary'`, roomID).Scan(&max)
 	if err != nil {
 		return 0, err
 	}
@@ -193,9 +329,86 @@ func (s *store) deleteItem(id string) (*QueueItem, error) {
 	return it, nil
 }
 
-// clearAllQueues removes every queued track across all rooms and resets every
-// room's playback state to stopped. Used at startup so a restart begins with an
-// empty music box (the on-disk .ogg files are wiped separately by the manager).
+// deleteRoomItem applies both identifiers at the mutation boundary.  This is
+// the variant used by HTTP-facing code; deleteItem remains for the internal
+// worker and legacy store tests where the room is already known.
+func (s *store) deleteRoomItem(roomID, id string) (*QueueItem, error) {
+	row := s.db.QueryRow(
+		`SELECT `+itemColumns+` FROM room_music_box_queue WHERE room_id = ? AND id = ?`,
+		roomID,
+		id,
+	)
+	it, err := scanItem(row)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	if _, err := s.db.Exec(
+		`DELETE FROM room_music_box_queue WHERE room_id = ? AND id = ?`,
+		roomID,
+		id,
+	); err != nil {
+		return nil, err
+	}
+	return it, nil
+}
+
+func (s *store) deleteSavedSnapshotsExcept(
+	roomID string,
+	keepSnapshotID string,
+) ([]*QueueItem, error) {
+	items, err := s.listQueue(roomID)
+	if err != nil {
+		return nil, err
+	}
+	removed := make([]*QueueItem, 0)
+	for _, item := range items {
+		if item.QueueScope == QueueScopeSavedPlaylistSnapshot &&
+			item.SnapshotID != keepSnapshotID {
+			removed = append(removed, item)
+		}
+	}
+	query := `DELETE FROM room_music_box_queue
+		 WHERE room_id = ? AND queue_scope = 'saved_playlist_snapshot'`
+	args := []any{roomID}
+	if keepSnapshotID != "" {
+		query += ` AND (snapshot_id IS NULL OR snapshot_id <> ?)`
+		args = append(args, keepSnapshotID)
+	}
+	if _, err := s.db.Exec(query, args...); err != nil {
+		return nil, err
+	}
+	return removed, nil
+}
+
+func (s *store) deleteSavedSnapshot(
+	roomID string,
+	snapshotID string,
+) ([]*QueueItem, error) {
+	items, err := s.listScopedQueue(
+		roomID,
+		QueueScopeSavedPlaylistSnapshot,
+		snapshotID,
+	)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := s.db.Exec(
+		`DELETE FROM room_music_box_queue
+		 WHERE room_id = ? AND queue_scope = 'saved_playlist_snapshot'
+		   AND snapshot_id = ?`,
+		roomID,
+		snapshotID,
+	); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+// clearAllQueues is retained for explicit maintenance and legacy store tests.
+// Normal startup uses resetPlaybackOnStartup so queues and cache files survive.
 func (s *store) clearAllQueues() error {
 	if _, err := s.db.Exec(`DELETE FROM room_music_box_queue`); err != nil {
 		return err
@@ -211,10 +424,81 @@ func (s *store) clearAllQueues() error {
 // order boundary, used to choose the next track. If afterSort is negative it
 // returns the first ready item in the room.
 func (s *store) firstPlayable(roomID string, afterSort int64) (*QueueItem, error) {
+	return s.firstPlayableInScope(
+		roomID,
+		afterSort,
+		QueueScopeTemporary,
+		"",
+	)
+}
+
+func (s *store) firstPlayableInScope(
+	roomID string,
+	afterSort int64,
+	scope QueueScope,
+	snapshotID string,
+) (*QueueItem, error) {
+	query := `SELECT ` + itemColumns + ` FROM room_music_box_queue
+		 WHERE room_id = ? AND status = 'ready' AND sort_order > ?
+		   AND queue_scope = ?`
+	args := []any{roomID, afterSort, string(scope)}
+	if scope == QueueScopeSavedPlaylistSnapshot {
+		query += ` AND snapshot_id = ?`
+		args = append(args, snapshotID)
+	}
+	query += ` ORDER BY sort_order ASC, created_at ASC LIMIT 1`
+	row := s.db.QueryRow(
+		query,
+		args...,
+	)
+	it, err := scanItem(row)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	return it, err
+}
+
+func (s *store) lastPlayableBefore(
+	roomID string,
+	beforeSort int64,
+	scope QueueScope,
+	snapshotID string,
+) (*QueueItem, error) {
+	query := `SELECT ` + itemColumns + ` FROM room_music_box_queue
+		 WHERE room_id = ? AND status = 'ready' AND sort_order < ?
+		   AND queue_scope = ?`
+	args := []any{roomID, beforeSort, string(scope)}
+	if scope == QueueScopeSavedPlaylistSnapshot {
+		query += ` AND snapshot_id = ?`
+		args = append(args, snapshotID)
+	}
+	query += ` ORDER BY sort_order DESC, created_at DESC LIMIT 1`
+	row := s.db.QueryRow(query, args...)
+	it, err := scanItem(row)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	return it, err
+}
+
+func (s *store) lastPlayable(roomID string) (*QueueItem, error) {
 	row := s.db.QueryRow(
 		`SELECT `+itemColumns+` FROM room_music_box_queue
-		 WHERE room_id = ? AND status = 'ready' AND sort_order > ?
-		 ORDER BY sort_order ASC, created_at ASC LIMIT 1`, roomID, afterSort)
+		 WHERE room_id = ? AND status = 'ready'
+		 ORDER BY sort_order DESC, created_at DESC LIMIT 1`, roomID)
+	it, err := scanItem(row)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	return it, err
+}
+
+func (s *store) getRoomItem(roomID, id string) (*QueueItem, error) {
+	row := s.db.QueryRow(
+		`SELECT `+itemColumns+` FROM room_music_box_queue WHERE room_id = ? AND id = ?`,
+		roomID,
+		id,
+	)
 	it, err := scanItem(row)
 	if err == sql.ErrNoRows {
 		return nil, nil
@@ -226,38 +510,82 @@ func (s *store) firstPlayable(roomID string, afterSort int64) (*QueueItem, error
 
 func (s *store) ensureState(roomID string) (*RoomState, error) {
 	_, _ = s.db.Exec(
-		`INSERT IGNORE INTO room_music_box_state (room_id, state, position_ms, volume, updated_at)
-		 VALUES (?, 'stopped', 0, 100, ?)`, roomID, nowMillis())
+		`INSERT IGNORE INTO room_music_box_state
+		 (room_id, state, position_ms, volume, revision, playback_mode,
+		  active_source_type, updated_at)
+		 VALUES (?, 'stopped', 0, 100, 0, 'sequential', 'temporary', ?)`,
+		roomID, nowMillis())
 	return s.getState(roomID)
 }
 
 func (s *store) getState(roomID string) (*RoomState, error) {
 	var st RoomState
 	var state string
-	var current sql.NullString
+	var current, playlistID, playlistName, playlistOwnerID, snapshotID sql.NullString
 	err := s.db.QueryRow(
-		`SELECT room_id, state, current_item_id, position_ms, volume, updated_at
+		`SELECT room_id, state, current_item_id, position_ms, volume,
+		        revision, playback_mode, active_source_type,
+		        active_playlist_id, active_playlist_name,
+		        active_playlist_owner_id, active_snapshot_id, updated_at
 		 FROM room_music_box_state WHERE room_id = ?`, roomID).
-		Scan(&st.RoomID, &state, &current, &st.PositionMS, &st.Volume, &st.UpdatedAt)
+		Scan(&st.RoomID, &state, &current, &st.PositionMS, &st.Volume,
+			&st.Revision, &st.PlaybackMode, &st.ActiveSourceType,
+			&playlistID, &playlistName, &playlistOwnerID, &snapshotID,
+			&st.UpdatedAt)
 	if err == sql.ErrNoRows {
-		return &RoomState{RoomID: roomID, State: StateStopped, Volume: 100}, nil
+		return &RoomState{
+			RoomID: roomID, State: StateStopped, Volume: 100,
+			PlaybackMode: ModeSequential, ActiveSourceType: ActiveSourceTemporary,
+		}, nil
 	}
 	if err != nil {
 		return nil, err
 	}
 	st.State = PlaybackState(state)
+	st.PlaybackMode = NormalizePlaybackMode(string(st.PlaybackMode))
 	st.CurrentItemID = current.String
+	st.ActivePlaylistID = playlistID.String
+	st.ActivePlaylistName = playlistName.String
+	st.ActivePlaylistOwnerID = playlistOwnerID.String
+	st.ActiveSnapshotID = snapshotID.String
+	if st.ActiveSourceType == "" {
+		st.ActiveSourceType = ActiveSourceTemporary
+	}
 	return &st, nil
 }
 
 func (s *store) saveState(st RoomState) error {
 	_, err := s.db.Exec(
-		`INSERT INTO room_music_box_state (room_id, state, current_item_id, position_ms, volume, updated_at)
-		 VALUES (?, ?, ?, ?, ?, ?)
+		`INSERT INTO room_music_box_state
+		 (room_id, state, current_item_id, position_ms, volume, revision, playback_mode,
+		  active_source_type, active_playlist_id, active_playlist_name,
+		  active_playlist_owner_id, active_snapshot_id, updated_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		 ON DUPLICATE KEY UPDATE
 		   state = VALUES(state), current_item_id = VALUES(current_item_id),
 		   position_ms = VALUES(position_ms), volume = VALUES(volume),
+		   revision = VALUES(revision), playback_mode = VALUES(playback_mode),
+		   active_source_type = VALUES(active_source_type),
+		   active_playlist_id = VALUES(active_playlist_id),
+		   active_playlist_name = VALUES(active_playlist_name),
+		   active_playlist_owner_id = VALUES(active_playlist_owner_id),
+		   active_snapshot_id = VALUES(active_snapshot_id),
 		   updated_at = VALUES(updated_at)`,
-		st.RoomID, string(st.State), ns(st.CurrentItemID), st.PositionMS, st.Volume, nowMillis())
+		st.RoomID, string(st.State), ns(st.CurrentItemID), st.PositionMS, st.Volume,
+		st.Revision, string(NormalizePlaybackMode(string(st.PlaybackMode))),
+		string(st.ActiveSourceType), ns(st.ActivePlaylistID), ns(st.ActivePlaylistName),
+		ns(st.ActivePlaylistOwnerID), ns(st.ActiveSnapshotID), nowMillis())
+	return err
+}
+
+// resetPlaybackOnStartup preserves the queue and prepared media while making
+// restart behaviour safe: no room emits audio until a member explicitly
+// presses play again.
+func (s *store) resetPlaybackOnStartup() error {
+	_, err := s.db.Exec(
+		`UPDATE room_music_box_state
+		 SET state = 'stopped', position_ms = 0, revision = revision + 1, updated_at = ?`,
+		nowMillis(),
+	)
 	return err
 }

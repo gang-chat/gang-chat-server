@@ -1,6 +1,8 @@
 package chat
 
 import (
+	"database/sql"
+	"errors"
 	"net/http"
 	"strconv"
 	"strings"
@@ -134,12 +136,130 @@ func (h *Handler) controlMusicBox(c *gin.Context) {
 		return
 	}
 	var req musicBoxControlRequest
-	if err := c.ShouldBindJSON(&req); err != nil || !allowed(req.Action, "play", "pause", "resume", "skip", "next", "stop") {
+	if err := c.ShouldBindJSON(&req); err != nil || !allowed(
+		req.Action,
+		"play", "pause", "resume", "skip", "next", "previous", "set_mode", "stop",
+	) {
 		h.jsonError(c, http.StatusBadRequest, "validation_failed", "invalid music box action")
 		return
 	}
-	if err := h.MusicBox.Control(roomID, req.Action); err != nil {
+	if len(strings.TrimSpace(req.CommandID)) > 128 {
+		h.jsonError(c, http.StatusBadRequest, "validation_failed", "command_id is too long")
+		return
+	}
+	if req.Action == "set_mode" && !allowed(
+		req.Mode,
+		"sequential", "repeat_one", "repeat_all", "shuffle",
+	) {
+		h.jsonError(c, http.StatusBadRequest, "validation_failed", "invalid playback mode")
+		return
+	}
+	if err := h.MusicBox.ApplyControl(
+		roomID,
+		req.Action,
+		strings.TrimSpace(req.Mode),
+		strings.TrimSpace(req.CommandID),
+		req.ExpectedRevision,
+	); err != nil {
+		if errors.Is(err, musicbox.ErrRevisionConflict) {
+			c.JSON(http.StatusConflict, gin.H{
+				"error": gin.H{
+					"code":    "music_box_revision_conflict",
+					"message": "music box state changed; refresh and try again",
+				},
+				"state": h.musicBoxStatePayload(roomID),
+			})
+			return
+		}
 		h.jsonError(c, http.StatusInternalServerError, "internal_error", "control failed: "+err.Error())
+		return
+	}
+	c.JSON(http.StatusOK, h.musicBoxStatePayload(roomID))
+}
+
+func (h *Handler) activateMusicBoxPlaylist(c *gin.Context) {
+	roomID := c.Param("room_id")
+	if !h.requireMember(c, roomID) || !h.musicBoxReady(c) {
+		return
+	}
+	var req musicBoxActivatePlaylistRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		h.jsonError(c, http.StatusBadRequest, "bad_request", "invalid JSON body")
+		return
+	}
+	sourceType := strings.TrimSpace(req.SourceType)
+	playlistID := strings.TrimSpace(req.PlaylistID)
+	if !allowed(sourceType, "temporary", "room_playlist", "user_playlist") ||
+		(sourceType != "temporary" && playlistID == "") {
+		h.jsonError(c, http.StatusBadRequest, "validation_failed", "invalid music box source")
+		return
+	}
+
+	actorID := currentUserID(c)
+	if sourceType == "temporary" {
+		if err := h.MusicBox.ActivatePlaylist(
+			roomID,
+			musicbox.ActiveSourceTemporary,
+			"",
+			"临时歌单",
+			"",
+			actorID,
+			nil,
+			req.StartPlay,
+		); err != nil {
+			h.jsonError(c, http.StatusInternalServerError, "internal_error", "switch music box source failed")
+			return
+		}
+		c.JSON(http.StatusOK, h.musicBoxStatePayload(roomID))
+		return
+	}
+
+	page := 1
+	tracks := make([]musicbox.SnapshotTrack, 0)
+	playlistName := ""
+	for {
+		var result musicbox.PlaylistItemsPage
+		var err error
+		if sourceType == "room_playlist" {
+			result, err = h.Playlists.RoomPlaylistItems(
+				c.Request.Context(), roomID, playlistID, "", "", page, musicbox.MaxPlaylistPage,
+			)
+		} else {
+			result, err = h.Playlists.UserPlaylistItems(
+				c.Request.Context(), actorID, playlistID, "", "", page, musicbox.MaxPlaylistPage,
+			)
+		}
+		if err != nil {
+			if errors.Is(err, musicbox.ErrPlaylistNotFound) {
+				h.jsonError(c, http.StatusNotFound, "not_found", "music playlist not found")
+			} else {
+				h.jsonError(c, http.StatusInternalServerError, "internal_error", "load music playlist failed")
+			}
+			return
+		}
+		playlistName = result.Playlist.Name
+		for _, item := range result.Items {
+			tracks = append(tracks, musicbox.SnapshotTrack{
+				Source: item.Source, TrackID: item.ExternalTrackID,
+				Title: item.Title, Artist: strings.Join(item.Artists, "、"),
+				DurationMS: item.DurationMS,
+			})
+		}
+		if !result.HasMore {
+			break
+		}
+		page++
+	}
+	activeType := musicbox.ActiveSourceRoomPlaylist
+	ownerID := ""
+	if sourceType == "user_playlist" {
+		activeType = musicbox.ActiveSourceUserPlaylist
+		ownerID = actorID
+	}
+	if err := h.MusicBox.ActivatePlaylist(
+		roomID, activeType, playlistID, playlistName, ownerID, actorID, tracks, req.StartPlay,
+	); err != nil {
+		h.jsonError(c, http.StatusInternalServerError, "internal_error", "activate music playlist failed")
 		return
 	}
 	c.JSON(http.StatusOK, h.musicBoxStatePayload(roomID))
@@ -167,33 +287,159 @@ func (h *Handler) musicBoxStatePayload(roomID string) gin.H {
 	if err != nil {
 		return gin.H{"enabled": h.MusicBox.Enabled()}
 	}
+	temporaryItems, err := h.MusicBox.TemporaryQueue(roomID)
+	if err != nil {
+		return gin.H{"enabled": h.MusicBox.Enabled()}
+	}
 	used, capBytes := h.MusicBox.RoomUsage(roomID)
-	queue := make([]gin.H, 0, len(items))
-	for _, it := range items {
-		queue = append(queue, gin.H{
-			"id":               it.ID,
-			"source":           it.Source,
-			"track_id":         it.TrackID,
-			"title":            it.Title,
-			"artist":           it.Artist,
-			"duration_ms":      it.DurationMS,
-			"status":           string(it.Status),
-			"file_size_bytes":  it.FileSizeBytes,
-			"error":            it.Error,
-			"added_by_user_id": it.AddedByUserID,
-			"created_at":       formatMillis(it.CreatedAt),
-		})
+	allItems := make([]*musicbox.QueueItem, 0, len(items)+len(temporaryItems))
+	allItems = append(allItems, items...)
+	allItems = append(allItems, temporaryItems...)
+	requesters := h.musicBoxRequesterPayloads(roomID, allItems)
+	queuePayload := func(source []*musicbox.QueueItem) []gin.H {
+		queue := make([]gin.H, 0, len(source))
+		for _, it := range source {
+			payload := gin.H{
+				"id":               it.ID,
+				"source":           it.Source,
+				"track_id":         it.TrackID,
+				"title":            it.Title,
+				"artist":           it.Artist,
+				"duration_ms":      it.DurationMS,
+				"status":           string(it.Status),
+				"file_size_bytes":  it.FileSizeBytes,
+				"error":            it.Error,
+				"added_by_user_id": it.AddedByUserID,
+				"created_at":       formatMillis(it.CreatedAt),
+			}
+			if requester := requesters[it.AddedByUserID]; requester != nil {
+				payload["requested_by"] = requester
+			}
+			queue = append(queue, payload)
+		}
+		return queue
+	}
+	queue := queuePayload(items)
+	temporaryQueue := queuePayload(temporaryItems)
+	activeSource := gin.H{
+		"type": st.ActiveSourceType,
+		"name": st.ActivePlaylistName,
+	}
+	if st.ActiveSourceType == musicbox.ActiveSourceTemporary {
+		activeSource["name"] = "临时歌单"
+	} else {
+		activeSource["playlist_id"] = st.ActivePlaylistID
+		activeSource["owner_user_id"] = st.ActivePlaylistOwnerID
+	}
+	allowedModes := []string{"sequential", "repeat_one"}
+	if st.ActiveSourceType != musicbox.ActiveSourceTemporary {
+		allowedModes = append(allowedModes, "repeat_all", "shuffle")
 	}
 	return gin.H{
-		"enabled": h.MusicBox.Enabled(),
+		"enabled":       h.MusicBox.Enabled(),
+		"revision":      st.Revision,
+		"active_source": activeSource,
+		"temporary_playlist": gin.H{
+			"queued_count": len(temporaryQueue),
+			"capabilities": gin.H{
+				"can_enqueue": true,
+				"can_reorder": true,
+				"can_clear":   true,
+			},
+		},
 		"playback": gin.H{
 			"state":           string(st.State),
 			"current_item_id": st.CurrentItemID,
 			"position_ms":     st.PositionMS,
 			"volume":          st.Volume,
-			"updated_at":      formatMillis(st.UpdatedAt),
+			"mode":            string(st.PlaybackMode),
+			"can_previous":    st.CurrentItemID != "" && len(queue) > 0,
+			"can_next":        len(queue) > 0,
+			"capabilities": gin.H{
+				"can_control":     true,
+				"can_change_mode": true,
+				"allowed_modes":   allowedModes,
+			},
+			"updated_at": formatMillis(st.UpdatedAt),
 		},
-		"queue": queue,
-		"usage": gin.H{"used_bytes": used, "limit_bytes": capBytes},
+		"queue":           queue,
+		"temporary_queue": temporaryQueue,
+		"usage":           gin.H{"used_bytes": used, "limit_bytes": capBytes},
 	}
+}
+
+func (h *Handler) musicBoxRequesterPayloads(
+	roomID string,
+	items []*musicbox.QueueItem,
+) map[string]gin.H {
+	result := make(map[string]gin.H)
+	if h == nil || h.DB == nil || len(items) == 0 {
+		return result
+	}
+	ids := make([]string, 0, len(items))
+	seen := make(map[string]struct{}, len(items))
+	for _, item := range items {
+		if item.AddedByUserID == "" {
+			continue
+		}
+		if _, exists := seen[item.AddedByUserID]; exists {
+			continue
+		}
+		seen[item.AddedByUserID] = struct{}{}
+		ids = append(ids, item.AddedByUserID)
+	}
+	if len(ids) == 0 {
+		return result
+	}
+	placeholders := strings.TrimSuffix(strings.Repeat("?,", len(ids)), ",")
+	args := make([]any, 0, len(ids)+1)
+	args = append(args, roomID)
+	for _, id := range ids {
+		args = append(args, id)
+	}
+	rows, err := h.DB.Query(
+		`SELECT u.id, u.username, u.display_name, u.avatar_url,
+		        u.default_avatar_key, rm.room_display_name
+		 FROM users u
+		 LEFT JOIN room_memberships rm
+		   ON rm.room_id = ? AND rm.user_id = u.id
+		 WHERE u.id IN (`+placeholders+`)`,
+		args...,
+	)
+	if err != nil {
+		return result
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id, username string
+		var displayName, avatarURL, defaultAvatar, roomDisplayName sql.NullString
+		if err := rows.Scan(
+			&id,
+			&username,
+			&displayName,
+			&avatarURL,
+			&defaultAvatar,
+			&roomDisplayName,
+		); err != nil {
+			continue
+		}
+		name := username
+		if displayName.Valid && strings.TrimSpace(displayName.String) != "" {
+			name = displayName.String
+		}
+		if roomDisplayName.Valid && strings.TrimSpace(roomDisplayName.String) != "" {
+			name = roomDisplayName.String
+		}
+		payload := gin.H{
+			"user_id":            id,
+			"username":           username,
+			"display_name":       name,
+			"default_avatar_key": defaultAvatar.String,
+		}
+		if avatarURL.Valid && avatarURL.String != "" {
+			payload["avatar_url"] = avatarURL.String
+		}
+		result[id] = payload
+	}
+	return result
 }

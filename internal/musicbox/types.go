@@ -28,6 +28,21 @@ const (
 	StatusFailed      QueueStatus = "failed"
 )
 
+type QueueScope string
+
+const (
+	QueueScopeTemporary             QueueScope = "temporary"
+	QueueScopeSavedPlaylistSnapshot QueueScope = "saved_playlist_snapshot"
+)
+
+type ActiveSourceType string
+
+const (
+	ActiveSourceTemporary    ActiveSourceType = "temporary"
+	ActiveSourceRoomPlaylist ActiveSourceType = "room_playlist"
+	ActiveSourceUserPlaylist ActiveSourceType = "user_playlist"
+)
+
 // PlaybackState is the room player's state.
 type PlaybackState string
 
@@ -36,6 +51,27 @@ const (
 	StatePlaying PlaybackState = "playing"
 	StatePaused  PlaybackState = "paused"
 )
+
+// PlaybackMode is selected by the server and shared by every listener.  Keep
+// the string values stable: older clients ignore the field while newer
+// clients render the mode selector from it.
+type PlaybackMode string
+
+const (
+	ModeSequential PlaybackMode = "sequential"
+	ModeRepeatOne  PlaybackMode = "repeat_one"
+	ModeRepeatAll  PlaybackMode = "repeat_all"
+	ModeShuffle    PlaybackMode = "shuffle"
+)
+
+func NormalizePlaybackMode(value string) PlaybackMode {
+	switch PlaybackMode(value) {
+	case ModeRepeatOne, ModeRepeatAll, ModeShuffle:
+		return PlaybackMode(value)
+	default:
+		return ModeSequential
+	}
+}
 
 // QueueItem is one row of a room's music box queue.
 type QueueItem struct {
@@ -51,6 +87,8 @@ type QueueItem struct {
 	FileSizeBytes int64
 	Error         string
 	AddedByUserID string
+	QueueScope    QueueScope
+	SnapshotID    string
 	SortOrder     int64
 	CreatedAt     int64
 	UpdatedAt     int64
@@ -58,10 +96,25 @@ type QueueItem struct {
 
 // RoomState is the persisted playback state for a room.
 type RoomState struct {
-	RoomID        string
-	State         PlaybackState
-	CurrentItemID string
-	PositionMS    int64
-	Volume        int
-	UpdatedAt     int64
+	RoomID                string
+	State                 PlaybackState
+	CurrentItemID         string
+	PositionMS            int64
+	Volume                int
+	Revision              int64
+	PlaybackMode          PlaybackMode
+	ActiveSourceType      ActiveSourceType
+	ActivePlaylistID      string
+	ActivePlaylistName    string
+	ActivePlaylistOwnerID string
+	ActiveSnapshotID      string
+	UpdatedAt             int64
+}
+
+type SnapshotTrack struct {
+	Source     string
+	TrackID    string
+	Title      string
+	Artist     string
+	DurationMS int64
 }

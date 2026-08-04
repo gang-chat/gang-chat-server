@@ -98,7 +98,16 @@ type musicBoxEnqueueRequest struct {
 }
 
 type musicBoxControlRequest struct {
-	Action string `json:"action"`
+	Action           string `json:"action"`
+	Mode             string `json:"mode"`
+	CommandID        string `json:"command_id"`
+	ExpectedRevision *int64 `json:"expected_revision"`
+}
+
+type musicBoxActivatePlaylistRequest struct {
+	SourceType string `json:"source_type"`
+	PlaylistID string `json:"playlist_id"`
+	StartPlay  bool   `json:"start_play"`
 }
 
 type saveStickerRequest struct {

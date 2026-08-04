@@ -24,17 +24,17 @@ const botIdentity = "__musicbox__"
 // the next track from the manager via the advance callback, so queue policy
 // lives in the manager and the player just plays what it's handed.
 type player struct {
-	roomID     string
-	host       string
-	token      string
-	opusTrack  *lksdk.LocalTrack
+	roomID    string
+	host      string
+	token     string
+	opusTrack *lksdk.LocalTrack
 
-	mu        sync.Mutex
-	room      *lksdk.Room
-	cmd       chan command
-	paused    bool
-	stopped   bool
-	current   *QueueItem
+	mu         sync.Mutex
+	room       *lksdk.Room
+	cmd        chan command
+	paused     bool
+	stopped    bool
+	current    *QueueItem
 	positionMS int64
 
 	// done is closed once when the player shuts down, so the heartbeat goroutine
@@ -44,7 +44,7 @@ type player struct {
 
 	// advance returns the next item to play after the given one finishes (or
 	// the first item if prev is nil). Returns nil when the queue is exhausted.
-	advance func(prev *QueueItem) *QueueItem
+	advance func(prev *QueueItem, transition playbackTransition, positionMS int64) *QueueItem
 	// onState is called whenever playback state changes so the manager can
 	// persist it and fan out an SSE snapshot.
 	onState func()
@@ -56,15 +56,36 @@ const (
 	cmdPause commandKind = iota
 	cmdResume
 	cmdSkip
+	cmdPrevious
 	cmdStop
 	cmdWake // re-check the queue when idling; no-op during playback
 )
 
 type command struct {
 	kind commandKind
+	ack  chan struct{}
 }
 
-func newPlayer(roomID, host, token string, advance func(prev *QueueItem) *QueueItem, onState func()) *player {
+type playbackTransition int
+
+const (
+	transitionNatural playbackTransition = iota
+	transitionNext
+	transitionPrevious
+)
+
+type playResult struct {
+	stop       bool
+	transition playbackTransition
+	positionMS int64
+	ack        chan struct{}
+}
+
+func newPlayer(
+	roomID, host, token string,
+	advance func(prev *QueueItem, transition playbackTransition, positionMS int64) *QueueItem,
+	onState func(),
+) *player {
 	return &player{
 		roomID:  roomID,
 		host:    host,
@@ -112,24 +133,40 @@ func (p *player) connect() error {
 func (p *player) run() {
 	defer p.disconnect()
 	go p.heartbeat()
-	var prev *QueueItem
+	var item *QueueItem
 	for {
-		item := p.advance(prev)
 		if item == nil {
-			// Queue exhausted: wait briefly for new ready items, then exit so
-			// the bot doesn't linger. A control command (skip/stop) also wakes us.
-			if !p.idleWait() {
-				return
+			item = p.advance(nil, transitionNatural, 0)
+			if item == nil {
+				p.clearCurrent()
+				// Queue exhausted: wait briefly for something to become ready.
+				if !p.idleWait() {
+					return
+				}
+				continue
 			}
-			prev = nil
-			continue
+			p.setCurrent(item)
 		}
-		p.setCurrent(item)
-		stop := p.playFile(item)
-		prev = item
-		if stop {
+		result := p.playFile(item)
+		if result.stop {
+			acknowledge(result.ack)
 			return
 		}
+		item = p.advance(item, result.transition, result.positionMS)
+		if item == nil {
+			p.clearCurrent()
+		} else {
+			p.setCurrent(item)
+		}
+		// next/previous is acknowledged only after the authoritative current
+		// item has changed (or the queue was proven empty).
+		acknowledge(result.ack)
+	}
+}
+
+func acknowledge(ack chan struct{}) {
+	if ack != nil {
+		close(ack)
 	}
 }
 
@@ -142,9 +179,13 @@ func (p *player) idleWait() bool {
 		select {
 		case c := <-p.cmd:
 			if c.kind == cmdStop {
+				acknowledge(c.ack)
 				return false
 			}
-			// Any other command: re-check the queue immediately.
+			// With no current track there is nothing to pause/skip/restart.  The
+			// command still has a deterministic successful acknowledgement and a
+			// wake asks the loop to re-check the queue immediately.
+			acknowledge(c.ack)
 			return true
 		case <-timer.C:
 			return false
@@ -180,21 +221,21 @@ func (p *player) isPlaying() bool {
 	return !p.stopped && !p.paused && p.current != nil
 }
 
-
 // pause/resume/skip/stop. Returns true if the player should stop entirely.
-func (p *player) playFile(item *QueueItem) (stopPlayer bool) {
+func (p *player) playFile(item *QueueItem) playResult {
 	f, err := os.Open(item.FilePath)
 	if err != nil {
-		return false // skip a vanished file, keep going
+		return playResult{transition: transitionNatural} // skip a vanished file
 	}
 	defer f.Close()
 
 	ogg, _, err := oggreader.NewOggReader(f)
 	if err != nil {
-		return false
+		return playResult{transition: transitionNatural}
 	}
 
-	p.setState(false) // ensure not-paused at track start unless told otherwise
+	// Keep the existing pause state across previous/next. A paused listener who
+	// changes tracks must remain paused until an explicit resume command.
 	var elapsed time.Duration
 	nextWrite := time.Now()
 
@@ -204,14 +245,20 @@ func (p *player) playFile(item *QueueItem) (stopPlayer bool) {
 		case c := <-p.cmd:
 			switch c.kind {
 			case cmdStop:
-				return true
+				return playResult{stop: true, positionMS: elapsed.Milliseconds(), ack: c.ack}
 			case cmdSkip:
-				return false
+				return playResult{transition: transitionNext, positionMS: elapsed.Milliseconds(), ack: c.ack}
+			case cmdPrevious:
+				return playResult{transition: transitionPrevious, positionMS: elapsed.Milliseconds(), ack: c.ack}
 			case cmdPause:
 				p.setPaused(true)
+				acknowledge(c.ack)
 			case cmdResume:
 				p.setPaused(false)
 				nextWrite = time.Now() // resync clock; don't burst-catch-up
+				acknowledge(c.ack)
+			case cmdWake:
+				acknowledge(c.ack)
 			}
 		default:
 		}
@@ -222,14 +269,20 @@ func (p *player) playFile(item *QueueItem) (stopPlayer bool) {
 			c := <-p.cmd
 			switch c.kind {
 			case cmdStop:
-				return true
+				return playResult{stop: true, positionMS: elapsed.Milliseconds(), ack: c.ack}
 			case cmdSkip:
-				return false
+				return playResult{transition: transitionNext, positionMS: elapsed.Milliseconds(), ack: c.ack}
+			case cmdPrevious:
+				return playResult{transition: transitionPrevious, positionMS: elapsed.Milliseconds(), ack: c.ack}
 			case cmdResume:
 				p.setPaused(false)
 				nextWrite = time.Now()
+				acknowledge(c.ack)
 			case cmdPause:
 				// already paused
+				acknowledge(c.ack)
+			case cmdWake:
+				acknowledge(c.ack)
 			}
 			continue
 		}
@@ -237,13 +290,13 @@ func (p *player) playFile(item *QueueItem) (stopPlayer bool) {
 		payload, err := ogg.ReadPacket()
 		if err != nil {
 			if errors.Is(err, io.EOF) {
-				return false // track finished, advance to next
+				return playResult{transition: transitionNatural, positionMS: elapsed.Milliseconds()}
 			}
 			// A non-EOF read error means a corrupt/truncated Opus file. Don't
 			// silently vanish it — log so the failure is diagnosable, then
 			// advance to the next track.
 			log.Printf("musicbox: room %s track %q read error, skipping: %v", p.roomID, item.ID, err)
-			return false
+			return playResult{transition: transitionNatural, positionMS: elapsed.Milliseconds()}
 		}
 		dur, err := oggreader.ParsePacketDuration(payload)
 		if err != nil || dur <= 0 {
@@ -254,10 +307,10 @@ func (p *player) playFile(item *QueueItem) (stopPlayer bool) {
 		track := p.opusTrack
 		p.mu.Unlock()
 		if track == nil {
-			return true
+			return playResult{stop: true, positionMS: elapsed.Milliseconds()}
 		}
 		if err := track.WriteSample(media.Sample{Data: payload, Duration: dur}, nil); err != nil {
-			return false
+			return playResult{transition: transitionNatural, positionMS: elapsed.Milliseconds()}
 		}
 
 		elapsed += dur
@@ -274,27 +327,52 @@ func (p *player) playFile(item *QueueItem) (stopPlayer bool) {
 
 // Control commands (non-blocking; the loop drains them) -----------------------
 
-func (p *player) pause()  { p.send(command{kind: cmdPause}) }
-func (p *player) resume() { p.send(command{kind: cmdResume}) }
-func (p *player) skip()   { p.send(command{kind: cmdSkip}) }
-func (p *player) stop()   { p.send(command{kind: cmdStop}) }
-func (p *player) wake()   { p.send(command{kind: cmdWake}) }
+func (p *player) pause() error    { return p.sendAndWait(cmdPause) }
+func (p *player) resume() error   { return p.sendAndWait(cmdResume) }
+func (p *player) skip() error     { return p.sendAndWait(cmdSkip) }
+func (p *player) previous() error { return p.sendAndWait(cmdPrevious) }
+func (p *player) stop() error {
+	if err := p.sendAndWait(cmdStop); err != nil {
+		return err
+	}
+	select {
+	case <-p.done:
+		return nil
+	case <-time.After(5 * time.Second):
+		return errors.New("music box player shutdown timed out")
+	}
+}
+func (p *player) wake() { p.send(command{kind: cmdWake}) }
 
-func (p *player) send(c command) {
+func (p *player) sendAndWait(kind commandKind) error {
+	ack := make(chan struct{})
+	if !p.send(command{kind: kind, ack: ack}) {
+		return errors.New("music box player is stopped")
+	}
+	select {
+	case <-ack:
+		return nil
+	case <-time.After(5 * time.Second):
+		return errors.New("music box command timed out")
+	}
+}
+
+func (p *player) send(c command) bool {
 	p.mu.Lock()
 	stopped := p.stopped
 	p.mu.Unlock()
 	if stopped {
-		return
+		return false
 	}
 	select {
 	case p.cmd <- c:
+		return true
 	default:
+		return false
 	}
 }
 
 func (p *player) disconnect() {
-	p.doneOnce.Do(func() { close(p.done) })
 	p.mu.Lock()
 	p.stopped = true
 	room := p.room
@@ -303,6 +381,9 @@ func (p *player) disconnect() {
 	p.opusTrack = nil
 	p.current = nil
 	p.mu.Unlock()
+	// Publish completion only after snapshot() can no longer report the old
+	// track. Stop/switch HTTP responses wait on this boundary.
+	p.doneOnce.Do(func() { close(p.done) })
 	if track != nil {
 		_ = track.Close()
 	}
@@ -326,8 +407,6 @@ func (p *player) setPaused(v bool) {
 	}
 }
 
-func (p *player) setState(paused bool) { p.setPaused(paused) }
-
 func (p *player) isPaused() bool {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -340,6 +419,17 @@ func (p *player) setCurrent(it *QueueItem) {
 	p.positionMS = 0
 	p.mu.Unlock()
 	if p.onState != nil {
+		p.onState()
+	}
+}
+
+func (p *player) clearCurrent() {
+	p.mu.Lock()
+	changed := p.current != nil || p.positionMS != 0
+	p.current = nil
+	p.positionMS = 0
+	p.mu.Unlock()
+	if changed && p.onState != nil {
 		p.onState()
 	}
 }
