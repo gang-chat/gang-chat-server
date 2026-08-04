@@ -99,6 +99,7 @@ type musicBoxEnqueueRequest struct {
 
 type musicBoxControlRequest struct {
 	Action           string `json:"action"`
+	ItemID           string `json:"item_id"`
 	Mode             string `json:"mode"`
 	CommandID        string `json:"command_id"`
 	ExpectedRevision *int64 `json:"expected_revision"`

@@ -26,10 +26,14 @@ const SourceTencent = "tencent"
 
 const defaultGDSource = "netease"
 
-// ErrUnavailable is returned when the music box can't operate (LiveKit not
-// configured). Handlers map it to 503.
-var ErrUnavailable = errors.New("music box is not available")
-var ErrRevisionConflict = errors.New("music box revision conflict")
+var (
+	// ErrUnavailable is returned when the music box can't operate (LiveKit not
+	// configured). Handlers map it to 503.
+	ErrUnavailable       = errors.New("music box is not available")
+	ErrRevisionConflict  = errors.New("music box revision conflict")
+	ErrQueueItemNotFound = errors.New("music box queue item not found")
+	ErrQueueItemNotReady = errors.New("music box queue item not ready")
+)
 
 // TokenFunc issues a LiveKit join token for the bot in a room. Provided by the
 // caller so token policy (TTL, identity, grants) stays in one place.
@@ -423,6 +427,24 @@ func (m *Manager) ApplyControl(
 	roomID, action, mode, commandID string,
 	expectedRevision *int64,
 ) error {
+	return m.ApplyItemControl(
+		roomID,
+		action,
+		"",
+		mode,
+		commandID,
+		expectedRevision,
+	)
+}
+
+// ApplyItemControl extends ApplyControl for commands that target a specific
+// queue item. Keeping the target inside the same serialized, revision-checked
+// command path preserves idempotency across client retries and concurrent
+// controllers.
+func (m *Manager) ApplyItemControl(
+	roomID, action, itemID, mode, commandID string,
+	expectedRevision *int64,
+) error {
 	if !m.Enabled() {
 		return ErrUnavailable
 	}
@@ -468,6 +490,8 @@ func (m *Manager) ApplyControl(
 		} else {
 			err = m.play(roomID, false)
 		}
+	case "play_now":
+		err = m.playNow(roomID, itemID)
 	case "set_mode":
 		err = m.setPlaybackMode(roomID, mode)
 	case "stop":
@@ -500,6 +524,63 @@ func (m *Manager) ApplyControl(
 		m.mu.Unlock()
 	}
 	return nil
+}
+
+// playNow atomically replaces the current item with another ready item from
+// the active queue. The row remains in its original position so normal
+// sequential playback continues from the selected track afterwards.
+// ApplyItemControl already holds the room control lock while this runs.
+func (m *Manager) playNow(roomID, itemID string) error {
+	st, err := m.store.getState(roomID)
+	if err != nil {
+		return err
+	}
+	item, err := m.store.getRoomItem(roomID, itemID)
+	if err != nil {
+		return err
+	}
+	if item == nil {
+		return ErrQueueItemNotFound
+	}
+	scope, snapshotID := playbackScope(st)
+	if item.QueueScope != scope ||
+		(scope == QueueScopeSavedPlaylistSnapshot && item.SnapshotID != snapshotID) {
+		return ErrQueueItemNotFound
+	}
+	if item.Status != StatusReady {
+		return ErrQueueItemNotReady
+	}
+
+	if pl := m.getPlayer(roomID); pl != nil {
+		_, currentID, _ := pl.snapshot()
+		if currentID == itemID {
+			return pl.resume()
+		}
+		if err := pl.stop(); err != nil {
+			return err
+		}
+		m.mu.Lock()
+		if m.players[roomID] == pl {
+			delete(m.players, roomID)
+		}
+		m.mu.Unlock()
+	}
+
+	m.persistMu.Lock()
+	st, err = m.store.ensureState(roomID)
+	if err == nil {
+		st.State = StateStopped
+		st.CurrentItemID = itemID
+		st.PositionMS = 0
+		st.Revision++
+		err = m.store.saveState(*st)
+	}
+	m.persistMu.Unlock()
+	if err != nil {
+		return err
+	}
+	m.notify(roomID)
+	return m.ensurePlaying(roomID)
 }
 
 func (m *Manager) play(roomID string, resumeOnly bool) error {

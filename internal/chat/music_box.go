@@ -140,7 +140,7 @@ func (h *Handler) controlMusicBox(c *gin.Context) {
 	var req musicBoxControlRequest
 	if err := c.ShouldBindJSON(&req); err != nil || !allowed(
 		req.Action,
-		"play", "pause", "resume", "skip", "next", "previous", "set_mode", "stop",
+		"play", "pause", "resume", "skip", "next", "previous", "play_now", "set_mode", "stop",
 	) {
 		h.jsonError(c, http.StatusBadRequest, "validation_failed", "invalid music box action")
 		return
@@ -156,9 +156,14 @@ func (h *Handler) controlMusicBox(c *gin.Context) {
 		h.jsonError(c, http.StatusBadRequest, "validation_failed", "invalid playback mode")
 		return
 	}
-	if err := h.MusicBox.ApplyControl(
+	if req.Action == "play_now" && strings.TrimSpace(req.ItemID) == "" {
+		h.jsonError(c, http.StatusBadRequest, "validation_failed", "item_id is required")
+		return
+	}
+	if err := h.MusicBox.ApplyItemControl(
 		roomID,
 		req.Action,
+		strings.TrimSpace(req.ItemID),
 		strings.TrimSpace(req.Mode),
 		strings.TrimSpace(req.CommandID),
 		req.ExpectedRevision,
@@ -171,6 +176,14 @@ func (h *Handler) controlMusicBox(c *gin.Context) {
 				},
 				"state": h.musicBoxStatePayload(roomID),
 			})
+			return
+		}
+		if errors.Is(err, musicbox.ErrQueueItemNotFound) {
+			h.jsonError(c, http.StatusNotFound, "not_found", "music box queue item not found")
+			return
+		}
+		if errors.Is(err, musicbox.ErrQueueItemNotReady) {
+			h.jsonError(c, http.StatusConflict, "music_box_item_not_ready", "music box queue item is not ready")
 			return
 		}
 		h.jsonError(c, http.StatusInternalServerError, "internal_error", "control failed: "+err.Error())
@@ -313,6 +326,7 @@ func (h *Handler) musicBoxStatePayload(roomID string) gin.H {
 				"error":            it.Error,
 				"added_by_user_id": it.AddedByUserID,
 				"created_at":       formatMillis(it.CreatedAt),
+				"can_play_now":     it.Status == musicbox.StatusReady,
 			}
 			if requester := requesters[it.AddedByUserID]; requester != nil {
 				payload["requested_by"] = requester
@@ -425,10 +439,11 @@ func (h *Handler) musicBoxRequesterPayloads(
 		); err != nil {
 			continue
 		}
-		name := username
+		globalName := username
 		if displayName.Valid && strings.TrimSpace(displayName.String) != "" {
-			name = displayName.String
+			globalName = displayName.String
 		}
+		name := globalName
 		if roomDisplayName.Valid && strings.TrimSpace(roomDisplayName.String) != "" {
 			name = roomDisplayName.String
 		}
@@ -436,6 +451,7 @@ func (h *Handler) musicBoxRequesterPayloads(
 			"user_id":            id,
 			"username":           username,
 			"display_name":       name,
+			"avatar_label":       globalName,
 			"default_avatar_key": defaultAvatar.String,
 		}
 		if avatarURL.Valid && avatarURL.String != "" {
