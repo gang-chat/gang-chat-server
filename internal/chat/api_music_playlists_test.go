@@ -432,6 +432,35 @@ func TestRoomMusicPlaylistPermissionsAndIsolation(t *testing.T) {
 	api.requireStatus(status, http.StatusOK, response)
 }
 
+func TestMusicBoxRequesterPayloadsIncludesExplicitPlaylistOwner(t *testing.T) {
+	api := newAPIHarness(t)
+	owner := api.register("playlist_payload_owner")
+	ownerID, _ := owner.User["id"].(string)
+	if ownerID == "" {
+		t.Fatalf("registered owner missing id: %v", owner.User)
+	}
+	if _, err := api.db.Exec(
+		`UPDATE users
+		 SET display_name = ?, avatar_url = ?, default_avatar_key = ?
+		 WHERE id = ?`,
+		"歌单用户", "/playlist-owner.png", "green-2", ownerID,
+	); err != nil {
+		t.Fatalf("update playlist owner: %v", err)
+	}
+
+	payloads := api.chat.musicBoxRequesterPayloads("", nil, ownerID)
+	payload := payloads[ownerID]
+	if payload == nil {
+		t.Fatalf("explicit playlist owner missing from payload: %v", payloads)
+	}
+	if payload["display_name"] != "歌单用户" ||
+		payload["avatar_label"] != "歌单用户" ||
+		payload["avatar_url"] != "/playlist-owner.png" ||
+		payload["default_avatar_key"] != "green-2" {
+		t.Fatalf("unexpected playlist owner payload: %v", payload)
+	}
+}
+
 func responseErrorCode(response map[string]any) string {
 	errorPayload, _ := response["error"].(map[string]any)
 	code, _ := errorPayload["code"].(string)

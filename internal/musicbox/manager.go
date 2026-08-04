@@ -551,6 +551,7 @@ func (m *Manager) playNow(roomID, itemID string) error {
 		return ErrQueueItemNotReady
 	}
 
+	restartAfterStop := false
 	if pl := m.getPlayer(roomID); pl != nil {
 		_, currentID, _ := pl.snapshot()
 		if currentID == itemID {
@@ -559,11 +560,11 @@ func (m *Manager) playNow(roomID, itemID string) error {
 		if err := pl.stop(); err != nil {
 			return err
 		}
-		m.mu.Lock()
-		if m.players[roomID] == pl {
-			delete(m.players, roomID)
-		}
-		m.mu.Unlock()
+		// stop waits until the player snapshot is cleared, but the player's
+		// LiveKit room may still be disconnecting at that point. Keep the old
+		// player registered until its run loop finishes so the replacement bot
+		// cannot connect with the same identity too early.
+		restartAfterStop = true
 	}
 
 	m.persistMu.Lock()
@@ -580,6 +581,11 @@ func (m *Manager) playNow(roomID, itemID string) error {
 		return err
 	}
 	m.notify(roomID)
+	if restartAfterStop {
+		if err := m.waitForPlayerStop(roomID); err != nil {
+			return err
+		}
+	}
 	return m.ensurePlaying(roomID)
 }
 
@@ -959,13 +965,23 @@ func (m *Manager) ActivatePlaylist(
 }
 
 func (m *Manager) ensurePlayingAfterStop(roomID string) {
+	if err := m.waitForPlayerStop(roomID); err != nil {
+		log.Printf("musicbox: room %s player cleanup failed: %v", roomID, err)
+		return
+	}
+	if err := m.ensurePlaying(roomID); err != nil {
+		log.Printf("musicbox: room %s restart after stop failed: %v", roomID, err)
+	}
+}
+
+func (m *Manager) waitForPlayerStop(roomID string) error {
 	for attempt := 0; attempt < 40; attempt++ {
 		if m.getPlayer(roomID) == nil {
-			_ = m.ensurePlaying(roomID)
-			return
+			return nil
 		}
 		time.Sleep(25 * time.Millisecond)
 	}
+	return errors.New("music box player cleanup timed out")
 }
 
 // State returns the persisted room state and the current queue.

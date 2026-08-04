@@ -310,7 +310,11 @@ func (h *Handler) musicBoxStatePayload(roomID string) gin.H {
 	allItems := make([]*musicbox.QueueItem, 0, len(items)+len(temporaryItems))
 	allItems = append(allItems, items...)
 	allItems = append(allItems, temporaryItems...)
-	requesters := h.musicBoxRequesterPayloads(roomID, allItems)
+	requesters := h.musicBoxRequesterPayloads(
+		roomID,
+		allItems,
+		st.ActivePlaylistOwnerID,
+	)
 	queuePayload := func(source []*musicbox.QueueItem) []gin.H {
 		queue := make([]gin.H, 0, len(source))
 		for _, it := range source {
@@ -346,6 +350,9 @@ func (h *Handler) musicBoxStatePayload(roomID string) gin.H {
 	} else {
 		activeSource["playlist_id"] = st.ActivePlaylistID
 		activeSource["owner_user_id"] = st.ActivePlaylistOwnerID
+		if owner := requesters[st.ActivePlaylistOwnerID]; owner != nil {
+			activeSource["owner"] = owner
+		}
 	}
 	allowedModes := []string{"sequential", "repeat_one"}
 	if st.ActiveSourceType != musicbox.ActiveSourceTemporary {
@@ -387,13 +394,14 @@ func (h *Handler) musicBoxStatePayload(roomID string) gin.H {
 func (h *Handler) musicBoxRequesterPayloads(
 	roomID string,
 	items []*musicbox.QueueItem,
+	extraUserIDs ...string,
 ) map[string]gin.H {
 	result := make(map[string]gin.H)
-	if h == nil || h.DB == nil || len(items) == 0 {
+	if h == nil || h.DB == nil {
 		return result
 	}
-	ids := make([]string, 0, len(items))
-	seen := make(map[string]struct{}, len(items))
+	ids := make([]string, 0, len(items)+len(extraUserIDs))
+	seen := make(map[string]struct{}, len(items)+len(extraUserIDs))
 	for _, item := range items {
 		if item.AddedByUserID == "" {
 			continue
@@ -403,6 +411,17 @@ func (h *Handler) musicBoxRequesterPayloads(
 		}
 		seen[item.AddedByUserID] = struct{}{}
 		ids = append(ids, item.AddedByUserID)
+	}
+	for _, id := range extraUserIDs {
+		id = strings.TrimSpace(id)
+		if id == "" {
+			continue
+		}
+		if _, exists := seen[id]; exists {
+			continue
+		}
+		seen[id] = struct{}{}
+		ids = append(ids, id)
 	}
 	if len(ids) == 0 {
 		return result
