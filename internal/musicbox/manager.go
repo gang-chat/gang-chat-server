@@ -492,6 +492,8 @@ func (m *Manager) ApplyItemControl(
 		}
 	case "play_now":
 		err = m.playNow(roomID, itemID)
+	case "clear_temporary_playlist":
+		err = m.clearTemporaryQueue(roomID)
 	case "set_mode":
 		err = m.setPlaybackMode(roomID, mode)
 	case "stop":
@@ -526,6 +528,53 @@ func (m *Manager) ApplyItemControl(
 	return nil
 }
 
+// clearTemporaryQueue removes the room request queue while preserving saved
+// playlist snapshots. When that queue is active, playback is stopped first so
+// no deleted item remains audible or visible as the current track.
+// ApplyItemControl holds the room control lock while this runs.
+func (m *Manager) clearTemporaryQueue(roomID string) error {
+	st, err := m.store.getState(roomID)
+	if err != nil {
+		return err
+	}
+	activeTemporary := st == nil || st.ActiveSourceType == ActiveSourceTemporary
+	if activeTemporary {
+		if pl := m.getPlayer(roomID); pl != nil {
+			if err := pl.stop(); err != nil {
+				return err
+			}
+		}
+	}
+
+	items, err := m.store.deleteTemporaryQueue(roomID)
+	if err != nil {
+		return err
+	}
+	for _, item := range items {
+		if item.FilePath != "" {
+			_ = os.Remove(item.FilePath)
+		}
+	}
+
+	m.persistMu.Lock()
+	st, err = m.store.ensureState(roomID)
+	if err == nil && st != nil {
+		if activeTemporary {
+			st.State = StateStopped
+			st.CurrentItemID = ""
+			st.PositionMS = 0
+		}
+		st.Revision++
+		err = m.store.saveState(*st)
+	}
+	m.persistMu.Unlock()
+	if err != nil {
+		return err
+	}
+	m.notify(roomID)
+	return nil
+}
+
 // playNow atomically replaces the current item with another ready item from
 // the active queue. The row remains in its original position so normal
 // sequential playback continues from the selected track afterwards.
@@ -551,42 +600,13 @@ func (m *Manager) playNow(roomID, itemID string) error {
 		return ErrQueueItemNotReady
 	}
 
-	restartAfterStop := false
 	if pl := m.getPlayer(roomID); pl != nil {
-		_, currentID, _ := pl.snapshot()
-		if currentID == itemID {
-			return pl.resume()
-		}
-		if err := pl.stop(); err != nil {
-			return err
-		}
-		// stop waits until the player snapshot is cleared, but the player's
-		// LiveKit room may still be disconnecting at that point. Keep the old
-		// player registered until its run loop finishes so the replacement bot
-		// cannot connect with the same identity too early.
-		restartAfterStop = true
+		// Keep the existing LiveKit participant and published Opus track alive.
+		// The player acknowledges only after the target is authoritative, so a
+		// successful control response can never expose the previous track.
+		return pl.playNow(item)
 	}
-
-	m.persistMu.Lock()
-	st, err = m.store.ensureState(roomID)
-	if err == nil {
-		st.State = StateStopped
-		st.CurrentItemID = itemID
-		st.PositionMS = 0
-		st.Revision++
-		err = m.store.saveState(*st)
-	}
-	m.persistMu.Unlock()
-	if err != nil {
-		return err
-	}
-	m.notify(roomID)
-	if restartAfterStop {
-		if err := m.waitForPlayerStop(roomID); err != nil {
-			return err
-		}
-	}
-	return m.ensurePlaying(roomID)
+	return m.ensurePlayingItem(roomID, item)
 }
 
 func (m *Manager) play(roomID string, resumeOnly bool) error {
@@ -602,9 +622,19 @@ func (m *Manager) play(roomID string, resumeOnly bool) error {
 // ensurePlaying starts a player for the room if one isn't running and there's
 // at least one ready track. Safe to call repeatedly.
 func (m *Manager) ensurePlaying(roomID string) error {
+	return m.ensurePlayingItem(roomID, nil)
+}
+
+// ensurePlayingItem starts the player from preferred when supplied. Selecting
+// the initial item before the goroutine starts makes a successful play_now
+// response immediately consistent with State() and SSE snapshots.
+func (m *Manager) ensurePlayingItem(roomID string, preferred *QueueItem) error {
 	m.mu.Lock()
 	if pl, ok := m.players[roomID]; ok {
 		m.mu.Unlock()
+		if preferred != nil {
+			return pl.playNow(preferred)
+		}
 		// Already running. If it's idling on an empty queue, nudge it so it
 		// re-checks and picks up the newly-ready track instead of waiting out
 		// its idle timeout.
@@ -614,7 +644,11 @@ func (m *Manager) ensurePlaying(roomID string) error {
 	// Reserve the slot under lock to avoid two concurrent starts.
 	st, _ := m.store.getState(roomID)
 	scope, snapshotID := playbackScope(st)
-	first, err := m.store.firstPlayableInScope(roomID, -1, scope, snapshotID)
+	first := preferred
+	var err error
+	if first == nil {
+		first, err = m.store.firstPlayableInScope(roomID, -1, scope, snapshotID)
+	}
 	if err != nil || first == nil {
 		m.mu.Unlock()
 		return err
@@ -629,6 +663,7 @@ func (m *Manager) ensurePlaying(roomID string) error {
 			return m.nextItem(roomID, prev, transition, positionMS)
 		},
 		func() { m.persistAndNotify(roomID) },
+		func() { m.persistAndNotifyForced(roomID) },
 	)
 	m.players[roomID] = pl
 	m.mu.Unlock()
@@ -639,8 +674,18 @@ func (m *Manager) ensurePlaying(roomID string) error {
 		m.mu.Unlock()
 		return err
 	}
+	// Publish an explicitly selected item only after LiveKit connected
+	// successfully. Ordinary playback keeps the selector-driven startup path,
+	// including resuming the persisted current item after a process restart.
+	if preferred != nil {
+		pl.setCurrent(preferred)
+	}
 	go func() {
-		pl.run()
+		if preferred != nil {
+			pl.runFrom(preferred)
+		} else {
+			pl.run()
+		}
 		m.mu.Lock()
 		if m.players[roomID] == pl {
 			delete(m.players, roomID)
@@ -806,6 +851,14 @@ func (m *Manager) getPlayer(roomID string) *player {
 
 // persistAndNotify writes the live player snapshot to the DB and fans out.
 func (m *Manager) persistAndNotify(roomID string) {
+	m.persistPlayerStateAndNotify(roomID, false)
+}
+
+func (m *Manager) persistAndNotifyForced(roomID string) {
+	m.persistPlayerStateAndNotify(roomID, true)
+}
+
+func (m *Manager) persistPlayerStateAndNotify(roomID string, forceRevision bool) {
 	m.persistMu.Lock()
 	pl := m.getPlayer(roomID)
 	st, _ := m.store.ensureState(roomID)
@@ -818,7 +871,7 @@ func (m *Manager) persistAndNotify(roomID string) {
 		st.State = state
 		st.CurrentItemID = currentID
 		st.PositionMS = pos
-		if structuralChange {
+		if structuralChange || forceRevision {
 			st.Revision++
 		}
 	} else {

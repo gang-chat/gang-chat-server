@@ -47,7 +47,8 @@ type player struct {
 	advance func(prev *QueueItem, transition playbackTransition, positionMS int64) *QueueItem
 	// onState is called whenever playback state changes so the manager can
 	// persist it and fan out an SSE snapshot.
-	onState func()
+	onState         func()
+	onPriorityState func()
 }
 
 type commandKind int
@@ -57,6 +58,7 @@ const (
 	cmdResume
 	cmdSkip
 	cmdPrevious
+	cmdPlayNow
 	cmdStop
 	cmdWake // re-check the queue when idling; no-op during playback
 )
@@ -64,6 +66,7 @@ const (
 type command struct {
 	kind commandKind
 	ack  chan struct{}
+	item *QueueItem
 }
 
 type playbackTransition int
@@ -79,21 +82,24 @@ type playResult struct {
 	transition playbackTransition
 	positionMS int64
 	ack        chan struct{}
+	priority   *QueueItem
 }
 
 func newPlayer(
 	roomID, host, token string,
 	advance func(prev *QueueItem, transition playbackTransition, positionMS int64) *QueueItem,
 	onState func(),
+	onPriorityState func(),
 ) *player {
 	return &player{
-		roomID:  roomID,
-		host:    host,
-		token:   token,
-		cmd:     make(chan command, 8),
-		done:    make(chan struct{}),
-		advance: advance,
-		onState: onState,
+		roomID:          roomID,
+		host:            host,
+		token:           token,
+		cmd:             make(chan command, 8),
+		done:            make(chan struct{}),
+		advance:         advance,
+		onState:         onState,
+		onPriorityState: onPriorityState,
 	}
 }
 
@@ -131,9 +137,15 @@ func (p *player) connect() error {
 // run is the playback loop. It plays items handed back by advance until the
 // queue is exhausted or stop is requested, then disconnects.
 func (p *player) run() {
+	p.runFrom(nil)
+}
+
+// runFrom starts from an already-selected item when the manager needs the
+// command response to expose that item immediately. A nil item preserves the
+// ordinary selector-driven startup path.
+func (p *player) runFrom(item *QueueItem) {
 	defer p.disconnect()
 	go p.heartbeat()
-	var item *QueueItem
 	for {
 		if item == nil {
 			item = p.advance(nil, transitionNatural, 0)
@@ -151,6 +163,12 @@ func (p *player) run() {
 		if result.stop {
 			acknowledge(result.ack)
 			return
+		}
+		if result.priority != nil {
+			item = result.priority
+			p.setPriorityCurrent(item)
+			acknowledge(result.ack)
+			continue
 		}
 		item = p.advance(item, result.transition, result.positionMS)
 		if item == nil {
@@ -181,6 +199,11 @@ func (p *player) idleWait() bool {
 			if c.kind == cmdStop {
 				acknowledge(c.ack)
 				return false
+			}
+			if c.kind == cmdPlayNow && c.item != nil {
+				p.setPriorityCurrent(c.item)
+				acknowledge(c.ack)
+				return true
 			}
 			// With no current track there is nothing to pause/skip/restart.  The
 			// command still has a deterministic successful acknowledgement and a
@@ -250,6 +273,11 @@ func (p *player) playFile(item *QueueItem) playResult {
 				return playResult{transition: transitionNext, positionMS: elapsed.Milliseconds(), ack: c.ack}
 			case cmdPrevious:
 				return playResult{transition: transitionPrevious, positionMS: elapsed.Milliseconds(), ack: c.ack}
+			case cmdPlayNow:
+				if c.item != nil {
+					return playResult{priority: c.item, positionMS: elapsed.Milliseconds(), ack: c.ack}
+				}
+				acknowledge(c.ack)
 			case cmdPause:
 				p.setPaused(true)
 				acknowledge(c.ack)
@@ -274,6 +302,11 @@ func (p *player) playFile(item *QueueItem) playResult {
 				return playResult{transition: transitionNext, positionMS: elapsed.Milliseconds(), ack: c.ack}
 			case cmdPrevious:
 				return playResult{transition: transitionPrevious, positionMS: elapsed.Milliseconds(), ack: c.ack}
+			case cmdPlayNow:
+				if c.item != nil {
+					return playResult{priority: c.item, positionMS: elapsed.Milliseconds(), ack: c.ack}
+				}
+				acknowledge(c.ack)
 			case cmdResume:
 				p.setPaused(false)
 				nextWrite = time.Now()
@@ -331,6 +364,12 @@ func (p *player) pause() error    { return p.sendAndWait(cmdPause) }
 func (p *player) resume() error   { return p.sendAndWait(cmdResume) }
 func (p *player) skip() error     { return p.sendAndWait(cmdSkip) }
 func (p *player) previous() error { return p.sendAndWait(cmdPrevious) }
+func (p *player) playNow(item *QueueItem) error {
+	if item == nil {
+		return errors.New("music box priority item is required")
+	}
+	return p.sendCommandAndWait(command{kind: cmdPlayNow, item: item})
+}
 func (p *player) stop() error {
 	if err := p.sendAndWait(cmdStop); err != nil {
 		return err
@@ -345,15 +384,57 @@ func (p *player) stop() error {
 func (p *player) wake() { p.send(command{kind: cmdWake}) }
 
 func (p *player) sendAndWait(kind commandKind) error {
+	return p.sendCommandAndWait(command{kind: kind})
+}
+
+func (p *player) sendCommandAndWait(c command) error {
 	ack := make(chan struct{})
-	if !p.send(command{kind: kind, ack: ack}) {
+	c.ack = ack
+	p.mu.Lock()
+	stopped := p.stopped
+	p.mu.Unlock()
+	if stopped {
 		return errors.New("music box player is stopped")
+	}
+	timer := time.NewTimer(5 * time.Second)
+	defer timer.Stop()
+	// Reliable controls wait for transient wake-command pressure to drain.
+	// Wake itself remains best-effort and coalescible through send().
+	select {
+	case p.cmd <- c:
+	case <-p.done:
+		return errors.New("music box player is stopped")
+	case <-timer.C:
+		return errors.New("music box command timed out")
 	}
 	select {
 	case <-ack:
 		return nil
-	case <-time.After(5 * time.Second):
+	case <-p.done:
+		select {
+		case <-ack:
+			return nil
+		default:
+		}
+		return errors.New("music box player is stopped")
+	case <-timer.C:
 		return errors.New("music box command timed out")
+	}
+}
+
+// setPriorityCurrent changes the file being read without tearing down the
+// LiveKit participant or published Opus track. Priority play always starts at
+// zero and clears a previous pause, including when restarting the same item.
+func (p *player) setPriorityCurrent(it *QueueItem) {
+	p.mu.Lock()
+	p.current = it
+	p.positionMS = 0
+	p.paused = false
+	p.mu.Unlock()
+	if p.onPriorityState != nil {
+		p.onPriorityState()
+	} else if p.onState != nil {
+		p.onState()
 	}
 }
 

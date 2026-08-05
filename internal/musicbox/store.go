@@ -355,6 +355,24 @@ func (s *store) deleteRoomItem(roomID, id string) (*QueueItem, error) {
 	return it, nil
 }
 
+// deleteTemporaryQueue removes only the room's request queue. Saved playlist
+// snapshots are independent playback copies and must never be affected by a
+// request-queue clear.
+func (s *store) deleteTemporaryQueue(roomID string) ([]*QueueItem, error) {
+	items, err := s.listScopedQueue(roomID, QueueScopeTemporary, "")
+	if err != nil {
+		return nil, err
+	}
+	if _, err := s.db.Exec(
+		`DELETE FROM room_music_box_queue
+		 WHERE room_id = ? AND queue_scope = 'temporary'`,
+		roomID,
+	); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 func (s *store) deleteSavedSnapshotsExcept(
 	roomID string,
 	keepSnapshotID string,

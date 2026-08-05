@@ -17,8 +17,8 @@ import (
 // room's LiveKit session via a bot participant. See internal/musicbox.
 //
 // Permissions (per product decision): any room member can search, enqueue, and
-// control playback (play/pause/resume/skip/stop). Removing a queue item is
-// allowed for the member who added it or any room admin.
+// control playback (play/pause/resume/skip/stop), remove queue items, and clear
+// the request queue. Destructive client actions still require confirmation.
 
 const musicBoxRequestQueueDisplayName = "点歌队列"
 
@@ -140,7 +140,7 @@ func (h *Handler) controlMusicBox(c *gin.Context) {
 	var req musicBoxControlRequest
 	if err := c.ShouldBindJSON(&req); err != nil || !allowed(
 		req.Action,
-		"play", "pause", "resume", "skip", "next", "previous", "play_now", "set_mode", "stop",
+		"play", "pause", "resume", "skip", "next", "previous", "play_now", "set_mode", "stop", "clear_temporary_playlist",
 	) {
 		h.jsonError(c, http.StatusBadRequest, "validation_failed", "invalid music box action")
 		return

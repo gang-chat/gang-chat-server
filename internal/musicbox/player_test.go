@@ -120,3 +120,73 @@ func TestStopWaitsUntilSnapshotIsStopped(t *testing.T) {
 		)
 	}
 }
+
+func TestPlayNowCarriesTargetAndResetsPlaybackState(t *testing.T) {
+	oldItem := &QueueItem{ID: "old"}
+	targetItem := &QueueItem{ID: "target"}
+	var priorityNotifications int32
+	p := newTestPlayer(nil)
+	p.current = oldItem
+	p.positionMS = 7250
+	p.paused = true
+	p.onPriorityState = func() { atomic.AddInt32(&priorityNotifications, 1) }
+
+	go func() {
+		command := <-p.cmd
+		if command.kind != cmdPlayNow {
+			t.Errorf("command kind = %v, want cmdPlayNow", command.kind)
+		}
+		if command.item != targetItem {
+			t.Errorf("command item = %p, want %p", command.item, targetItem)
+		}
+		p.setPriorityCurrent(command.item)
+		acknowledge(command.ack)
+	}()
+
+	if err := p.playNow(targetItem); err != nil {
+		t.Fatalf("play now: %v", err)
+	}
+	state, currentID, positionMS := p.snapshot()
+	if state != StatePlaying || currentID != targetItem.ID || positionMS != 0 {
+		t.Fatalf(
+			"snapshot = (%q, %q, %d), want playing/%s/0",
+			state,
+			currentID,
+			positionMS,
+			targetItem.ID,
+		)
+	}
+	if got := atomic.LoadInt32(&priorityNotifications); got != 1 {
+		t.Fatalf("priority notifications = %d, want 1", got)
+	}
+}
+
+func TestPlayNowWaitsForBestEffortWakePressure(t *testing.T) {
+	p := newTestPlayer(nil)
+	targetItem := &QueueItem{ID: "target"}
+	for index := 0; index < cap(p.cmd); index++ {
+		p.wake()
+	}
+
+	go func() {
+		time.Sleep(10 * time.Millisecond)
+		for {
+			command := <-p.cmd
+			if command.kind != cmdPlayNow {
+				acknowledge(command.ack)
+				continue
+			}
+			p.setPriorityCurrent(command.item)
+			acknowledge(command.ack)
+			return
+		}
+	}()
+
+	if err := p.playNow(targetItem); err != nil {
+		t.Fatalf("play now under wake pressure: %v", err)
+	}
+	state, currentID, _ := p.snapshot()
+	if state != StatePlaying || currentID != targetItem.ID {
+		t.Fatalf("snapshot = (%q, %q), want playing/%s", state, currentID, targetItem.ID)
+	}
+}
