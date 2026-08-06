@@ -587,7 +587,7 @@ func TestRoomMusicPlaylistCloneUsesRemarkAndEnforcesCapacity(t *testing.T) {
 	)
 	api.requireStatus(status, http.StatusCreated, response)
 	clonedPlaylist := response["playlist"].(map[string]any)
-	if clonedPlaylist["name"] != "房间备注名·第三" || clonedPlaylist["item_count"] != float64(1) {
+	if clonedPlaylist["name"] != "房间备注名 · 第三" || clonedPlaylist["item_count"] != float64(1) {
 		t.Fatalf("unexpected cloned playlist: %v", clonedPlaylist)
 	}
 	clonedID := clonedPlaylist["id"].(string)

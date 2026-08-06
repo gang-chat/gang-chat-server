@@ -83,7 +83,7 @@ func (s *PlaylistStore) CloneRoomPlaylistToUser(
 		ctx,
 		tx,
 		ownerUserID,
-		roomDisplayName+"·"+source.Name,
+		roomDisplayName+" · "+source.Name,
 	)
 	if err != nil {
 		return PlaylistSummary{}, err
