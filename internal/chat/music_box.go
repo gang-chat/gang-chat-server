@@ -280,6 +280,73 @@ func (h *Handler) activateMusicBoxPlaylist(c *gin.Context) {
 	c.JSON(http.StatusOK, h.musicBoxStatePayload(roomID))
 }
 
+func (h *Handler) cloneActiveMusicBoxPlaylist(c *gin.Context) {
+	roomID := c.Param("room_id")
+	if !h.requireMember(c, roomID) || !h.musicBoxReady(c) {
+		return
+	}
+	var req musicBoxCloneActivePlaylistRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		h.jsonError(c, http.StatusBadRequest, "bad_request", "invalid JSON body")
+		return
+	}
+	req.PlaylistID = strings.TrimSpace(req.PlaylistID)
+	req.SnapshotID = strings.TrimSpace(req.SnapshotID)
+	if req.PlaylistID == "" || req.SnapshotID == "" {
+		h.jsonError(c, http.StatusBadRequest, "validation_failed", "playlist snapshot is required")
+		return
+	}
+
+	st, items, err := h.MusicBox.State(roomID)
+	if err != nil {
+		h.jsonError(c, http.StatusInternalServerError, "internal_error", "load active music playlist failed")
+		return
+	}
+	actorID := currentUserID(c)
+	if st.ActiveSourceType != musicbox.ActiveSourceUserPlaylist ||
+		st.ActivePlaylistOwnerID == "" ||
+		st.ActivePlaylistOwnerID == actorID {
+		h.jsonError(c, http.StatusConflict, "active_playlist_not_cloneable", "only another user's active playlist can be cloned")
+		return
+	}
+	if st.ActivePlaylistID != req.PlaylistID || st.ActiveSnapshotID != req.SnapshotID {
+		h.jsonError(c, http.StatusConflict, "active_playlist_changed", "the active playlist changed; reopen it and try again")
+		return
+	}
+
+	ownerName := st.ActivePlaylistOwnerID
+	if owner := h.musicBoxRequesterPayloads(roomID, nil, st.ActivePlaylistOwnerID)[st.ActivePlaylistOwnerID]; owner != nil {
+		if displayName, ok := owner["display_name"].(string); ok && strings.TrimSpace(displayName) != "" {
+			ownerName = strings.TrimSpace(displayName)
+		}
+	}
+	tracks := make([]musicbox.SnapshotTrack, 0, len(items))
+	for _, item := range items {
+		tracks = append(tracks, musicbox.SnapshotTrack{
+			Source: item.Source, TrackID: item.TrackID, Title: item.Title,
+			Artist: item.Artist, DurationMS: item.DurationMS,
+		})
+	}
+	playlist, err := h.Playlists.CloneSnapshotToUserPlaylist(
+		c.Request.Context(),
+		actorID,
+		ownerName+"的歌单 · "+st.ActivePlaylistName,
+		tracks,
+	)
+	if err != nil {
+		switch {
+		case errors.Is(err, musicbox.ErrPlaylistLimit):
+			h.jsonError(c, http.StatusConflict, "playlist_limit_reached", "playlist limit reached")
+		case errors.Is(err, musicbox.ErrPlaylistItemLimit):
+			h.jsonError(c, http.StatusConflict, "playlist_item_limit_reached", "playlist item limit reached")
+		default:
+			h.jsonError(c, http.StatusInternalServerError, "internal_error", "clone active music playlist failed")
+		}
+		return
+	}
+	c.JSON(http.StatusCreated, gin.H{"playlist": musicPlaylistPayload(playlist)})
+}
+
 // publishMusicBoxSnapshot fans out a fresh music box state to a room's SSE
 // subscribers. Best-effort: a nil bus is swallowed.
 func (h *Handler) publishMusicBoxSnapshot(roomID string) {
@@ -349,6 +416,7 @@ func (h *Handler) musicBoxStatePayload(roomID string) gin.H {
 		activeSource["name"] = musicBoxRequestQueueDisplayName
 	} else {
 		activeSource["playlist_id"] = st.ActivePlaylistID
+		activeSource["snapshot_id"] = st.ActiveSnapshotID
 		activeSource["owner_user_id"] = st.ActivePlaylistOwnerID
 		if owner := requesters[st.ActivePlaylistOwnerID]; owner != nil {
 			activeSource["owner"] = owner

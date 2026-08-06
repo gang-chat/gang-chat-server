@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 )
 
@@ -327,6 +328,204 @@ func (s *PlaylistStore) CreateUserPlaylist(
 		return PlaylistSummary{}, err
 	}
 	return item, nil
+}
+
+// CloneSnapshotToUserPlaylist atomically copies an active saved-playlist
+// snapshot into a new personal playlist. The caller supplies the immutable
+// snapshot tracks captured by Manager.State; capacity checks, track upserts,
+// playlist creation and item insertion all share one transaction so a failed
+// clone can never leave a partial playlist behind.
+func (s *PlaylistStore) CloneSnapshotToUserPlaylist(
+	ctx context.Context,
+	ownerUserID, requestedName string,
+	tracks []SnapshotTrack,
+) (PlaylistSummary, error) {
+	if len(tracks) > MaxPlaylistItems {
+		return PlaylistSummary{}, ErrPlaylistItemLimit
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return PlaylistSummary{}, err
+	}
+	defer tx.Rollback()
+
+	var lockedUserID string
+	if err := tx.QueryRowContext(
+		ctx,
+		`SELECT id FROM users WHERE id = ? FOR UPDATE`,
+		ownerUserID,
+	).Scan(&lockedUserID); err != nil {
+		return PlaylistSummary{}, err
+	}
+	var count int
+	if err := tx.QueryRowContext(
+		ctx,
+		`SELECT COUNT(*) FROM music_playlists
+		 WHERE scope_type = 'user' AND owner_user_id = ?`,
+		ownerUserID,
+	).Scan(&count); err != nil {
+		return PlaylistSummary{}, err
+	}
+	if count >= MaxUserPlaylists {
+		return PlaylistSummary{}, ErrPlaylistLimit
+	}
+
+	name, err := availableUserPlaylistName(ctx, tx, ownerUserID, requestedName)
+	if err != nil {
+		return PlaylistSummary{}, err
+	}
+	var nextOrder sql.NullInt64
+	if err := tx.QueryRowContext(
+		ctx,
+		`SELECT MAX(sort_order) FROM music_playlists
+		 WHERE scope_type = 'user' AND owner_user_id = ?`,
+		ownerUserID,
+	).Scan(&nextOrder); err != nil {
+		return PlaylistSummary{}, err
+	}
+	sortOrder := int64(10)
+	if nextOrder.Valid {
+		sortOrder = nextOrder.Int64 + 10
+	}
+	now := nowMillis()
+	playlist := PlaylistSummary{
+		ID:        "mbp_" + randomID(),
+		Name:      name,
+		Revision:  1,
+		ItemCount: len(tracks),
+		CreatedAt: now,
+		UpdatedAt: now,
+	}
+	if _, err := tx.ExecContext(
+		ctx,
+		`INSERT INTO music_playlists
+		 (id, scope_type, owner_user_id, room_id, name, description,
+		  revision, sort_order, created_at, updated_at)
+		 VALUES (?, 'user', ?, NULL, ?, '', 1, ?, ?, ?)`,
+		playlist.ID,
+		ownerUserID,
+		playlist.Name,
+		sortOrder,
+		now,
+		now,
+	); err != nil {
+		return PlaylistSummary{}, err
+	}
+
+	for index, track := range tracks {
+		artists := splitSnapshotArtists(track.Artist)
+		artistsJSON, err := json.Marshal(artists)
+		if err != nil {
+			return PlaylistSummary{}, err
+		}
+		trackID := "mbt_" + randomID()
+		if _, err := tx.ExecContext(
+			ctx,
+			`INSERT INTO music_tracks
+			 (id, source, external_track_id, title, artist, artists_json,
+			  duration_ms, created_at, updated_at)
+			 VALUES (?, ?, ?, ?, ?, ?, NULLIF(?, 0), ?, ?)
+			 ON DUPLICATE KEY UPDATE
+			   title = VALUES(title), artist = VALUES(artist),
+			   artists_json = VALUES(artists_json),
+			   duration_ms = COALESCE(VALUES(duration_ms), duration_ms),
+			   updated_at = VALUES(updated_at)`,
+			trackID,
+			track.Source,
+			track.TrackID,
+			track.Title,
+			strings.Join(artists, "、"),
+			artistsJSON,
+			track.DurationMS,
+			now,
+			now,
+		); err != nil {
+			return PlaylistSummary{}, err
+		}
+		if err := tx.QueryRowContext(
+			ctx,
+			`SELECT id FROM music_tracks WHERE source = ? AND external_track_id = ?`,
+			track.Source,
+			track.TrackID,
+		).Scan(&trackID); err != nil {
+			return PlaylistSummary{}, err
+		}
+		if _, err := tx.ExecContext(
+			ctx,
+			`INSERT INTO music_playlist_items
+			 (id, playlist_id, track_id, added_by_user_id, sort_order,
+			  created_at, updated_at)
+			 VALUES (?, ?, ?, ?, ?, ?, ?)`,
+			"mbpi_"+randomID(),
+			playlist.ID,
+			trackID,
+			ownerUserID,
+			int64(index+1)*10,
+			now,
+			now,
+		); err != nil {
+			return PlaylistSummary{}, err
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		return PlaylistSummary{}, err
+	}
+	return playlist, nil
+}
+
+func availableUserPlaylistName(
+	ctx context.Context,
+	tx *sql.Tx,
+	ownerUserID, requestedName string,
+) (string, error) {
+	base := strings.TrimSpace(requestedName)
+	if base == "" {
+		base = "复制的歌单"
+	}
+	base = truncatePlaylistName(base, 64)
+	for sequence := 1; sequence <= MaxUserPlaylists+1; sequence++ {
+		candidate := base
+		if sequence > 1 {
+			suffix := fmt.Sprintf(" (%d)", sequence)
+			candidate = truncatePlaylistName(base, 64-len([]rune(suffix))) + suffix
+		}
+		var count int
+		if err := tx.QueryRowContext(
+			ctx,
+			`SELECT COUNT(*) FROM music_playlists
+			 WHERE scope_type = 'user' AND owner_user_id = ? AND name = ?`,
+			ownerUserID,
+			candidate,
+		).Scan(&count); err != nil {
+			return "", err
+		}
+		if count == 0 {
+			return candidate, nil
+		}
+	}
+	return "", ErrPlaylistName
+}
+
+func truncatePlaylistName(value string, maxRunes int) string {
+	runes := []rune(value)
+	if len(runes) <= maxRunes {
+		return value
+	}
+	return string(runes[:maxRunes])
+}
+
+func splitSnapshotArtists(value string) []string {
+	parts := strings.FieldsFunc(value, func(r rune) bool {
+		return r == '、' || r == ',' || r == '，'
+	})
+	result := make([]string, 0, len(parts))
+	for _, part := range parts {
+		if part = strings.TrimSpace(part); part != "" {
+			result = append(result, part)
+		}
+	}
+	return result
 }
 
 func (s *PlaylistStore) DeleteUserPlaylist(

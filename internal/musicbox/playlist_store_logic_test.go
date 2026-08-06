@@ -30,3 +30,25 @@ func TestSameStringSetRejectsDuplicatesAndStaleOrders(t *testing.T) {
 		t.Fatal("stale partial order should be rejected")
 	}
 }
+
+func TestClonePlaylistNameAndArtistsStayDisplaySafe(t *testing.T) {
+	// Use visible runes so the test also catches byte-based truncation of CJK.
+	longName := "朋友的歌单 · " + repeatRune('歌', 80)
+	trimmed := truncatePlaylistName(longName, 64)
+	if got := len([]rune(trimmed)); got != 64 {
+		t.Fatalf("truncated clone name has %d runes, want 64", got)
+	}
+	artists := splitSnapshotArtists("甲、乙, 丙，丁")
+	want := []string{"甲", "乙", "丙", "丁"}
+	if !sameStringList(artists, want) {
+		t.Fatalf("splitSnapshotArtists() = %v, want %v", artists, want)
+	}
+}
+
+func repeatRune(value rune, count int) string {
+	runes := make([]rune, count)
+	for index := range runes {
+		runes[index] = value
+	}
+	return string(runes)
+}

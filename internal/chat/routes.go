@@ -215,6 +215,7 @@ func RegisterRoutes(g *gin.RouterGroup, db *sql.DB, cfg *config.Config, bus *eve
 	g.DELETE("/rooms/:room_id/music-box/queue/:item_id", h.removeMusicBoxItem)
 	g.POST("/rooms/:room_id/music-box/control", h.controlMusicBox)
 	g.POST("/rooms/:room_id/music-box/activate", h.activateMusicBoxPlaylist)
+	g.POST("/rooms/:room_id/music-box/active-playlist/clone", h.cloneActiveMusicBoxPlaylist)
 
 	return h
 }

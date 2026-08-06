@@ -116,6 +116,11 @@ type musicBoxActivatePlaylistRequest struct {
 	StartPlay  bool   `json:"start_play"`
 }
 
+type musicBoxCloneActivePlaylistRequest struct {
+	PlaylistID string `json:"playlist_id"`
+	SnapshotID string `json:"snapshot_id"`
+}
+
 type saveStickerRequest struct {
 	StickerID       string `json:"sticker_id"`
 	SourceMessageID string `json:"source_message_id"`
