@@ -412,6 +412,101 @@ func TestPersonalMusicPlaylistMergePreservesSelectionOrderAndDeduplicatesLinks(t
 	api.requireStatus(status, http.StatusNotFound, response)
 }
 
+func TestPersonalMusicPlaylistBatchAddCopiesWithoutMutatingSource(t *testing.T) {
+	api := newAPIHarness(t)
+	owner := api.register("playlist_batch_add_owner")
+	other := api.register("playlist_batch_add_other")
+
+	createPlaylist := func(token, name string) string {
+		status, response := api.request(
+			http.MethodPost,
+			"/me/music-box/playlists",
+			token,
+			map[string]any{"name": name},
+		)
+		api.requireStatus(status, http.StatusCreated, response)
+		return response["playlist"].(map[string]any)["id"].(string)
+	}
+	addTrack := func(playlistID, trackID, title string) string {
+		status, response := api.request(
+			http.MethodPost,
+			"/me/music-box/playlists/"+playlistID+"/items",
+			owner.Token,
+			map[string]any{
+				"track_id": trackID,
+				"source":   "netease",
+				"title":    title,
+				"artists":  []string{"歌手"},
+			},
+		)
+		api.requireStatus(status, http.StatusCreated, response)
+		return response["item"].(map[string]any)["id"].(string)
+	}
+
+	sourceID := createPlaylist(owner.Token, "批量添加来源")
+	targetID := createPlaylist(owner.Token, "批量添加目标")
+	foreignID := createPlaylist(other.Token, "其他人的目标")
+	itemA := addTrack(sourceID, "batch-link-a", "A")
+	itemB := addTrack(sourceID, "batch-link-b", "B")
+	itemBDuplicate := addTrack(sourceID, "batch-link-b", "B 重复")
+	addTrack(targetID, "batch-link-a", "A 已存在")
+
+	status, response := api.request(
+		http.MethodPost,
+		"/me/music-box/playlists/"+targetID+"/items/batch-add",
+		owner.Token,
+		map[string]any{
+			"source_playlist_id": sourceID,
+			"item_ids":           []string{itemB, itemA, itemBDuplicate},
+		},
+	)
+	api.requireStatus(status, http.StatusOK, response)
+	batch := response["batch_add"].(map[string]any)
+	if batch["selected_item_count"] != float64(3) ||
+		batch["unique_item_count"] != float64(2) ||
+		batch["duplicate_count"] != float64(1) ||
+		batch["already_present_count"] != float64(1) ||
+		batch["added_item_count"] != float64(1) ||
+		batch["omitted_count"] != float64(0) {
+		t.Fatalf("unexpected batch add stats: %v", batch)
+	}
+
+	status, response = api.request(
+		http.MethodGet,
+		"/me/music-box/playlists/"+sourceID,
+		owner.Token,
+		nil,
+	)
+	api.requireStatus(status, http.StatusOK, response)
+	if sourceItems := response["items"].([]any); len(sourceItems) != 3 {
+		t.Fatalf("source items changed after batch add: %v", sourceItems)
+	}
+	status, response = api.request(
+		http.MethodGet,
+		"/me/music-box/playlists/"+targetID,
+		owner.Token,
+		nil,
+	)
+	api.requireStatus(status, http.StatusOK, response)
+	targetItems := response["items"].([]any)
+	if len(targetItems) != 2 ||
+		targetItems[0].(map[string]any)["track_id"] != "batch-link-a" ||
+		targetItems[1].(map[string]any)["track_id"] != "batch-link-b" {
+		t.Fatalf("unexpected target items/order: %v", targetItems)
+	}
+
+	status, response = api.request(
+		http.MethodPost,
+		"/me/music-box/playlists/"+foreignID+"/items/batch-add",
+		owner.Token,
+		map[string]any{
+			"source_playlist_id": sourceID,
+			"item_ids":           []string{itemA},
+		},
+	)
+	api.requireStatus(status, http.StatusNotFound, response)
+}
+
 func TestRoomMusicPlaylistPermissionsAndIsolation(t *testing.T) {
 	api := newAPIHarness(t)
 	owner := api.register("room_playlist_owner")
@@ -699,6 +794,74 @@ func TestRoomMusicPlaylistMergeRequiresAdminAndUsesRoomScope(t *testing.T) {
 	playlist := response["playlist"].(map[string]any)
 	if playlist["name"] != "房间合并结果" || playlist["item_count"] != float64(2) {
 		t.Fatalf("unexpected room merge: %v", response)
+	}
+}
+
+func TestRoomMusicPlaylistBatchAddRequiresAdmin(t *testing.T) {
+	api := newAPIHarness(t)
+	owner := api.register("room_playlist_batch_owner")
+	member := api.register("room_playlist_batch_member")
+	room := api.createRoom(owner.Token, map[string]any{
+		"name":        "Room Playlist Batch Add",
+		"join_policy": "open",
+	})
+	roomID := room["id"].(string)
+	status, response := api.request(
+		http.MethodPost,
+		"/rooms/"+roomID+"/join",
+		member.Token,
+		nil,
+	)
+	api.requireStatus(status, http.StatusOK, response)
+
+	playlistIDs := make([]string, 0, 2)
+	for _, name := range []string{"房间来源", "房间目标"} {
+		status, response = api.request(
+			http.MethodPost,
+			"/rooms/"+roomID+"/music-box/playlists",
+			owner.Token,
+			map[string]any{"name": name},
+		)
+		api.requireStatus(status, http.StatusCreated, response)
+		playlistIDs = append(
+			playlistIDs,
+			response["playlist"].(map[string]any)["id"].(string),
+		)
+	}
+	status, response = api.request(
+		http.MethodPost,
+		"/rooms/"+roomID+"/music-box/playlists/"+playlistIDs[0]+"/items",
+		owner.Token,
+		map[string]any{
+			"track_id": "room-batch-link",
+			"source":   "netease",
+			"title":    "房间批量歌曲",
+			"artists":  []string{"歌手"},
+		},
+	)
+	api.requireStatus(status, http.StatusCreated, response)
+	itemID := response["item"].(map[string]any)["id"].(string)
+	requestBody := map[string]any{
+		"source_playlist_id": playlistIDs[0],
+		"item_ids":           []string{itemID},
+	}
+
+	status, response = api.request(
+		http.MethodPost,
+		"/rooms/"+roomID+"/music-box/playlists/"+playlistIDs[1]+"/items/batch-add",
+		member.Token,
+		requestBody,
+	)
+	api.requireStatus(status, http.StatusForbidden, response)
+	status, response = api.request(
+		http.MethodPost,
+		"/rooms/"+roomID+"/music-box/playlists/"+playlistIDs[1]+"/items/batch-add",
+		owner.Token,
+		requestBody,
+	)
+	api.requireStatus(status, http.StatusOK, response)
+	if response["batch_add"].(map[string]any)["added_item_count"] != float64(1) {
+		t.Fatalf("unexpected room batch add response: %v", response)
 	}
 }
 

@@ -347,6 +347,39 @@ func (h *Handler) addRoomMusicPlaylistItem(c *gin.Context) {
 	c.JSON(http.StatusCreated, gin.H{"item": musicPlaylistItemPayload(item)})
 }
 
+func (h *Handler) batchAddRoomMusicPlaylistItems(c *gin.Context) {
+	roomID := c.Param("room_id")
+	if !h.requireRoomPlaylistAdmin(c, roomID) {
+		return
+	}
+	var req batchAddMusicPlaylistItemsRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		h.jsonError(c, http.StatusBadRequest, "bad_request", "invalid JSON body")
+		return
+	}
+	itemIDs := uniqueMusicPlaylistStrings(req.ItemIDs)
+	if strings.TrimSpace(req.SourcePlaylistID) == "" ||
+		len(itemIDs) == 0 ||
+		len(itemIDs) != len(req.ItemIDs) ||
+		len(itemIDs) > musicbox.MaxPlaylistItems {
+		h.jsonError(c, http.StatusBadRequest, "validation_failed", "source_playlist_id and 1 to 500 unique item_ids are required")
+		return
+	}
+	result, err := h.Playlists.BatchAddRoomPlaylistItems(
+		c.Request.Context(),
+		roomID,
+		currentUserID(c),
+		strings.TrimSpace(req.SourcePlaylistID),
+		c.Param("playlist_id"),
+		itemIDs,
+	)
+	if err != nil {
+		h.writeMusicPlaylistBatchAddError(c, err, "batch add room music playlist items failed")
+		return
+	}
+	c.JSON(http.StatusOK, musicPlaylistBatchAddPayload(result))
+}
+
 func (h *Handler) deleteRoomMusicPlaylistItem(c *gin.Context) {
 	h.deleteRoomMusicPlaylistItems(c, []string{c.Param("item_id")})
 }

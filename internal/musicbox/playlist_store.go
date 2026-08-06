@@ -67,6 +67,20 @@ type PlaylistMergeResult struct {
 	Truncated               bool
 }
 
+// PlaylistBatchAddResult describes an atomic copy of selected saved tracks
+// into another playlist in the same scope. Tracks are compared by their
+// concrete source/link pair rather than by display name.
+type PlaylistBatchAddResult struct {
+	Playlist            PlaylistSummary
+	SelectedItemCount   int
+	UniqueItemCount     int
+	DuplicateCount      int
+	AlreadyPresentCount int
+	AddedItemCount      int
+	OmittedCount        int
+	Truncated           bool
+}
+
 type PlaylistItem struct {
 	ID              string
 	PlaylistID      string

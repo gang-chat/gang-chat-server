@@ -103,6 +103,40 @@ func TestNormalizedMergePlaylistIDsRequiresTwoUniqueValues(t *testing.T) {
 	}
 }
 
+func TestSelectBatchAddTracksPreservesOrderAndReportsLimits(t *testing.T) {
+	selected := []playlistMergeTrack{
+		{itemID: "item-a", trackID: "track-a", source: "netease", externalTrackID: "link-a"},
+		{itemID: "item-b", trackID: "track-b", source: "netease", externalTrackID: "link-b"},
+		{itemID: "item-b-copy", trackID: "track-b", source: "netease", externalTrackID: "link-b"},
+		{itemID: "item-c", trackID: "track-c", source: "bilibili", externalTrackID: "link-c"},
+	}
+	result := selectBatchAddTracks(
+		selected,
+		map[string]struct{}{"netease\x00link-a": {}},
+		1,
+	)
+	if !sameStringList(result.targetTrackIDs, []string{"track-b"}) {
+		t.Fatalf("batch add order = %v, want track-b", result.targetTrackIDs)
+	}
+	if result.selectedItemCount != 4 || result.uniqueItemCount != 3 ||
+		result.duplicateCount != 1 || result.alreadyPresentCount != 1 ||
+		result.omittedCount != 1 {
+		t.Fatalf("unexpected batch add counts: %+v", result)
+	}
+}
+
+func TestNormalizedBatchAddItemIDsPreservesSelectionOrder(t *testing.T) {
+	got, ok := normalizedBatchAddItemIDs([]string{" second ", "first"})
+	if !ok || !sameStringList(got, []string{"second", "first"}) {
+		t.Fatalf("normalized batch ids = %v, %v", got, ok)
+	}
+	for _, invalid := range [][]string{{}, {"same", "same"}, {"valid", " "}} {
+		if got, ok := normalizedBatchAddItemIDs(invalid); ok || got != nil {
+			t.Fatalf("invalid batch ids %v accepted as %v", invalid, got)
+		}
+	}
+}
+
 func repeatRune(value rune, count int) string {
 	runes := make([]rune, count)
 	for index := range runes {

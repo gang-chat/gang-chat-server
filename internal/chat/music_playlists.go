@@ -45,6 +45,11 @@ type addMusicPlaylistItemRequest struct {
 	DurationMS int64    `json:"duration_ms"`
 }
 
+type batchAddMusicPlaylistItemsRequest struct {
+	SourcePlaylistID string   `json:"source_playlist_id"`
+	ItemIDs          []string `json:"item_ids"`
+}
+
 type deleteMusicPlaylistItemsRequest struct {
 	ItemIDs []string `json:"item_ids"`
 }
@@ -434,6 +439,34 @@ func (h *Handler) addMyMusicPlaylistItem(c *gin.Context) {
 	c.JSON(http.StatusCreated, gin.H{"item": musicPlaylistItemPayload(item)})
 }
 
+func (h *Handler) batchAddMyMusicPlaylistItems(c *gin.Context) {
+	var req batchAddMusicPlaylistItemsRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		h.jsonError(c, http.StatusBadRequest, "bad_request", "invalid JSON body")
+		return
+	}
+	itemIDs := uniqueMusicPlaylistStrings(req.ItemIDs)
+	if strings.TrimSpace(req.SourcePlaylistID) == "" ||
+		len(itemIDs) == 0 ||
+		len(itemIDs) != len(req.ItemIDs) ||
+		len(itemIDs) > musicbox.MaxPlaylistItems {
+		h.jsonError(c, http.StatusBadRequest, "validation_failed", "source_playlist_id and 1 to 500 unique item_ids are required")
+		return
+	}
+	result, err := h.Playlists.BatchAddUserPlaylistItems(
+		c.Request.Context(),
+		currentUserID(c),
+		strings.TrimSpace(req.SourcePlaylistID),
+		c.Param("playlist_id"),
+		itemIDs,
+	)
+	if err != nil {
+		h.writeMusicPlaylistBatchAddError(c, err, "batch add music playlist items failed")
+		return
+	}
+	c.JSON(http.StatusOK, musicPlaylistBatchAddPayload(result))
+}
+
 func (h *Handler) deleteMyMusicPlaylistItem(c *gin.Context) {
 	h.deleteMyMusicPlaylistItems(c, []string{c.Param("item_id")})
 }
@@ -563,6 +596,36 @@ func musicPlaylistMergePayload(result musicbox.PlaylistMergeResult) gin.H {
 			"consumed_source_item_count": result.ConsumedSourceItemCount,
 			"truncated":                  result.Truncated,
 		},
+	}
+}
+
+func musicPlaylistBatchAddPayload(result musicbox.PlaylistBatchAddResult) gin.H {
+	return gin.H{
+		"playlist": musicPlaylistPayload(result.Playlist),
+		"batch_add": gin.H{
+			"selected_item_count":   result.SelectedItemCount,
+			"unique_item_count":     result.UniqueItemCount,
+			"duplicate_count":       result.DuplicateCount,
+			"already_present_count": result.AlreadyPresentCount,
+			"added_item_count":      result.AddedItemCount,
+			"omitted_count":         result.OmittedCount,
+			"truncated":             result.Truncated,
+		},
+	}
+}
+
+func (h *Handler) writeMusicPlaylistBatchAddError(
+	c *gin.Context,
+	err error,
+	message string,
+) {
+	switch {
+	case errors.Is(err, musicbox.ErrPlaylistSelection):
+		h.jsonError(c, http.StatusBadRequest, "validation_failed", "invalid playlist item selection")
+	case errors.Is(err, musicbox.ErrPlaylistNotFound):
+		h.jsonError(c, http.StatusNotFound, "not_found", "music playlist or item not found")
+	default:
+		h.jsonError(c, http.StatusInternalServerError, "internal_error", message)
 	}
 }
 
