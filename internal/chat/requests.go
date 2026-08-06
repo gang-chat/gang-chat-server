@@ -97,6 +97,11 @@ type musicBoxEnqueueRequest struct {
 	DurationMS *int64 `json:"duration_ms"`
 }
 
+type musicTrackPreviewRequest struct {
+	Source  string `json:"source"`
+	TrackID string `json:"track_id"`
+}
+
 type musicBoxControlRequest struct {
 	Action           string `json:"action"`
 	ItemID           string `json:"item_id"`

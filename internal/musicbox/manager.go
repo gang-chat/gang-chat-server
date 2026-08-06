@@ -2,6 +2,7 @@ package musicbox
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
 	"errors"
 	"fmt"
@@ -80,7 +81,15 @@ type Manager struct {
 	// pumpMu serializes the download scheduler (pumpRoom) so two concurrent
 	// triggers can't both start a download for the same room.
 	pumpMu sync.Mutex
+
+	// previewCleanupMu serializes best-effort LRU cleanup of the shared
+	// authenticated preview cache. Per-track preparation itself is serialized
+	// through controlLocks so concurrent clients do not transcode the same track
+	// more than once.
+	previewCleanupMu sync.Mutex
 }
+
+const previewCacheMaxBytes int64 = 512 << 20
 
 // NewManager builds a Manager. If cfg.Enabled is false every operation returns
 // ErrUnavailable, so callers don't need nil checks.
@@ -196,6 +205,107 @@ func (m *Manager) resolveURL(ctx context.Context, item *QueueItem) (string, erro
 		return "", err
 	}
 	return resolved.URL, nil
+}
+
+// PreparePreview resolves and transcodes a track into the shared preview
+// cache without adding it to a room queue or touching room playback state.
+// The returned Ogg/Opus file is served only through the authenticated preview
+// endpoint and is used for an explicitly initiated local client preview.
+func (m *Manager) PreparePreview(ctx context.Context, source, trackID string) (string, error) {
+	if m == nil || m.tc == nil || strings.TrimSpace(m.cfg.Dir) == "" {
+		return "", ErrUnavailable
+	}
+	source = strings.TrimSpace(source)
+	if source == "" {
+		source = defaultGDSource
+	}
+	trackID = strings.TrimSpace(trackID)
+	if trackID == "" {
+		return "", errors.New("music preview track id is required")
+	}
+
+	key := previewCacheKey(source, trackID)
+	lock := m.controlLock("preview:" + key)
+	lock.Lock()
+	defer lock.Unlock()
+
+	dir := filepath.Join(m.cfg.Dir, "previews")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return "", fmt.Errorf("prepare preview dir: %w", err)
+	}
+	dst := filepath.Join(dir, key+".ogg")
+	if info, err := os.Stat(dst); err == nil && info.Size() > 0 {
+		now := time.Now()
+		_ = os.Chtimes(dst, now, now)
+		return dst, nil
+	}
+
+	item := &QueueItem{Source: source, TrackID: trackID}
+	resolvedURL, err := m.resolveURL(ctx, item)
+	if err != nil {
+		return "", fmt.Errorf("resolve preview url: %w", err)
+	}
+	tmp := dst + ".tmp-" + randomID()
+	if _, err := m.tc.transcode(ctx, source, resolvedURL, tmp); err != nil {
+		_ = os.Remove(tmp)
+		return "", err
+	}
+	if err := os.Rename(tmp, dst); err != nil {
+		_ = os.Remove(tmp)
+		return "", fmt.Errorf("publish preview cache: %w", err)
+	}
+	m.cleanupPreviewCache(dst)
+	return dst, nil
+}
+
+func previewCacheKey(source, trackID string) string {
+	sum := sha256.Sum256([]byte(strings.TrimSpace(source) + "\x00" + strings.TrimSpace(trackID)))
+	return fmt.Sprintf("%x", sum[:16])
+}
+
+func (m *Manager) cleanupPreviewCache(keepPath string) {
+	m.previewCleanupMu.Lock()
+	defer m.previewCleanupMu.Unlock()
+
+	dir := filepath.Join(m.cfg.Dir, "previews")
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return
+	}
+	type cachedPreview struct {
+		path    string
+		size    int64
+		modTime time.Time
+	}
+	files := make([]cachedPreview, 0, len(entries))
+	var total int64
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".ogg") {
+			continue
+		}
+		info, err := entry.Info()
+		if err != nil || info.Size() <= 0 {
+			continue
+		}
+		path := filepath.Join(dir, entry.Name())
+		files = append(files, cachedPreview{path: path, size: info.Size(), modTime: info.ModTime()})
+		total += info.Size()
+	}
+	if total <= previewCacheMaxBytes {
+		return
+	}
+	sort.Slice(files, func(i, j int) bool { return files[i].modTime.Before(files[j].modTime) })
+	for _, file := range files {
+		if total <= previewCacheMaxBytes {
+			break
+		}
+		if file.path == keepPath {
+			continue
+		}
+		if err := os.Remove(file.path); err == nil {
+			total -= file.size
+		}
+	}
 }
 
 // SetOnRoomChanged installs the change callback after construction. The chat

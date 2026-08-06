@@ -3,6 +3,7 @@ package chat
 import (
 	"errors"
 	"net/http"
+	"os"
 	"strconv"
 	"strings"
 	"unicode/utf8"
@@ -299,6 +300,46 @@ func (h *Handler) searchMyMusicPlaylistTracks(c *gin.Context) {
 		})
 	}
 	c.JSON(http.StatusOK, gin.H{"results": tracks})
+}
+
+func (h *Handler) previewMusicTrack(c *gin.Context) {
+	if h.MusicBox == nil {
+		h.jsonError(c, http.StatusServiceUnavailable, "music_preview_unavailable", "music preview is not available")
+		return
+	}
+	var req musicTrackPreviewRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		h.jsonError(c, http.StatusBadRequest, "bad_request", "invalid JSON body")
+		return
+	}
+	source := strings.TrimSpace(req.Source)
+	trackID := strings.TrimSpace(req.TrackID)
+	if !allowedMusicPlaylistSource(source) || trackID == "" || utf8.RuneCountInString(trackID) > maxPlaylistTrackIDRunes {
+		h.jsonError(c, http.StatusBadRequest, "validation_failed", "invalid preview track")
+		return
+	}
+	path, err := h.MusicBox.PreparePreview(c.Request.Context(), source, trackID)
+	if err != nil {
+		if errors.Is(err, musicbox.ErrUnavailable) {
+			h.jsonError(c, http.StatusServiceUnavailable, "music_preview_unavailable", "music preview is not available")
+			return
+		}
+		h.jsonError(c, http.StatusBadGateway, "music_preview_failed", "prepare music preview failed: "+err.Error())
+		return
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		h.jsonError(c, http.StatusInternalServerError, "music_preview_failed", "open music preview failed")
+		return
+	}
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil || info.Size() <= 0 {
+		h.jsonError(c, http.StatusInternalServerError, "music_preview_failed", "music preview is empty")
+		return
+	}
+	c.Header("Content-Disposition", `inline; filename="music-preview.ogg"`)
+	c.DataFromReader(http.StatusOK, info.Size(), "audio/ogg", file, nil)
 }
 
 func (h *Handler) addMyMusicPlaylistItem(c *gin.Context) {
