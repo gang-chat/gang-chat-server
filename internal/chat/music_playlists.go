@@ -31,6 +31,11 @@ type renameMusicPlaylistRequest struct {
 	Name string `json:"name"`
 }
 
+type mergeMusicPlaylistsRequest struct {
+	Name        string   `json:"name"`
+	PlaylistIDs []string `json:"playlist_ids"`
+}
+
 type addMusicPlaylistItemRequest struct {
 	TrackID    string   `json:"track_id"`
 	Source     string   `json:"source"`
@@ -115,6 +120,37 @@ func (h *Handler) createMyMusicPlaylist(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusCreated, gin.H{"playlist": musicPlaylistPayload(playlist)})
+}
+
+func (h *Handler) mergeMyMusicPlaylists(c *gin.Context) {
+	var req mergeMusicPlaylistsRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		h.jsonError(c, http.StatusBadRequest, "bad_request", "invalid JSON body")
+		return
+	}
+	name := strings.TrimSpace(req.Name)
+	playlistIDs := uniqueMusicPlaylistStrings(req.PlaylistIDs)
+	if name == "" || utf8.RuneCountInString(name) > maxPlaylistNameRunes {
+		h.jsonError(c, http.StatusBadRequest, "validation_failed", "playlist name must contain 1 to 64 characters")
+		return
+	}
+	if len(playlistIDs) < 2 ||
+		len(playlistIDs) != len(req.PlaylistIDs) ||
+		len(playlistIDs) > musicbox.MaxUserPlaylists {
+		h.jsonError(c, http.StatusBadRequest, "validation_failed", "playlist_ids must contain 2 to 50 unique values")
+		return
+	}
+	result, err := h.Playlists.MergeUserPlaylists(
+		c.Request.Context(),
+		currentUserID(c),
+		name,
+		playlistIDs,
+	)
+	if err != nil {
+		h.writeMusicPlaylistMergeError(c, err, "merge music playlists failed")
+		return
+	}
+	c.JSON(http.StatusCreated, musicPlaylistMergePayload(result))
 }
 
 func (h *Handler) deleteMyMusicPlaylist(c *gin.Context) {
@@ -510,6 +546,42 @@ func musicPlaylistPayload(playlist musicbox.PlaylistSummary) gin.H {
 		"item_count":  playlist.ItemCount,
 		"created_at":  formatMillis(playlist.CreatedAt),
 		"updated_at":  formatMillis(playlist.UpdatedAt),
+	}
+}
+
+func musicPlaylistMergePayload(result musicbox.PlaylistMergeResult) gin.H {
+	return gin.H{
+		"playlist": musicPlaylistPayload(result.Playlist),
+		"merge": gin.H{
+			"source_item_count":          result.SourceItemCount,
+			"unique_item_count":          result.UniqueItemCount,
+			"duplicate_count":            result.DuplicateCount,
+			"item_count":                 result.Playlist.ItemCount,
+			"omitted_count":              result.OmittedCount,
+			"deleted_playlist_count":     result.DeletedPlaylistCount,
+			"retained_playlist_count":    result.RetainedPlaylistCount,
+			"consumed_source_item_count": result.ConsumedSourceItemCount,
+			"truncated":                  result.Truncated,
+		},
+	}
+}
+
+func (h *Handler) writeMusicPlaylistMergeError(
+	c *gin.Context,
+	err error,
+	message string,
+) {
+	switch {
+	case errors.Is(err, musicbox.ErrPlaylistSelection):
+		h.jsonError(c, http.StatusBadRequest, "validation_failed", "invalid playlist selection")
+	case errors.Is(err, musicbox.ErrPlaylistNotFound):
+		h.jsonError(c, http.StatusNotFound, "not_found", "music playlist not found")
+	case errors.Is(err, musicbox.ErrPlaylistLimit):
+		h.jsonError(c, http.StatusConflict, "playlist_limit_reached", "playlist limit reached")
+	case errors.Is(err, musicbox.ErrPlaylistName), isDuplicateMusicPlaylistName(err):
+		h.jsonError(c, http.StatusConflict, "playlist_name_conflict", "playlist name already exists")
+	default:
+		h.jsonError(c, http.StatusInternalServerError, "internal_error", message)
 	}
 }
 

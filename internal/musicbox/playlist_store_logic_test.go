@@ -45,6 +45,64 @@ func TestClonePlaylistNameAndArtistsStayDisplaySafe(t *testing.T) {
 	}
 }
 
+func TestSelectMergedPlaylistTracksPreservesOrderAndDeduplicatesByLink(t *testing.T) {
+	sources := []playlistMergeSource{
+		{
+			playlistID: "playlist-1",
+			tracks: []playlistMergeTrack{
+				{itemID: "item-a", trackID: "track-a", source: "netease", externalTrackID: "link-1"},
+				{itemID: "item-b", trackID: "track-b", source: "netease", externalTrackID: "link-2"},
+				{itemID: "item-a-2", trackID: "track-a", source: "netease", externalTrackID: "link-1"},
+			},
+		},
+		{
+			playlistID: "playlist-2",
+			tracks: []playlistMergeTrack{
+				{itemID: "item-c", trackID: "track-c", source: "netease", externalTrackID: "link-2"},
+				{itemID: "item-d", trackID: "track-d", source: "bilibili", externalTrackID: "link-2"},
+				{itemID: "item-e", trackID: "track-e", source: "netease", externalTrackID: "link-3"},
+			},
+		},
+	}
+	result := selectMergedPlaylistTracks(sources, 3)
+	wantTrackIDs := []string{"track-a", "track-b", "track-d"}
+	if !sameStringList(result.targetTrackIDs, wantTrackIDs) {
+		t.Fatalf("merged track order = %v, want %v", result.targetTrackIDs, wantTrackIDs)
+	}
+	if result.sourceItemCount != 6 || result.uniqueItemCount != 4 {
+		t.Fatalf(
+			"merge counts = source %d unique %d, want source 6 unique 4",
+			result.sourceItemCount,
+			result.uniqueItemCount,
+		)
+	}
+	if !sameStringList(result.deletedPlaylistIDs, []string{"playlist-1"}) {
+		t.Fatalf("deleted sources = %v, want playlist-1", result.deletedPlaylistIDs)
+	}
+	if result.consumedSourceItemCount != 5 ||
+		!sameStringList(
+			result.consumedItemIDs["playlist-2"],
+			[]string{"item-c", "item-d"},
+		) {
+		t.Fatalf("unexpected consumed prefixes: %+v", result)
+	}
+}
+
+func TestNormalizedMergePlaylistIDsRequiresTwoUniqueValues(t *testing.T) {
+	if got, ok := normalizedMergePlaylistIDs([]string{" first ", "second"}); !ok || !sameStringList(got, []string{"first", "second"}) {
+		t.Fatalf("normalized ids = %v, %v", got, ok)
+	}
+	for _, invalid := range [][]string{
+		{"only-one"},
+		{"same", "same"},
+		{"first", " "},
+	} {
+		if got, ok := normalizedMergePlaylistIDs(invalid); ok || got != nil {
+			t.Fatalf("invalid merge ids %v accepted as %v", invalid, got)
+		}
+	}
+}
+
 func repeatRune(value rune, count int) string {
 	runes := make([]rune, count)
 	for index := range runes {

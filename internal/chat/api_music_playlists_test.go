@@ -304,6 +304,114 @@ func TestPersonalMusicPlaylistBatchPinPersistsOrder(t *testing.T) {
 	api.requireStatus(status, http.StatusBadRequest, response)
 }
 
+func TestPersonalMusicPlaylistMergePreservesSelectionOrderAndDeduplicatesLinks(t *testing.T) {
+	api := newAPIHarness(t)
+	owner := api.register("playlist_merge_owner")
+	other := api.register("playlist_merge_other")
+	ownerID := owner.User["id"].(string)
+
+	createPlaylist := func(token, name string) string {
+		status, response := api.request(
+			http.MethodPost,
+			"/me/music-box/playlists",
+			token,
+			map[string]any{"name": name},
+		)
+		api.requireStatus(status, http.StatusCreated, response)
+		return response["playlist"].(map[string]any)["id"].(string)
+	}
+	addTrack := func(playlistID, trackID, title, source string) {
+		status, response := api.request(
+			http.MethodPost,
+			"/me/music-box/playlists/"+playlistID+"/items",
+			owner.Token,
+			map[string]any{
+				"track_id": trackID,
+				"source":   source,
+				"title":    title,
+				"artists":  []string{"歌手"},
+			},
+		)
+		api.requireStatus(status, http.StatusCreated, response)
+	}
+
+	firstID := createPlaylist(owner.Token, "第一来源")
+	secondID := createPlaylist(owner.Token, "第二来源")
+	foreignID := createPlaylist(other.Token, "外部来源")
+	addTrack(firstID, "link-a", "A", "netease")
+	addTrack(firstID, "link-b", "B", "netease")
+	addTrack(firstID, "link-a", "A 重复", "netease")
+	addTrack(secondID, "link-b", "B 重复", "netease")
+	addTrack(secondID, "link-c", "C", "netease")
+	// The same external id on another source is a different concrete link.
+	addTrack(secondID, "link-b", "B 哔哩哔哩", "bilibili")
+	for index := 0; index < musicbox.MaxUserPlaylists-2; index++ {
+		if _, err := api.chat.Playlists.CreateUserPlaylist(
+			context.Background(),
+			ownerID,
+			fmt.Sprintf("填满槽位 %02d", index+1),
+		); err != nil {
+			t.Fatalf("fill playlist slot %d: %v", index+1, err)
+		}
+	}
+
+	status, response := api.request(
+		http.MethodPost,
+		"/me/music-box/playlists/merge",
+		owner.Token,
+		map[string]any{
+			"name":         "合并结果",
+			"playlist_ids": []string{secondID, firstID},
+		},
+	)
+	api.requireStatus(status, http.StatusCreated, response)
+	playlist := response["playlist"].(map[string]any)
+	merge := response["merge"].(map[string]any)
+	if playlist["name"] != "合并结果" || playlist["item_count"] != float64(4) {
+		t.Fatalf("unexpected merged playlist: %v", playlist)
+	}
+	if merge["source_item_count"] != float64(6) ||
+		merge["unique_item_count"] != float64(4) ||
+		merge["duplicate_count"] != float64(2) ||
+		merge["deleted_playlist_count"] != float64(2) ||
+		merge["retained_playlist_count"] != float64(0) ||
+		merge["truncated"] != false {
+		t.Fatalf("unexpected merge stats: %v", merge)
+	}
+
+	mergedID := playlist["id"].(string)
+	status, response = api.request(
+		http.MethodGet,
+		"/me/music-box/playlists/"+mergedID,
+		owner.Token,
+		nil,
+	)
+	api.requireStatus(status, http.StatusOK, response)
+	items := response["items"].([]any)
+	// Repeated concrete links share one track row, so the latest metadata
+	// snapshot is displayed while the first-link position is preserved.
+	wantTitles := []string{"B 重复", "C", "B 哔哩哔哩", "A 重复"}
+	if len(items) != len(wantTitles) {
+		t.Fatalf("merged items = %v", items)
+	}
+	for index, want := range wantTitles {
+		if got := items[index].(map[string]any)["title"]; got != want {
+			t.Fatalf("merged title %d = %v, want %q; items=%v", index, got, want, items)
+		}
+	}
+
+	status, response = api.request(
+		http.MethodPost,
+		"/me/music-box/playlists/merge",
+		owner.Token,
+		map[string]any{
+			"name":         "不能越权合并",
+			"playlist_ids": []string{firstID, foreignID},
+		},
+	)
+	api.requireStatus(status, http.StatusNotFound, response)
+}
+
 func TestRoomMusicPlaylistPermissionsAndIsolation(t *testing.T) {
 	api := newAPIHarness(t)
 	owner := api.register("room_playlist_owner")
@@ -521,6 +629,77 @@ func TestRoomMusicPlaylistCanAtomicallyImportOwnersPersonalPlaylist(t *testing.T
 		},
 	)
 	api.requireStatus(status, http.StatusNotFound, response)
+}
+
+func TestRoomMusicPlaylistMergeRequiresAdminAndUsesRoomScope(t *testing.T) {
+	api := newAPIHarness(t)
+	owner := api.register("room_playlist_merge_owner")
+	member := api.register("room_playlist_merge_member")
+	room := api.createRoom(owner.Token, map[string]any{
+		"name":        "Room Playlist Merge",
+		"join_policy": "open",
+	})
+	roomID := room["id"].(string)
+	status, response := api.request(
+		http.MethodPost,
+		"/rooms/"+roomID+"/join",
+		member.Token,
+		nil,
+	)
+	api.requireStatus(status, http.StatusOK, response)
+
+	playlistIDs := make([]string, 0, 2)
+	for _, name := range []string{"房间一", "房间二"} {
+		status, response = api.request(
+			http.MethodPost,
+			"/rooms/"+roomID+"/music-box/playlists",
+			owner.Token,
+			map[string]any{"name": name},
+		)
+		api.requireStatus(status, http.StatusCreated, response)
+		playlistIDs = append(
+			playlistIDs,
+			response["playlist"].(map[string]any)["id"].(string),
+		)
+	}
+	for index, playlistID := range playlistIDs {
+		status, response = api.request(
+			http.MethodPost,
+			"/rooms/"+roomID+"/music-box/playlists/"+playlistID+"/items",
+			owner.Token,
+			map[string]any{
+				"track_id": fmt.Sprintf("room-merge-link-%d", index),
+				"source":   "netease",
+				"title":    fmt.Sprintf("房间歌曲%d", index+1),
+				"artists":  []string{"歌手"},
+			},
+		)
+		api.requireStatus(status, http.StatusCreated, response)
+	}
+
+	requestBody := map[string]any{
+		"name":         "房间合并结果",
+		"playlist_ids": playlistIDs,
+	}
+	status, response = api.request(
+		http.MethodPost,
+		"/rooms/"+roomID+"/music-box/playlists/merge",
+		member.Token,
+		requestBody,
+	)
+	api.requireStatus(status, http.StatusForbidden, response)
+
+	status, response = api.request(
+		http.MethodPost,
+		"/rooms/"+roomID+"/music-box/playlists/merge",
+		owner.Token,
+		requestBody,
+	)
+	api.requireStatus(status, http.StatusCreated, response)
+	playlist := response["playlist"].(map[string]any)
+	if playlist["name"] != "房间合并结果" || playlist["item_count"] != float64(2) {
+		t.Fatalf("unexpected room merge: %v", response)
+	}
 }
 
 func TestRoomMusicPlaylistCloneUsesRemarkAndEnforcesCapacity(t *testing.T) {

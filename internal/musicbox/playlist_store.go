@@ -23,6 +23,7 @@ var (
 	ErrPlaylistItemLimit = errors.New("music playlist item limit reached")
 	ErrPlaylistOrder     = errors.New("invalid music playlist item order")
 	ErrPlaylistName      = errors.New("music playlist name already exists")
+	ErrPlaylistSelection = errors.New("invalid music playlist selection")
 )
 
 // PlaylistStore persists reusable playlists independently from the transient
@@ -48,6 +49,22 @@ type PlaylistPage struct {
 	PageSize int
 	Total    int
 	HasMore  bool
+}
+
+// PlaylistMergeResult describes the committed result of merging saved
+// playlists. SourceItemCount includes repeated links, UniqueItemCount counts
+// every distinct source/link pair before the 500-item cap, and ItemCount is
+// the number actually written to the new playlist.
+type PlaylistMergeResult struct {
+	Playlist                PlaylistSummary
+	SourceItemCount         int
+	UniqueItemCount         int
+	DuplicateCount          int
+	OmittedCount            int
+	DeletedPlaylistCount    int
+	RetainedPlaylistCount   int
+	ConsumedSourceItemCount int
+	Truncated               bool
 }
 
 type PlaylistItem struct {

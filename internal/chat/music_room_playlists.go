@@ -85,6 +85,42 @@ func (h *Handler) createRoomMusicPlaylist(c *gin.Context) {
 	c.JSON(http.StatusCreated, gin.H{"playlist": musicPlaylistPayload(playlist)})
 }
 
+func (h *Handler) mergeRoomMusicPlaylists(c *gin.Context) {
+	roomID := c.Param("room_id")
+	if !h.requireRoomPlaylistAdmin(c, roomID) {
+		return
+	}
+	var req mergeMusicPlaylistsRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		h.jsonError(c, http.StatusBadRequest, "bad_request", "invalid JSON body")
+		return
+	}
+	name := strings.TrimSpace(req.Name)
+	playlistIDs := uniqueMusicPlaylistStrings(req.PlaylistIDs)
+	if name == "" || utf8.RuneCountInString(name) > maxPlaylistNameRunes {
+		h.jsonError(c, http.StatusBadRequest, "validation_failed", "playlist name must contain 1 to 64 characters")
+		return
+	}
+	if len(playlistIDs) < 2 ||
+		len(playlistIDs) != len(req.PlaylistIDs) ||
+		len(playlistIDs) > musicbox.MaxRoomPlaylists {
+		h.jsonError(c, http.StatusBadRequest, "validation_failed", "playlist_ids must contain 2 to 50 unique values")
+		return
+	}
+	result, err := h.Playlists.MergeRoomPlaylists(
+		c.Request.Context(),
+		roomID,
+		currentUserID(c),
+		name,
+		playlistIDs,
+	)
+	if err != nil {
+		h.writeMusicPlaylistMergeError(c, err, "merge room music playlists failed")
+		return
+	}
+	c.JSON(http.StatusCreated, musicPlaylistMergePayload(result))
+}
+
 func (h *Handler) cloneRoomMusicPlaylistToMe(c *gin.Context) {
 	roomID := c.Param("room_id")
 	if !h.requireRoomAccess(c, roomID) {
