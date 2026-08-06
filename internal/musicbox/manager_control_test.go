@@ -60,9 +60,13 @@ func TestPlayNowReusesPlayerAndPublishesTargetBeforeAcknowledgement(t *testing.T
 		t.Fatalf("ensure state: %v", err)
 	}
 	oldItem := add(t, store, "old", 10)
-	targetItem := add(t, store, "target", 20)
+	middleItem := add(t, store, "middle", 20)
+	targetItem := add(t, store, "target", 30)
 	if err := store.markReady(oldItem.ID, "/tmp/old.ogg", 1, 1000); err != nil {
 		t.Fatalf("mark old ready: %v", err)
+	}
+	if err := store.markReady(middleItem.ID, "/tmp/middle.ogg", 1, 1000); err != nil {
+		t.Fatalf("mark middle ready: %v", err)
 	}
 	if err := store.markReady(targetItem.ID, "/tmp/target.ogg", 1, 1000); err != nil {
 		t.Fatalf("mark target ready: %v", err)
@@ -100,6 +104,9 @@ func TestPlayNowReusesPlayerAndPublishesTargetBeforeAcknowledgement(t *testing.T
 		if command.item == nil || command.item.ID != targetItem.ID {
 			t.Errorf("command item = %+v, want %s", command.item, targetItem.ID)
 		}
+		if command.item != nil && command.item.SortOrder != 20 {
+			t.Errorf("target sort order = %d, want 20", command.item.SortOrder)
+		}
 		oldPlayer.setPriorityCurrent(command.item)
 		acknowledge(command.ack)
 	}()
@@ -135,6 +142,101 @@ func TestPlayNowReusesPlayerAndPublishesTargetBeforeAcknowledgement(t *testing.T
 	if updated.Revision <= initialRevision {
 		t.Fatalf("revision = %d, want > %d", updated.Revision, initialRevision)
 	}
+	queue, err := store.listScopedQueue("r1", QueueScopeTemporary, "")
+	if err != nil {
+		t.Fatalf("list reordered queue: %v", err)
+	}
+	if got := queueItemIDs(queue); !equalQueueOrder(
+		got,
+		[]string{oldItem.ID, targetItem.ID, middleItem.ID},
+	) {
+		t.Fatalf("queue order = %v, want old/target/middle", got)
+	}
+	if next := manager.nextItem(
+		"r1",
+		queue[1],
+		transitionNext,
+		0,
+	); next == nil || next.ID != middleItem.ID {
+		t.Fatalf("next item after priority target = %+v, want middle", next)
+	}
+}
+
+func TestPlayNowKeepsSavedPlaylistOrder(t *testing.T) {
+	store := newTestStore(t)
+	state, err := store.ensureState("r1")
+	if err != nil {
+		t.Fatalf("ensure state: %v", err)
+	}
+	insertSaved := func(id string, sortOrder int64) *QueueItem {
+		item, err := store.insertItem(QueueItem{
+			ID:            id,
+			RoomID:        "r1",
+			Source:        "netease",
+			TrackID:       "track-" + id,
+			Title:         id,
+			Status:        StatusReady,
+			AddedByUserID: "u1",
+			QueueScope:    QueueScopeSavedPlaylistSnapshot,
+			SnapshotID:    "snapshot-1",
+			SortOrder:     sortOrder,
+		})
+		if err != nil {
+			t.Fatalf("insert saved item %s: %v", id, err)
+		}
+		return item
+	}
+	oldItem := insertSaved("saved-old", 10)
+	betweenItem := insertSaved("saved-between", 20)
+	targetItem := insertSaved("saved-target", 30)
+	state.ActiveSourceType = ActiveSourceRoomPlaylist
+	state.ActivePlaylistID = "playlist-1"
+	state.ActiveSnapshotID = "snapshot-1"
+	state.CurrentItemID = oldItem.ID
+	state.State = StatePlaying
+	if err := store.saveState(*state); err != nil {
+		t.Fatalf("save saved-playlist state: %v", err)
+	}
+
+	oldPlayer := newTestPlayer(nil)
+	oldPlayer.roomID = "r1"
+	oldPlayer.current = oldItem
+	manager := &Manager{
+		cfg:          Config{Enabled: true},
+		store:        store,
+		players:      map[string]*player{"r1": oldPlayer},
+		seenCommands: map[string]map[string]int64{},
+		playCursors:  map[string]playCursor{},
+	}
+	oldPlayer.onPriorityState = func() { manager.persistAndNotifyForced("r1") }
+	go func() {
+		command := <-oldPlayer.cmd
+		if command.item == nil || command.item.SortOrder != targetItem.SortOrder {
+			t.Errorf("saved target changed before playback: %+v", command.item)
+		}
+		oldPlayer.setPriorityCurrent(command.item)
+		acknowledge(command.ack)
+	}()
+
+	if err := manager.ApplyItemControl(
+		"r1", "play_now", targetItem.ID, "", "", nil,
+	); err != nil {
+		t.Fatalf("play saved item now: %v", err)
+	}
+	queue, err := store.listScopedQueue(
+		"r1",
+		QueueScopeSavedPlaylistSnapshot,
+		"snapshot-1",
+	)
+	if err != nil {
+		t.Fatalf("list saved queue: %v", err)
+	}
+	if got := queueItemIDs(queue); !equalQueueOrder(
+		got,
+		[]string{oldItem.ID, betweenItem.ID, targetItem.ID},
+	) {
+		t.Fatalf("saved queue order = %v, want unchanged", got)
+	}
 }
 
 func TestPlayNowConnectionFailureDoesNotPersistTarget(t *testing.T) {
@@ -144,10 +246,17 @@ func TestPlayNowConnectionFailureDoesNotPersistTarget(t *testing.T) {
 		t.Fatalf("ensure state: %v", err)
 	}
 	targetItem := add(t, store, "target", 20)
+	oldItem := add(t, store, "old", 10)
+	betweenItem := add(t, store, "between", 15)
 	if err := store.markReady(targetItem.ID, "/tmp/target.ogg", 1, 1000); err != nil {
 		t.Fatalf("mark target ready: %v", err)
 	}
 	initialRevision := state.Revision
+	state.CurrentItemID = oldItem.ID
+	state.State = StatePlaying
+	if err := store.saveState(*state); err != nil {
+		t.Fatalf("save playing state: %v", err)
+	}
 	connectError := errors.New("livekit token unavailable")
 	manager := &Manager{
 		cfg:          Config{Enabled: true},
@@ -178,6 +287,36 @@ func TestPlayNowConnectionFailureDoesNotPersistTarget(t *testing.T) {
 		updated.Revision != initialRevision {
 		t.Fatalf("failed priority play mutated state: before=%+v after=%+v", state, updated)
 	}
+	queue, err := store.listScopedQueue("r1", QueueScopeTemporary, "")
+	if err != nil {
+		t.Fatalf("list restored queue: %v", err)
+	}
+	if got := queueItemIDs(queue); !equalQueueOrder(
+		got,
+		[]string{oldItem.ID, betweenItem.ID, targetItem.ID},
+	) {
+		t.Fatalf("queue order after failed play now = %v", got)
+	}
+}
+
+func queueItemIDs(items []*QueueItem) []string {
+	ids := make([]string, 0, len(items))
+	for _, item := range items {
+		ids = append(ids, item.ID)
+	}
+	return ids
+}
+
+func equalQueueOrder(left, right []string) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for index := range left {
+		if left[index] != right[index] {
+			return false
+		}
+	}
+	return true
 }
 
 func TestClearTemporaryPlaylistKeepsSavedSnapshotsAndIsIdempotent(t *testing.T) {

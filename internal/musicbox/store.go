@@ -2,6 +2,7 @@ package musicbox
 
 import (
 	"database/sql"
+	"errors"
 	"fmt"
 	"time"
 )
@@ -208,6 +209,156 @@ func (s *store) listScopedQueue(
 		items = append(items, item)
 	}
 	return items, rows.Err()
+}
+
+// moveTemporaryItemAfter rewrites the request queue so targetID immediately
+// follows afterID. The original order is returned for rollback if the
+// accompanying playback switch fails. Callers serialize this operation with
+// the room control lock.
+func (s *store) moveTemporaryItemAfter(
+	roomID, targetID, afterID string,
+) (originalOrder []string, targetSortOrder int64, moved bool, err error) {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return nil, 0, false, err
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	originalOrder, err = temporaryQueueOrderForUpdate(tx, roomID)
+	if err != nil {
+		return nil, 0, false, err
+	}
+	targetIndex := indexOfQueueItem(originalOrder, targetID)
+	afterIndex := indexOfQueueItem(originalOrder, afterID)
+	if targetIndex < 0 || afterIndex < 0 {
+		return nil, 0, false, ErrQueueItemNotFound
+	}
+	if targetID == afterID || targetIndex == afterIndex+1 {
+		return originalOrder, 0, false, nil
+	}
+
+	reordered := make([]string, 0, len(originalOrder))
+	for _, id := range originalOrder {
+		if id != targetID {
+			reordered = append(reordered, id)
+		}
+	}
+	afterIndex = indexOfQueueItem(reordered, afterID)
+	reordered = append(reordered, "")
+	copy(reordered[afterIndex+2:], reordered[afterIndex+1:])
+	reordered[afterIndex+1] = targetID
+
+	if err := rewriteTemporaryQueueOrder(tx, roomID, reordered); err != nil {
+		return nil, 0, false, err
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, 0, false, err
+	}
+	return originalOrder, int64(afterIndex+2) * 10, true, nil
+}
+
+func (s *store) restoreTemporaryQueueOrder(
+	roomID string,
+	originalOrder []string,
+) error {
+	if len(originalOrder) == 0 {
+		return nil
+	}
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	currentOrder, err := temporaryQueueOrderForUpdate(tx, roomID)
+	if err != nil {
+		return err
+	}
+	if !sameQueueItemSet(currentOrder, originalOrder) {
+		return errors.New("temporary queue changed while restoring priority order")
+	}
+	if err := rewriteTemporaryQueueOrder(tx, roomID, originalOrder); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func temporaryQueueOrderForUpdate(tx *sql.Tx, roomID string) ([]string, error) {
+	rows, err := tx.Query(
+		`SELECT id FROM room_music_box_queue
+		 WHERE room_id = ? AND queue_scope = 'temporary'
+		 ORDER BY sort_order ASC, created_at ASC, id ASC
+		 FOR UPDATE`,
+		roomID,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	order := make([]string, 0)
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		order = append(order, id)
+	}
+	return order, rows.Err()
+}
+
+func rewriteTemporaryQueueOrder(
+	tx *sql.Tx,
+	roomID string,
+	order []string,
+) error {
+	now := nowMillis()
+	for index, id := range order {
+		result, err := tx.Exec(
+			`UPDATE room_music_box_queue
+			 SET sort_order = ?, updated_at = ?
+			 WHERE room_id = ? AND queue_scope = 'temporary' AND id = ?`,
+			int64(index+1)*10,
+			now,
+			roomID,
+			id,
+		)
+		if err != nil {
+			return err
+		}
+		if affected, err := result.RowsAffected(); err != nil || affected != 1 {
+			if err != nil {
+				return err
+			}
+			return ErrQueueItemNotFound
+		}
+	}
+	return nil
+}
+
+func indexOfQueueItem(order []string, itemID string) int {
+	for index, id := range order {
+		if id == itemID {
+			return index
+		}
+	}
+	return -1
+}
+
+func sameQueueItemSet(left, right []string) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	seen := make(map[string]int, len(left))
+	for _, id := range left {
+		seen[id]++
+	}
+	for _, id := range right {
+		seen[id]--
+		if seen[id] < 0 {
+			return false
+		}
+	}
+	return true
 }
 
 func (s *store) countTemporaryQueue(roomID string) (int, error) {

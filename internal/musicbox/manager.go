@@ -576,8 +576,9 @@ func (m *Manager) clearTemporaryQueue(roomID string) error {
 }
 
 // playNow atomically replaces the current item with another ready item from
-// the active queue. The row remains in its original position so normal
-// sequential playback continues from the selected track afterwards.
+// the active queue. While the request queue is actively playing, the selected
+// row moves directly after the interrupted row before playback switches. Saved
+// playlist snapshots keep their persisted order.
 // ApplyItemControl already holds the room control lock while this runs.
 func (m *Manager) playNow(roomID, itemID string) error {
 	st, err := m.store.getState(roomID)
@@ -600,13 +601,55 @@ func (m *Manager) playNow(roomID, itemID string) error {
 		return ErrQueueItemNotReady
 	}
 
-	if pl := m.getPlayer(roomID); pl != nil {
-		// Keep the existing LiveKit participant and published Opus track alive.
-		// The player acknowledges only after the target is authoritative, so a
-		// successful control response can never expose the previous track.
-		return pl.playNow(item)
+	activePlayer := m.getPlayer(roomID)
+	playbackState := st.State
+	currentItemID := st.CurrentItemID
+	if activePlayer != nil {
+		playbackState, currentItemID, _ = activePlayer.snapshot()
 	}
-	return m.ensurePlayingItem(roomID, item)
+	var originalOrder []string
+	reordered := false
+	if st.ActiveSourceType == ActiveSourceTemporary &&
+		(playbackState == StatePlaying || playbackState == StatePaused) &&
+		currentItemID != "" && currentItemID != item.ID {
+		var targetSortOrder int64
+		originalOrder, targetSortOrder, reordered, err =
+			m.store.moveTemporaryItemAfter(roomID, item.ID, currentItemID)
+		if err != nil {
+			return err
+		}
+		if reordered {
+			// nextItem reads the in-memory row after the target finishes, so keep
+			// it aligned with the order committed above.
+			item.SortOrder = targetSortOrder
+		}
+	}
+
+	playTarget := func() error {
+		if activePlayer != nil {
+			// Keep the existing LiveKit participant and published Opus track alive.
+			// The player acknowledges only after the target is authoritative, so a
+			// successful control response can never expose the previous track.
+			return activePlayer.playNow(item)
+		}
+		return m.ensurePlayingItem(roomID, item)
+	}
+	if err := playTarget(); err != nil {
+		if reordered {
+			if restoreErr := m.store.restoreTemporaryQueueOrder(
+				roomID,
+				originalOrder,
+			); restoreErr != nil {
+				return fmt.Errorf(
+					"%w (restore priority queue order: %v)",
+					err,
+					restoreErr,
+				)
+			}
+		}
+		return err
+	}
+	return nil
 }
 
 func (m *Manager) play(roomID string, resumeOnly bool) error {
