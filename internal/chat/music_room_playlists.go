@@ -56,15 +56,28 @@ func (h *Handler) createRoomMusicPlaylist(c *gin.Context) {
 		return
 	}
 	name := strings.TrimSpace(req.Name)
+	req.ImportPlaylistID = strings.TrimSpace(req.ImportPlaylistID)
 	if name == "" || utf8.RuneCountInString(name) > maxPlaylistNameRunes {
 		h.jsonError(c, http.StatusBadRequest, "validation_failed", "playlist name must contain 1 to 64 characters")
 		return
 	}
-	playlist, err := h.Playlists.CreateRoomPlaylist(
-		c.Request.Context(),
-		roomID,
-		name,
-	)
+	var playlist musicbox.PlaylistSummary
+	var err error
+	if req.ImportPlaylistID == "" {
+		playlist, err = h.Playlists.CreateRoomPlaylist(
+			c.Request.Context(),
+			roomID,
+			name,
+		)
+	} else {
+		playlist, err = h.Playlists.CreateRoomPlaylistFromUserPlaylist(
+			c.Request.Context(),
+			roomID,
+			name,
+			currentUserID(c),
+			req.ImportPlaylistID,
+		)
+	}
 	if err != nil {
 		h.writeRoomPlaylistMutationError(c, err, "create room music playlist failed")
 		return
@@ -370,6 +383,8 @@ func (h *Handler) writeRoomPlaylistMutationError(
 		h.jsonError(c, http.StatusNotFound, "not_found", "music playlist not found")
 	case errors.Is(err, musicbox.ErrPlaylistLimit):
 		h.jsonError(c, http.StatusConflict, "playlist_limit_reached", "playlist limit reached")
+	case errors.Is(err, musicbox.ErrPlaylistItemLimit):
+		h.jsonError(c, http.StatusConflict, "playlist_item_limit_reached", "playlist item limit reached")
 	case errors.Is(err, musicbox.ErrPlaylistName):
 		h.jsonError(c, http.StatusConflict, "playlist_name_conflict", "playlist name already exists")
 	default:

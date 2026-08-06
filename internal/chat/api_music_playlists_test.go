@@ -432,6 +432,93 @@ func TestRoomMusicPlaylistPermissionsAndIsolation(t *testing.T) {
 	api.requireStatus(status, http.StatusOK, response)
 }
 
+func TestRoomMusicPlaylistCanAtomicallyImportOwnersPersonalPlaylist(t *testing.T) {
+	api := newAPIHarness(t)
+	owner := api.register("room_playlist_import_owner")
+	other := api.register("room_playlist_import_other")
+	room := api.createRoom(owner.Token, map[string]any{
+		"name":        "Room Playlist Import",
+		"join_policy": "open",
+	})
+	roomID := room["id"].(string)
+
+	status, response := api.request(
+		http.MethodPost,
+		"/me/music-box/playlists",
+		owner.Token,
+		map[string]any{"name": "我的导入源"},
+	)
+	api.requireStatus(status, http.StatusCreated, response)
+	sourceID := response["playlist"].(map[string]any)["id"].(string)
+	for _, track := range []map[string]any{
+		{
+			"track_id": "import_track_1", "source": "netease",
+			"title": "第一首", "artists": []string{"歌手甲"},
+		},
+		{
+			"track_id": "import_track_2", "source": "bilibili",
+			"title": "第二首", "artists": []string{"歌手乙"},
+		},
+	} {
+		status, response = api.request(
+			http.MethodPost,
+			"/me/music-box/playlists/"+sourceID+"/items",
+			owner.Token,
+			track,
+		)
+		api.requireStatus(status, http.StatusCreated, response)
+	}
+
+	status, response = api.request(
+		http.MethodPost,
+		"/rooms/"+roomID+"/music-box/playlists",
+		owner.Token,
+		map[string]any{
+			"name":               "房间导入副本",
+			"import_playlist_id": sourceID,
+		},
+	)
+	api.requireStatus(status, http.StatusCreated, response)
+	created := response["playlist"].(map[string]any)
+	if created["item_count"] != float64(2) {
+		t.Fatalf("imported item_count = %v, want 2", created["item_count"])
+	}
+	targetID := created["id"].(string)
+
+	status, response = api.request(
+		http.MethodGet,
+		"/rooms/"+roomID+"/music-box/playlists/"+targetID,
+		owner.Token,
+		nil,
+	)
+	api.requireStatus(status, http.StatusOK, response)
+	items := response["items"].([]any)
+	if len(items) != 2 ||
+		items[0].(map[string]any)["title"] != "第一首" ||
+		items[1].(map[string]any)["title"] != "第二首" {
+		t.Fatalf("imported order/content = %v", items)
+	}
+
+	status, response = api.request(
+		http.MethodPost,
+		"/me/music-box/playlists",
+		other.Token,
+		map[string]any{"name": "他人的歌单"},
+	)
+	api.requireStatus(status, http.StatusCreated, response)
+	foreignID := response["playlist"].(map[string]any)["id"].(string)
+	status, response = api.request(
+		http.MethodPost,
+		"/rooms/"+roomID+"/music-box/playlists",
+		owner.Token,
+		map[string]any{
+			"name":               "不能导入",
+			"import_playlist_id": foreignID,
+		},
+	)
+	api.requireStatus(status, http.StatusNotFound, response)
+}
+
 func TestMusicBoxRequesterPayloadsIncludesExplicitPlaylistOwner(t *testing.T) {
 	api := newAPIHarness(t)
 	owner := api.register("playlist_payload_owner")

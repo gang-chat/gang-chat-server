@@ -11,7 +11,7 @@ import (
 )
 
 // newTestStore uses a MySQL test database with just the schema the store needs
-// (users, rooms, and the two music box tables), avoiding a dependency on the
+// (users, rooms, playlists, and the two music box tables), avoiding a dependency on the
 // full production schema.
 func newTestStore(t *testing.T) *store {
 	t.Helper()
@@ -33,6 +33,7 @@ func newTestStore(t *testing.T) *store {
 	cleanup := []string{
 		`DROP TABLE IF EXISTS room_music_box_queue`,
 		`DROP TABLE IF EXISTS room_music_box_state`,
+		`DROP TABLE IF EXISTS music_playlists`,
 		`DROP TABLE IF EXISTS rooms`,
 		`DROP TABLE IF EXISTS users`,
 	}
@@ -45,6 +46,9 @@ func newTestStore(t *testing.T) *store {
 	stmts := []string{
 		`CREATE TABLE users (id VARCHAR(128) PRIMARY KEY) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
 		`CREATE TABLE rooms (id VARCHAR(128) PRIMARY KEY) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
+		`CREATE TABLE music_playlists (
+			id VARCHAR(128) PRIMARY KEY NOT NULL,
+			created_at BIGINT NOT NULL) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
 		`CREATE TABLE room_music_box_queue (
 			id VARCHAR(128) PRIMARY KEY NOT NULL, room_id VARCHAR(128) NOT NULL,
 			source VARCHAR(64) NOT NULL DEFAULT 'netease', track_id VARCHAR(255) NOT NULL,
@@ -62,7 +66,9 @@ func newTestStore(t *testing.T) *store {
 			playback_mode VARCHAR(32) NOT NULL DEFAULT 'sequential',
 			active_source_type VARCHAR(32) NOT NULL DEFAULT 'temporary',
 			active_playlist_id VARCHAR(128), active_playlist_name TEXT,
-			active_playlist_owner_id VARCHAR(128), active_snapshot_id VARCHAR(128),
+			active_playlist_owner_id VARCHAR(128),
+			active_playlist_created_at BIGINT NOT NULL DEFAULT 0,
+			active_snapshot_id VARCHAR(128),
 			updated_at BIGINT NOT NULL) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
 		`INSERT INTO users (id) VALUES ('u1')`,
 		`INSERT INTO rooms (id) VALUES ('r1')`,
@@ -316,6 +322,7 @@ func TestStateRoundTrip(t *testing.T) {
 	st.ActiveSourceType = ActiveSourceRoomPlaylist
 	st.ActivePlaylistID = "playlist-1"
 	st.ActivePlaylistName = "Shared favorites"
+	st.ActivePlaylistCreatedAt = 1775444645000
 	st.ActiveSnapshotID = "snapshot-1"
 	if err := s.saveState(*st); err != nil {
 		t.Fatalf("saveState: %v", err)
@@ -329,8 +336,39 @@ func TestStateRoundTrip(t *testing.T) {
 		got.ActiveSourceType != ActiveSourceRoomPlaylist ||
 		got.ActivePlaylistID != "playlist-1" ||
 		got.ActivePlaylistName != "Shared favorites" ||
+		got.ActivePlaylistCreatedAt != 1775444645000 ||
 		got.ActiveSnapshotID != "snapshot-1" {
 		t.Errorf("round trip = %+v", got)
+	}
+}
+
+func TestBackfillActivePlaylistCreatedAt(t *testing.T) {
+	s := newTestStore(t)
+	st, err := s.ensureState("r1")
+	if err != nil {
+		t.Fatalf("ensureState: %v", err)
+	}
+	st.ActiveSourceType = ActiveSourceRoomPlaylist
+	st.ActivePlaylistID = "legacy-playlist"
+	if err := s.saveState(*st); err != nil {
+		t.Fatalf("saveState: %v", err)
+	}
+	if _, err := s.db.Exec(
+		`INSERT INTO music_playlists (id, created_at) VALUES (?, ?)`,
+		"legacy-playlist",
+		int64(1775444645000),
+	); err != nil {
+		t.Fatalf("insert playlist: %v", err)
+	}
+	if err := s.backfillActivePlaylistCreatedAt(); err != nil {
+		t.Fatalf("backfillActivePlaylistCreatedAt: %v", err)
+	}
+	got, err := s.getState("r1")
+	if err != nil {
+		t.Fatalf("getState: %v", err)
+	}
+	if got.ActivePlaylistCreatedAt != 1775444645000 {
+		t.Fatalf("created at = %d, want 1775444645000", got.ActivePlaylistCreatedAt)
 	}
 }
 

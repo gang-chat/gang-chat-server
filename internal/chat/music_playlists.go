@@ -23,7 +23,8 @@ const (
 )
 
 type createMusicPlaylistRequest struct {
-	Name string `json:"name"`
+	Name             string `json:"name"`
+	ImportPlaylistID string `json:"import_playlist_id"`
 }
 
 type renameMusicPlaylistRequest struct {

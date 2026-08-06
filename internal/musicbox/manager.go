@@ -138,6 +138,16 @@ func (m *Manager) resetOnStartup() {
 	}
 }
 
+// BackfillActivePlaylistCreatedAt upgrades saved sources activated by an older
+// server after the playlist schema is available. Deleted source playlists stay
+// unknown, which is preferable to inventing a timestamp.
+func (m *Manager) BackfillActivePlaylistCreatedAt() error {
+	if !m.Enabled() {
+		return nil
+	}
+	return m.store.backfillActivePlaylistCreatedAt()
+}
+
 // GD exposes the underlying GD API client (used for album art lookups).
 func (m *Manager) GD() *gdmusic.Client { return m.gd }
 
@@ -1084,7 +1094,9 @@ func (m *Manager) RemoveItem(roomID, itemID string) error {
 func (m *Manager) ActivatePlaylist(
 	roomID string,
 	sourceType ActiveSourceType,
-	playlistID, playlistName, ownerUserID, actorUserID string,
+	playlistID, playlistName, ownerUserID string,
+	playlistCreatedAt int64,
+	actorUserID string,
 	tracks []SnapshotTrack,
 	startPlaying bool,
 ) error {
@@ -1140,6 +1152,7 @@ func (m *Manager) ActivatePlaylist(
 		st.ActivePlaylistID = playlistID
 		st.ActivePlaylistName = playlistName
 		st.ActivePlaylistOwnerID = ownerUserID
+		st.ActivePlaylistCreatedAt = playlistCreatedAt
 		st.ActiveSnapshotID = snapshotID
 		if sourceType == ActiveSourceTemporary &&
 			(st.PlaybackMode == ModeRepeatAll || st.PlaybackMode == ModeShuffle) {

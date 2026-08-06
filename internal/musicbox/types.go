@@ -96,19 +96,20 @@ type QueueItem struct {
 
 // RoomState is the persisted playback state for a room.
 type RoomState struct {
-	RoomID                string
-	State                 PlaybackState
-	CurrentItemID         string
-	PositionMS            int64
-	Volume                int
-	Revision              int64
-	PlaybackMode          PlaybackMode
-	ActiveSourceType      ActiveSourceType
-	ActivePlaylistID      string
-	ActivePlaylistName    string
-	ActivePlaylistOwnerID string
-	ActiveSnapshotID      string
-	UpdatedAt             int64
+	RoomID                  string
+	State                   PlaybackState
+	CurrentItemID           string
+	PositionMS              int64
+	Volume                  int
+	Revision                int64
+	PlaybackMode            PlaybackMode
+	ActiveSourceType        ActiveSourceType
+	ActivePlaylistID        string
+	ActivePlaylistName      string
+	ActivePlaylistOwnerID   string
+	ActivePlaylistCreatedAt int64
+	ActiveSnapshotID        string
+	UpdatedAt               int64
 }
 
 type SnapshotTrack struct {

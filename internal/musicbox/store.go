@@ -25,6 +25,7 @@ var nextGenerationStateColumns = []stateColumn{
 	{name: "active_playlist_id", definition: "VARCHAR(128) NULL"},
 	{name: "active_playlist_name", definition: "VARCHAR(255) NULL"},
 	{name: "active_playlist_owner_id", definition: "VARCHAR(128) NULL"},
+	{name: "active_playlist_created_at", definition: "BIGINT NOT NULL DEFAULT 0"},
 	{name: "active_snapshot_id", definition: "VARCHAR(128) NULL"},
 }
 
@@ -695,11 +696,13 @@ func (s *store) getState(roomID string) (*RoomState, error) {
 		`SELECT room_id, state, current_item_id, position_ms, volume,
 		        revision, playback_mode, active_source_type,
 		        active_playlist_id, active_playlist_name,
-		        active_playlist_owner_id, active_snapshot_id, updated_at
+		        active_playlist_owner_id, active_playlist_created_at,
+		        active_snapshot_id, updated_at
 		 FROM room_music_box_state WHERE room_id = ?`, roomID).
 		Scan(&st.RoomID, &state, &current, &st.PositionMS, &st.Volume,
 			&st.Revision, &st.PlaybackMode, &st.ActiveSourceType,
-			&playlistID, &playlistName, &playlistOwnerID, &snapshotID,
+			&playlistID, &playlistName, &playlistOwnerID,
+			&st.ActivePlaylistCreatedAt, &snapshotID,
 			&st.UpdatedAt)
 	if err == sql.ErrNoRows {
 		return &RoomState{
@@ -728,8 +731,9 @@ func (s *store) saveState(st RoomState) error {
 		`INSERT INTO room_music_box_state
 		 (room_id, state, current_item_id, position_ms, volume, revision, playback_mode,
 		  active_source_type, active_playlist_id, active_playlist_name,
-		  active_playlist_owner_id, active_snapshot_id, updated_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		  active_playlist_owner_id, active_playlist_created_at,
+		  active_snapshot_id, updated_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		 ON DUPLICATE KEY UPDATE
 		   state = VALUES(state), current_item_id = VALUES(current_item_id),
 		   position_ms = VALUES(position_ms), volume = VALUES(volume),
@@ -738,12 +742,14 @@ func (s *store) saveState(st RoomState) error {
 		   active_playlist_id = VALUES(active_playlist_id),
 		   active_playlist_name = VALUES(active_playlist_name),
 		   active_playlist_owner_id = VALUES(active_playlist_owner_id),
+		   active_playlist_created_at = VALUES(active_playlist_created_at),
 		   active_snapshot_id = VALUES(active_snapshot_id),
 		   updated_at = VALUES(updated_at)`,
 		st.RoomID, string(st.State), ns(st.CurrentItemID), st.PositionMS, st.Volume,
 		st.Revision, string(NormalizePlaybackMode(string(st.PlaybackMode))),
 		string(st.ActiveSourceType), ns(st.ActivePlaylistID), ns(st.ActivePlaylistName),
-		ns(st.ActivePlaylistOwnerID), ns(st.ActiveSnapshotID), nowMillis())
+		ns(st.ActivePlaylistOwnerID), st.ActivePlaylistCreatedAt,
+		ns(st.ActiveSnapshotID), nowMillis())
 	return err
 }
 
@@ -755,6 +761,18 @@ func (s *store) resetPlaybackOnStartup() error {
 		`UPDATE room_music_box_state
 		 SET state = 'stopped', position_ms = 0, revision = revision + 1, updated_at = ?`,
 		nowMillis(),
+	)
+	return err
+}
+
+func (s *store) backfillActivePlaylistCreatedAt() error {
+	_, err := s.db.Exec(
+		`UPDATE room_music_box_state AS state
+		 JOIN music_playlists AS playlist
+		   ON playlist.id = state.active_playlist_id
+		 SET state.active_playlist_created_at = playlist.created_at
+		 WHERE state.active_source_type <> 'temporary'
+		   AND state.active_playlist_created_at = 0`,
 	)
 	return err
 }

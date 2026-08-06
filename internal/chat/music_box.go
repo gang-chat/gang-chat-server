@@ -218,6 +218,7 @@ func (h *Handler) activateMusicBoxPlaylist(c *gin.Context) {
 			"",
 			musicBoxRequestQueueDisplayName,
 			"",
+			0,
 			actorID,
 			nil,
 			req.StartPlay,
@@ -232,6 +233,7 @@ func (h *Handler) activateMusicBoxPlaylist(c *gin.Context) {
 	page := 1
 	tracks := make([]musicbox.SnapshotTrack, 0)
 	playlistName := ""
+	var playlistCreatedAt int64
 	for {
 		var result musicbox.PlaylistItemsPage
 		var err error
@@ -253,6 +255,7 @@ func (h *Handler) activateMusicBoxPlaylist(c *gin.Context) {
 			return
 		}
 		playlistName = result.Playlist.Name
+		playlistCreatedAt = result.Playlist.CreatedAt
 		for _, item := range result.Items {
 			tracks = append(tracks, musicbox.SnapshotTrack{
 				Source: item.Source, TrackID: item.ExternalTrackID,
@@ -272,7 +275,8 @@ func (h *Handler) activateMusicBoxPlaylist(c *gin.Context) {
 		ownerID = actorID
 	}
 	if err := h.MusicBox.ActivatePlaylist(
-		roomID, activeType, playlistID, playlistName, ownerID, actorID, tracks, req.StartPlay,
+		roomID, activeType, playlistID, playlistName, ownerID,
+		playlistCreatedAt, actorID, tracks, req.StartPlay,
 	); err != nil {
 		h.jsonError(c, http.StatusInternalServerError, "internal_error", "activate music playlist failed")
 		return
@@ -418,6 +422,9 @@ func (h *Handler) musicBoxStatePayload(roomID string) gin.H {
 		activeSource["playlist_id"] = st.ActivePlaylistID
 		activeSource["snapshot_id"] = st.ActiveSnapshotID
 		activeSource["owner_user_id"] = st.ActivePlaylistOwnerID
+		if st.ActivePlaylistCreatedAt > 0 {
+			activeSource["created_at"] = formatMillis(st.ActivePlaylistCreatedAt)
+		}
 		if owner := requesters[st.ActivePlaylistOwnerID]; owner != nil {
 			activeSource["owner"] = owner
 		}

@@ -75,6 +75,33 @@ func (s *PlaylistStore) CreateRoomPlaylist(
 	ctx context.Context,
 	roomID, name string,
 ) (PlaylistSummary, error) {
+	return s.createRoomPlaylist(ctx, roomID, name, "", "")
+}
+
+// CreateRoomPlaylistFromUserPlaylist creates a room playlist and copies the
+// current user's saved playlist into it in the same transaction. Locking the
+// source playlist keeps the imported order stable while another request edits
+// that personal playlist, and every target item receives a fresh identity.
+func (s *PlaylistStore) CreateRoomPlaylistFromUserPlaylist(
+	ctx context.Context,
+	roomID, name, ownerUserID, sourcePlaylistID string,
+) (PlaylistSummary, error) {
+	if strings.TrimSpace(ownerUserID) == "" || strings.TrimSpace(sourcePlaylistID) == "" {
+		return PlaylistSummary{}, ErrPlaylistNotFound
+	}
+	return s.createRoomPlaylist(
+		ctx,
+		roomID,
+		name,
+		ownerUserID,
+		sourcePlaylistID,
+	)
+}
+
+func (s *PlaylistStore) createRoomPlaylist(
+	ctx context.Context,
+	roomID, name, sourceOwnerUserID, sourcePlaylistID string,
+) (PlaylistSummary, error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return PlaylistSummary{}, err
@@ -82,6 +109,48 @@ func (s *PlaylistStore) CreateRoomPlaylist(
 	defer tx.Rollback()
 	if err := lockRoomPlaylistNamespace(ctx, tx, roomID); err != nil {
 		return PlaylistSummary{}, err
+	}
+	importedTrackIDs := make([]string, 0)
+	if sourcePlaylistID != "" {
+		if _, err := s.playlistSummary(
+			ctx,
+			tx,
+			userPlaylistScope(sourceOwnerUserID),
+			sourcePlaylistID,
+			true,
+		); err != nil {
+			return PlaylistSummary{}, err
+		}
+		rows, err := tx.QueryContext(
+			ctx,
+			`SELECT track_id FROM music_playlist_items
+			 WHERE playlist_id = ?
+			 ORDER BY sort_order ASC, created_at ASC, id ASC
+			 FOR UPDATE`,
+			sourcePlaylistID,
+		)
+		if err != nil {
+			return PlaylistSummary{}, err
+		}
+		for rows.Next() {
+			var trackID string
+			if err := rows.Scan(&trackID); err != nil {
+				rows.Close()
+				return PlaylistSummary{}, err
+			}
+			importedTrackIDs = append(importedTrackIDs, trackID)
+			if len(importedTrackIDs) > MaxPlaylistItems {
+				rows.Close()
+				return PlaylistSummary{}, ErrPlaylistItemLimit
+			}
+		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			return PlaylistSummary{}, err
+		}
+		if err := rows.Close(); err != nil {
+			return PlaylistSummary{}, err
+		}
 	}
 	var count int
 	if err := tx.QueryRowContext(
@@ -118,6 +187,7 @@ func (s *PlaylistStore) CreateRoomPlaylist(
 		ID:        "mbp_" + randomID(),
 		Name:      name,
 		Revision:  1,
+		ItemCount: len(importedTrackIDs),
 		CreatedAt: now,
 		UpdatedAt: now,
 	}
@@ -135,6 +205,24 @@ func (s *PlaylistStore) CreateRoomPlaylist(
 		now,
 	); err != nil {
 		return PlaylistSummary{}, err
+	}
+	for index, trackID := range importedTrackIDs {
+		if _, err := tx.ExecContext(
+			ctx,
+			`INSERT INTO music_playlist_items
+			 (id, playlist_id, track_id, added_by_user_id, sort_order,
+			  created_at, updated_at)
+			 VALUES (?, ?, ?, ?, ?, ?, ?)`,
+			"mbpi_"+randomID(),
+			playlist.ID,
+			trackID,
+			sourceOwnerUserID,
+			int64(index+1)*10,
+			now,
+			now,
+		); err != nil {
+			return PlaylistSummary{}, err
+		}
 	}
 	if err := tx.Commit(); err != nil {
 		return PlaylistSummary{}, err
