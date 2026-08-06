@@ -85,6 +85,35 @@ func (h *Handler) createRoomMusicPlaylist(c *gin.Context) {
 	c.JSON(http.StatusCreated, gin.H{"playlist": musicPlaylistPayload(playlist)})
 }
 
+func (h *Handler) cloneRoomMusicPlaylistToMe(c *gin.Context) {
+	roomID := c.Param("room_id")
+	if !h.requireRoomAccess(c, roomID) {
+		return
+	}
+	playlist, err := h.Playlists.CloneRoomPlaylistToUser(
+		c.Request.Context(),
+		currentUserID(c),
+		roomID,
+		c.Param("playlist_id"),
+	)
+	if err != nil {
+		switch {
+		case errors.Is(err, musicbox.ErrPlaylistNotFound):
+			h.jsonError(c, http.StatusNotFound, "not_found", "music playlist not found")
+		case errors.Is(err, musicbox.ErrPlaylistLimit):
+			h.jsonError(c, http.StatusConflict, "playlist_limit_reached", "personal playlist limit reached")
+		case errors.Is(err, musicbox.ErrPlaylistItemLimit):
+			h.jsonError(c, http.StatusConflict, "playlist_item_limit_reached", "playlist item limit reached")
+		case errors.Is(err, musicbox.ErrPlaylistName):
+			h.jsonError(c, http.StatusConflict, "playlist_name_conflict", "playlist name conflict")
+		default:
+			h.jsonError(c, http.StatusInternalServerError, "internal_error", "clone room music playlist failed")
+		}
+		return
+	}
+	c.JSON(http.StatusCreated, gin.H{"playlist": musicPlaylistPayload(playlist)})
+}
+
 func (h *Handler) deleteRoomMusicPlaylist(c *gin.Context) {
 	roomID := c.Param("room_id")
 	if !h.requireRoomPlaylistAdmin(c, roomID) {

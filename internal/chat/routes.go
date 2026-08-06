@@ -142,6 +142,7 @@ func RegisterRoutes(g *gin.RouterGroup, db *sql.DB, cfg *config.Config, bus *eve
 	g.DELETE("/me/music-box/playlists/:playlist_id/items/:item_id", h.deleteMyMusicPlaylistItem)
 	g.GET("/rooms/:room_id/music-box/playlists", h.listRoomMusicPlaylists)
 	g.POST("/rooms/:room_id/music-box/playlists", h.createRoomMusicPlaylist)
+	g.POST("/rooms/:room_id/music-box/playlists/:playlist_id/clone-to-me", h.cloneRoomMusicPlaylistToMe)
 	g.PATCH("/rooms/:room_id/music-box/playlists/order", h.reorderRoomMusicPlaylists)
 	g.GET("/rooms/:room_id/music-box/playlists/:playlist_id", h.getRoomMusicPlaylist)
 	g.PATCH("/rooms/:room_id/music-box/playlists/:playlist_id", h.renameRoomMusicPlaylist)

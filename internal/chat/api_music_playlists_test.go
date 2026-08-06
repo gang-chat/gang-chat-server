@@ -1,8 +1,12 @@
 package chat
 
 import (
+	"context"
+	"fmt"
 	"net/http"
 	"testing"
+
+	"github.com/zhuangkaiyi/gang-chat/server/internal/musicbox"
 )
 
 func TestPersonalMusicPlaylistCRUDAndOwnership(t *testing.T) {
@@ -515,6 +519,107 @@ func TestRoomMusicPlaylistCanAtomicallyImportOwnersPersonalPlaylist(t *testing.T
 			"name":               "不能导入",
 			"import_playlist_id": foreignID,
 		},
+	)
+	api.requireStatus(status, http.StatusNotFound, response)
+}
+
+func TestRoomMusicPlaylistCloneUsesRemarkAndEnforcesCapacity(t *testing.T) {
+	api := newAPIHarness(t)
+	owner := api.register("room_playlist_clone_owner")
+	outsider := api.register("room_playlist_clone_outsider")
+	ownerID := owner.User["id"].(string)
+	room := api.createRoom(owner.Token, map[string]any{
+		"name":        "原房间名",
+		"join_policy": "open",
+	})
+	roomID := room["id"].(string)
+	if _, err := api.db.Exec(
+		`UPDATE room_memberships SET remark_name = ? WHERE room_id = ? AND user_id = ?`,
+		"房间备注名",
+		roomID,
+		ownerID,
+	); err != nil {
+		t.Fatalf("set room remark: %v", err)
+	}
+
+	playlistIDs := make([]string, 0, 3)
+	for _, name := range []string{"第一", "第二", "第三"} {
+		status, response := api.request(
+			http.MethodPost,
+			"/rooms/"+roomID+"/music-box/playlists",
+			owner.Token,
+			map[string]any{"name": name},
+		)
+		api.requireStatus(status, http.StatusCreated, response)
+		playlistIDs = append(
+			playlistIDs,
+			response["playlist"].(map[string]any)["id"].(string),
+		)
+	}
+	status, response := api.request(
+		http.MethodPost,
+		"/rooms/"+roomID+"/music-box/playlists/"+playlistIDs[2]+"/items",
+		owner.Token,
+		map[string]any{
+			"track_id": "clone_track_3",
+			"source":   "netease",
+			"title":    "第三首歌",
+			"artists":  []string{"歌手丙"},
+		},
+	)
+	api.requireStatus(status, http.StatusCreated, response)
+
+	for index := 0; index < musicbox.MaxUserPlaylists-1; index++ {
+		if _, err := api.chat.Playlists.CreateUserPlaylist(
+			context.Background(),
+			ownerID,
+			fmt.Sprintf("已有歌单 %02d", index+1),
+		); err != nil {
+			t.Fatalf("fill personal playlist slot %d: %v", index+1, err)
+		}
+	}
+
+	status, response = api.request(
+		http.MethodPost,
+		"/rooms/"+roomID+"/music-box/playlists/"+playlistIDs[2]+"/clone-to-me",
+		owner.Token,
+		nil,
+	)
+	api.requireStatus(status, http.StatusCreated, response)
+	clonedPlaylist := response["playlist"].(map[string]any)
+	if clonedPlaylist["name"] != "房间备注名·第三" || clonedPlaylist["item_count"] != float64(1) {
+		t.Fatalf("unexpected cloned playlist: %v", clonedPlaylist)
+	}
+	clonedID := clonedPlaylist["id"].(string)
+
+	status, response = api.request(
+		http.MethodGet,
+		"/me/music-box/playlists/"+clonedID,
+		owner.Token,
+		nil,
+	)
+	api.requireStatus(status, http.StatusOK, response)
+	items := response["items"].([]any)
+	if len(items) != 1 || items[0].(map[string]any)["title"] != "第三首歌" {
+		t.Fatalf("cloned items = %v", items)
+	}
+
+	status, response = api.request(
+		http.MethodPost,
+		"/rooms/"+roomID+"/music-box/playlists/"+playlistIDs[0]+"/clone-to-me",
+		owner.Token,
+		nil,
+	)
+	api.requireStatus(status, http.StatusConflict, response)
+	if code := responseErrorCode(response); code != "playlist_limit_reached" {
+		t.Fatalf("full personal library clone code = %q, response=%v", code, response)
+	}
+
+	status, response = api.request(
+		http.MethodPost,
+		"/rooms/"+roomID+"/music-box/playlists/"+playlistIDs[0]+"/clone-to-me",
+		outsider.Token,
+		nil,
 	)
 	api.requireStatus(status, http.StatusNotFound, response)
 }
