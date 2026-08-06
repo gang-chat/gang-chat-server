@@ -44,13 +44,6 @@ type transcodeResult struct {
 // CDN URL that enforces hotlink protection (bilibili's *.bilivideo.com checks
 // Referer), so we set the matching request headers for those.
 func (t *transcoder) transcode(ctx context.Context, source, sourceURL, dstPath string) (*transcodeResult, error) {
-	select {
-	case t.slots <- struct{}{}:
-		defer func() { <-t.slots }()
-	case <-ctx.Done():
-		return nil, ctx.Err()
-	}
-
 	// ffmpeg reads the (possibly remote) input and produces Opus in an Ogg
 	// container — the exact format LiveKit's reader track consumes. -vn drops
 	// any embedded cover art video stream. 48kHz stereo matches WebRTC Opus.
@@ -77,6 +70,44 @@ func (t *transcoder) transcode(ctx context.Context, source, sourceURL, dstPath s
 		"-f", "ogg",
 		dstPath,
 	)
+	return t.run(ctx, args, dstPath)
+}
+
+// transcodePreview produces AAC-LC in an M4A container instead of Ogg/Opus.
+// Windows Media Foundation, Android MediaPlayer, and macOS all support this
+// combination natively, so one authenticated preview artifact works
+// consistently on all three clients without an optional Ogg system extension.
+func (t *transcoder) transcodePreview(ctx context.Context, source, sourceURL, dstPath string) (*transcodeResult, error) {
+	return t.run(ctx, previewTranscodeArgs(source, sourceURL, dstPath), dstPath)
+}
+
+func previewTranscodeArgs(source, sourceURL, dstPath string) []string {
+	args := []string{
+		"-hide_banner", "-loglevel", "error", "-nostdin", "-y",
+	}
+	args = append(args, inputHeaderArgs(source)...)
+	args = append(args,
+		"-i", sourceURL,
+		"-vn",
+		"-c:a", "aac",
+		"-b:a", "160k",
+		"-ar", "48000",
+		"-ac", "2",
+		"-movflags", "+faststart",
+		"-f", "mp4",
+		dstPath,
+	)
+	return args
+}
+
+func (t *transcoder) run(ctx context.Context, args []string, dstPath string) (*transcodeResult, error) {
+	select {
+	case t.slots <- struct{}{}:
+		defer func() { <-t.slots }()
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+
 	cmd := exec.CommandContext(ctx, t.ffmpegPath, args...)
 	var stderr strings.Builder
 	cmd.Stderr = &stderr

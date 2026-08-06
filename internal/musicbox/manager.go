@@ -209,7 +209,7 @@ func (m *Manager) resolveURL(ctx context.Context, item *QueueItem) (string, erro
 
 // PreparePreview resolves and transcodes a track into the shared preview
 // cache without adding it to a room queue or touching room playback state.
-// The returned Ogg/Opus file is served only through the authenticated preview
+// The returned M4A/AAC file is served only through the authenticated preview
 // endpoint and is used for an explicitly initiated local client preview.
 func (m *Manager) PreparePreview(ctx context.Context, source, trackID string) (string, error) {
 	if m == nil || m.tc == nil || strings.TrimSpace(m.cfg.Dir) == "" {
@@ -233,10 +233,11 @@ func (m *Manager) PreparePreview(ctx context.Context, source, trackID string) (s
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return "", fmt.Errorf("prepare preview dir: %w", err)
 	}
-	dst := filepath.Join(dir, key+".ogg")
+	dst := filepath.Join(dir, key+".m4a")
 	if info, err := os.Stat(dst); err == nil && info.Size() > 0 {
 		now := time.Now()
 		_ = os.Chtimes(dst, now, now)
+		m.cleanupPreviewCache(dst)
 		return dst, nil
 	}
 
@@ -246,7 +247,7 @@ func (m *Manager) PreparePreview(ctx context.Context, source, trackID string) (s
 		return "", fmt.Errorf("resolve preview url: %w", err)
 	}
 	tmp := dst + ".tmp-" + randomID()
-	if _, err := m.tc.transcode(ctx, source, resolvedURL, tmp); err != nil {
+	if _, err := m.tc.transcodePreview(ctx, source, resolvedURL, tmp); err != nil {
 		_ = os.Remove(tmp)
 		return "", err
 	}
@@ -280,7 +281,14 @@ func (m *Manager) cleanupPreviewCache(keepPath string) {
 	files := make([]cachedPreview, 0, len(entries))
 	var total int64
 	for _, entry := range entries {
-		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".ogg") {
+		if entry.IsDir() {
+			continue
+		}
+		if strings.HasSuffix(entry.Name(), ".ogg") || strings.HasSuffix(entry.Name(), ".mp3") {
+			_ = os.Remove(filepath.Join(dir, entry.Name()))
+			continue
+		}
+		if !strings.HasSuffix(entry.Name(), ".m4a") {
 			continue
 		}
 		info, err := entry.Info()

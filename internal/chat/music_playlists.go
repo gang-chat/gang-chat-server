@@ -338,8 +338,8 @@ func (h *Handler) previewMusicTrack(c *gin.Context) {
 		h.jsonError(c, http.StatusInternalServerError, "music_preview_failed", "music preview is empty")
 		return
 	}
-	c.Header("Content-Disposition", `inline; filename="music-preview.ogg"`)
-	c.DataFromReader(http.StatusOK, info.Size(), "audio/ogg", file, nil)
+	c.Header("Content-Disposition", `inline; filename="music-preview.m4a"`)
+	c.DataFromReader(http.StatusOK, info.Size(), "audio/mp4", file, nil)
 }
 
 func (h *Handler) addMyMusicPlaylistItem(c *gin.Context) {
