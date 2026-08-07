@@ -103,6 +103,88 @@ type PlaylistItemsPage struct {
 	HasMore  bool
 }
 
+// UserPlaylistSnapshot returns the complete, ordered contents of one personal
+// playlist for an immutable share payload. Unlike the paged management API it
+// deliberately reads up to the server-side playlist limit in one query, so a
+// shared message never contains only the first UI page.
+func (s *PlaylistStore) UserPlaylistSnapshot(
+	ctx context.Context,
+	ownerUserID, playlistID string,
+) (PlaylistItemsPage, error) {
+	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		return PlaylistItemsPage{}, err
+	}
+	defer tx.Rollback()
+	playlist, err := s.playlistSummary(
+		ctx,
+		tx,
+		userPlaylistScope(ownerUserID),
+		playlistID,
+		false,
+	)
+	if err != nil {
+		return PlaylistItemsPage{}, err
+	}
+	rows, err := tx.QueryContext(
+		ctx,
+		`SELECT i.id, i.playlist_id, t.external_track_id, t.source, t.title,
+		        t.artists_json, COALESCE(t.duration_ms, 0), i.sort_order, i.created_at
+		 FROM music_playlist_items i
+		 JOIN music_tracks t ON t.id = i.track_id
+		 WHERE i.playlist_id = ?
+		 ORDER BY i.sort_order ASC, i.created_at ASC, i.id ASC
+		 LIMIT ?`,
+		playlistID,
+		MaxPlaylistItems,
+	)
+	if err != nil {
+		return PlaylistItemsPage{}, err
+	}
+	defer rows.Close()
+	items := make([]PlaylistItem, 0, playlist.ItemCount)
+	for rows.Next() {
+		var item PlaylistItem
+		var artistsJSON []byte
+		if err := rows.Scan(
+			&item.ID,
+			&item.PlaylistID,
+			&item.ExternalTrackID,
+			&item.Source,
+			&item.Title,
+			&artistsJSON,
+			&item.DurationMS,
+			&item.SortOrder,
+			&item.CreatedAt,
+		); err != nil {
+			return PlaylistItemsPage{}, err
+		}
+		_ = json.Unmarshal(artistsJSON, &item.Artists)
+		if item.Artists == nil {
+			item.Artists = []string{}
+		}
+		items = append(items, item)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return PlaylistItemsPage{}, err
+	}
+	if err := rows.Close(); err != nil {
+		return PlaylistItemsPage{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return PlaylistItemsPage{}, err
+	}
+	return PlaylistItemsPage{
+		Playlist: playlist,
+		Items:    items,
+		Page:     1,
+		PageSize: MaxPlaylistItems,
+		Total:    len(items),
+		HasMore:  false,
+	}, nil
+}
+
 type AddPlaylistItemParams struct {
 	OwnerUserID     string
 	RoomID          string

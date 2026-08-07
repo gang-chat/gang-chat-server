@@ -200,6 +200,7 @@ func RegisterRoutes(g *gin.RouterGroup, db *sql.DB, cfg *config.Config, bus *eve
 
 	g.GET("/rooms/:room_id/messages", h.listMessages)
 	g.POST("/rooms/:room_id/messages", h.sendMessage)
+	g.POST("/rooms/:room_id/messages/:message_id/playlist/clone-to-me", h.cloneSharedPlaylistToMe)
 	g.GET("/rooms/:room_id/message-history", h.listMessageHistory)
 	g.POST("/rooms/:room_id/message-history/hide", h.hideMessageHistory)
 	g.POST("/rooms/:room_id/messages/:message_id/recall", h.recallMessage)

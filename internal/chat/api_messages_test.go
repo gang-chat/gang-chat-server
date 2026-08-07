@@ -115,6 +115,144 @@ func TestLastMessagePreviewUsesAttachmentLabels(t *testing.T) {
 	assertLastPreview("[表情] wave")
 }
 
+func TestPlaylistMessageUsesOwnedImmutableSnapshot(t *testing.T) {
+	api := newAPIHarness(t)
+	owner := api.register("playlist_message_owner")
+	other := api.register("playlist_message_other")
+	room := api.createRoom(owner.Token, map[string]any{
+		"name":        "Playlist Share Room",
+		"join_policy": "open",
+	})
+	roomID := room["id"].(string)
+
+	status, response := api.request(
+		http.MethodPost,
+		"/me/music-box/playlists",
+		owner.Token,
+		map[string]any{"name": "夜晚精选"},
+	)
+	api.requireStatus(status, http.StatusCreated, response)
+	playlistID := response["playlist"].(map[string]any)["id"].(string)
+	status, response = api.request(
+		http.MethodPost,
+		"/me/music-box/playlists/"+playlistID+"/items",
+		owner.Token,
+		map[string]any{
+			"track_id":    "shared_track_1",
+			"source":      "netease",
+			"title":       "晴天",
+			"artists":     []string{"周杰伦"},
+			"duration_ms": 269000,
+		},
+	)
+	api.requireStatus(status, http.StatusCreated, response)
+
+	status, response = api.request(
+		http.MethodPost,
+		"/rooms/"+roomID+"/messages",
+		owner.Token,
+		map[string]any{
+			"client_message_id": "playlist_share_1",
+			"type":              "playlist",
+			"body":              "伪造正文",
+			"attachments": []any{map[string]any{
+				"type":        "playlist",
+				"playlist_id": playlistID,
+				"playlist":    map[string]any{"name": "伪造歌单"},
+			}},
+		},
+	)
+	api.requireStatus(status, http.StatusCreated, response)
+	message := response["message"].(map[string]any)
+	if message["body"] != "[歌单] 夜晚精选" {
+		t.Fatalf("playlist message body = %v", message["body"])
+	}
+	attachment := message["attachments"].([]any)[0].(map[string]any)
+	snapshot := attachment["playlist"].(map[string]any)
+	if snapshot["name"] != "夜晚精选" || snapshot["item_count"] != float64(1) {
+		t.Fatalf("unexpected playlist snapshot: %v", snapshot)
+	}
+	if len(snapshot["items"].([]any)) != 1 {
+		t.Fatalf("snapshot should contain all tracks: %v", snapshot)
+	}
+	creator := snapshot["creator"].(map[string]any)
+	if creator["id"] != owner.User["id"] {
+		t.Fatalf("snapshot creator = %v, want %v", creator, owner.User["id"])
+	}
+
+	// A different account cannot share the owner's playlist id.
+	status, response = api.request(http.MethodPost, "/rooms/"+roomID+"/join", other.Token, nil)
+	api.requireStatus(status, http.StatusOK, response)
+	status, response = api.request(
+		http.MethodPost,
+		"/rooms/"+roomID+"/messages",
+		other.Token,
+		map[string]any{
+			"client_message_id": "playlist_share_foreign",
+			"type":              "playlist",
+			"attachments": []any{map[string]any{
+				"type":        "playlist",
+				"playlist_id": playlistID,
+			}},
+		},
+	)
+	api.requireStatus(status, http.StatusNotFound, response)
+
+	status, response = api.request(
+		http.MethodPost,
+		"/rooms/"+roomID+"/messages/"+message["id"].(string)+"/playlist/clone-to-me",
+		other.Token,
+		nil,
+	)
+	api.requireStatus(status, http.StatusCreated, response)
+	cloned := response["playlist"].(map[string]any)
+	if cloned["item_count"] != float64(1) || !strings.Contains(cloned["name"].(string), "夜晚精选") {
+		t.Fatalf("unexpected cloned shared playlist: %v", cloned)
+	}
+	status, response = api.request(
+		http.MethodGet,
+		"/me/music-box/playlists/"+cloned["id"].(string)+"?page=1&page_size=50",
+		other.Token,
+		nil,
+	)
+	api.requireStatus(status, http.StatusOK, response)
+	if len(response["items"].([]any)) != 1 {
+		t.Fatalf("cloned shared playlist lost tracks: %v", response)
+	}
+
+	// Deleting the managed source must not invalidate the historical message.
+	status, response = api.request(
+		http.MethodDelete,
+		"/me/music-box/playlists/"+playlistID,
+		owner.Token,
+		nil,
+	)
+	api.requireStatus(status, http.StatusOK, response)
+	status, response = api.request(
+		http.MethodGet,
+		"/rooms/"+roomID+"/messages?limit=50",
+		owner.Token,
+		nil,
+	)
+	api.requireStatus(status, http.StatusOK, response)
+	messages := response["messages"].([]any)
+	var historyMessage map[string]any
+	for _, raw := range messages {
+		candidate := raw.(map[string]any)
+		if candidate["type"] == "playlist" {
+			historyMessage = candidate
+			break
+		}
+	}
+	if historyMessage == nil {
+		t.Fatalf("message history should retain playlist share: %v", response)
+	}
+	historySnapshot := historyMessage["attachments"].([]any)[0].(map[string]any)["playlist"].(map[string]any)
+	if historySnapshot["name"] != "夜晚精选" || len(historySnapshot["items"].([]any)) != 1 {
+		t.Fatalf("historical snapshot changed after source deletion: %v", historySnapshot)
+	}
+}
+
 func TestMessageQuoteUsesImmutableSingleLevelSnapshot(t *testing.T) {
 	api := newAPIHarness(t)
 	owner := api.register("quote_owner")

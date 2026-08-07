@@ -222,6 +222,11 @@ func messagePreview(messageType, body string) string {
 		return "[语音]"
 	case "file":
 		return "[文件]"
+	case "playlist":
+		if body != "" {
+			return body
+		}
+		return "[歌单]"
 	default:
 		return "收到一条新消息"
 	}

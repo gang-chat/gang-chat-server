@@ -1,6 +1,7 @@
 package chat
 
 import (
+	"context"
 	"database/sql"
 	"errors"
 	"net/http"
@@ -8,8 +9,11 @@ import (
 	"unicode/utf8"
 
 	"github.com/gin-gonic/gin"
+	"github.com/zhuangkaiyi/gang-chat/server/internal/musicbox"
 	"github.com/zhuangkaiyi/gang-chat/server/internal/push"
 )
+
+var errInvalidPlaylistShare = errors.New("invalid playlist share")
 
 func (h *Handler) listMessages(c *gin.Context) {
 	roomID := c.Param("room_id")
@@ -125,7 +129,7 @@ func (h *Handler) sendMessage(c *gin.Context) {
 	if messageType == "" {
 		messageType = "text"
 	}
-	if !allowed(messageType, "text", "sticker", "audio", "file") {
+	if !allowed(messageType, "text", "sticker", "audio", "file", "playlist") {
 		h.jsonError(c, http.StatusBadRequest, "validation_failed", "invalid message type")
 		return
 	}
@@ -147,6 +151,27 @@ func (h *Handler) sendMessage(c *gin.Context) {
 	}
 	if !h.validateMentions(c, roomID, req.Mentions) {
 		return
+	}
+	if messageType == "playlist" {
+		attachment, playlistName, err := h.sharedPlaylistAttachment(
+			c.Request.Context(),
+			roomID,
+			userID,
+			req.Attachments,
+		)
+		if err != nil {
+			switch {
+			case errors.Is(err, musicbox.ErrPlaylistNotFound):
+				h.jsonError(c, http.StatusNotFound, "not_found", "music playlist not found")
+			case errors.Is(err, errInvalidPlaylistShare):
+				h.jsonError(c, http.StatusBadRequest, "validation_failed", "invalid playlist share")
+			default:
+				h.jsonError(c, http.StatusInternalServerError, "internal_error", "failed to share music playlist")
+			}
+			return
+		}
+		req.Attachments = []any{attachment}
+		body = "[歌单] " + playlistName
 	}
 	mentionsJSON := mustJSON(req.Mentions)
 	attachmentsJSON := mustJSON(req.Attachments)
@@ -227,6 +252,153 @@ func (h *Handler) sendMessage(c *gin.Context) {
 		}
 	}
 	h.idempotentJSON(c, http.StatusCreated, rawBody, gin.H{"message": msg})
+}
+
+// sharedPlaylistAttachment replaces the untrusted client attachment (which
+// contains only a personal playlist id) with an immutable server snapshot.
+// This prevents forging another user's playlist and keeps old chat messages
+// viewable after the source playlist is renamed or deleted.
+func (h *Handler) sharedPlaylistAttachment(
+	ctx context.Context,
+	roomID, userID string,
+	attachments []any,
+) (gin.H, string, error) {
+	if h.Playlists == nil || len(attachments) != 1 {
+		return nil, "", errInvalidPlaylistShare
+	}
+	raw, ok := attachments[0].(map[string]any)
+	if !ok || strings.ToLower(strings.TrimSpace(stringFromMap(raw, "type"))) != "playlist" {
+		return nil, "", errInvalidPlaylistShare
+	}
+	playlistID := strings.TrimSpace(stringFromMap(raw, "playlist_id"))
+	if playlistID == "" {
+		return nil, "", errInvalidPlaylistShare
+	}
+	snapshot, err := h.Playlists.UserPlaylistSnapshot(ctx, userID, playlistID)
+	if err != nil {
+		return nil, "", err
+	}
+	creator, err := h.userSummaryForRoom(roomID, userID)
+	if err != nil {
+		return nil, "", err
+	}
+	items := make([]gin.H, 0, len(snapshot.Items))
+	for _, item := range snapshot.Items {
+		items = append(items, musicPlaylistItemPayload(item))
+	}
+	playlist := musicPlaylistPayload(snapshot.Playlist)
+	playlist["creator"] = creator
+	playlist["items"] = items
+	return gin.H{
+		"type":     "playlist",
+		"playlist": playlist,
+	}, snapshot.Playlist.Name, nil
+}
+
+func (h *Handler) cloneSharedPlaylistToMe(c *gin.Context) {
+	roomID := c.Param("room_id")
+	userID := currentUserID(c)
+	if !h.requireRoomAccess(c, roomID) {
+		return
+	}
+	if h.Playlists == nil {
+		h.jsonError(c, http.StatusInternalServerError, "internal_error", "music playlists unavailable")
+		return
+	}
+	msg, err := h.messageByIDForUser(c.Param("message_id"), userID)
+	if err != nil || msg.RoomID != roomID || msg.Type != "playlist" || msg.IsRecalled || msg.IsForceDeleted {
+		h.jsonError(c, http.StatusNotFound, "not_found", "shared playlist message not found")
+		return
+	}
+	playlist, ok := sharedPlaylistSnapshotFromMessage(msg)
+	if !ok {
+		h.jsonError(c, http.StatusNotFound, "not_found", "shared playlist snapshot not found")
+		return
+	}
+	tracks, ok := sharedPlaylistSnapshotTracks(playlist)
+	if !ok {
+		h.jsonError(c, http.StatusBadRequest, "validation_failed", "shared playlist snapshot is invalid")
+		return
+	}
+	creatorName := quotedMessageSenderName(msg)
+	if creator, creatorOK := playlist["creator"].(map[string]any); creatorOK {
+		creatorName = firstNonEmptyString(
+			stringFromMap(creator, "room_display_name"),
+			stringFromMap(creator, "display_name"),
+			stringFromMap(creator, "username"),
+			creatorName,
+		)
+	}
+	requestedName := creatorName + "的歌单 · " + strings.TrimSpace(stringFromMap(playlist, "name"))
+	result, err := h.Playlists.CloneSnapshotToUserPlaylist(
+		c.Request.Context(),
+		userID,
+		requestedName,
+		tracks,
+	)
+	if err != nil {
+		switch {
+		case errors.Is(err, musicbox.ErrPlaylistLimit):
+			h.jsonError(c, http.StatusConflict, "playlist_limit_reached", "playlist limit reached")
+		case errors.Is(err, musicbox.ErrPlaylistItemLimit):
+			h.jsonError(c, http.StatusConflict, "playlist_item_limit_reached", "playlist item limit reached")
+		default:
+			h.jsonError(c, http.StatusInternalServerError, "internal_error", "failed to clone shared playlist")
+		}
+		return
+	}
+	c.JSON(http.StatusCreated, gin.H{"playlist": musicPlaylistPayload(result)})
+}
+
+func sharedPlaylistSnapshotFromMessage(msg message) (map[string]any, bool) {
+	for _, raw := range msg.Attachments {
+		attachment, ok := raw.(map[string]any)
+		if !ok || strings.ToLower(stringFromMap(attachment, "type")) != "playlist" {
+			continue
+		}
+		playlist, ok := attachment["playlist"].(map[string]any)
+		if ok && strings.TrimSpace(stringFromMap(playlist, "name")) != "" {
+			return playlist, true
+		}
+	}
+	return nil, false
+}
+
+func sharedPlaylistSnapshotTracks(playlist map[string]any) ([]musicbox.SnapshotTrack, bool) {
+	rawItems, ok := playlist["items"].([]any)
+	if !ok || len(rawItems) > musicbox.MaxPlaylistItems {
+		return nil, false
+	}
+	tracks := make([]musicbox.SnapshotTrack, 0, len(rawItems))
+	for _, raw := range rawItems {
+		item, ok := raw.(map[string]any)
+		if !ok {
+			return nil, false
+		}
+		source := strings.TrimSpace(stringFromMap(item, "source"))
+		trackID := strings.TrimSpace(stringFromMap(item, "track_id"))
+		title := strings.TrimSpace(stringFromMap(item, "title"))
+		if source == "" || trackID == "" || title == "" {
+			return nil, false
+		}
+		artists := make([]string, 0)
+		if rawArtists, artistsOK := item["artists"].([]any); artistsOK {
+			for _, rawArtist := range rawArtists {
+				artist := strings.TrimSpace(stringValue(rawArtist))
+				if artist != "" {
+					artists = append(artists, artist)
+				}
+			}
+		}
+		tracks = append(tracks, musicbox.SnapshotTrack{
+			Source:     source,
+			TrackID:    trackID,
+			Title:      title,
+			Artist:     strings.Join(artists, "、"),
+			DurationMS: int64FromMap(item, "duration_ms"),
+		})
+	}
+	return tracks, true
 }
 
 func normalizedQuoteMessageIDs(req sendMessageRequest) []string {
@@ -376,6 +548,9 @@ func quotedMessagePreviewAttachment(msg message) any {
 		}
 		attachmentType := strings.ToLower(stringFromMap(attachment, "type"))
 		if attachmentType == "sticker" {
+			return attachment
+		}
+		if attachmentType == "playlist" {
 			return attachment
 		}
 		if attachmentType == "file" && strings.HasPrefix(strings.ToLower(attachmentMimeType(attachment)), "image/") {

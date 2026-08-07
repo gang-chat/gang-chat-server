@@ -815,6 +815,7 @@ func lastMessageBodyPreview(messageType, body, attachmentsJSON string) string {
 	imageName := ""
 	fileName := ""
 	stickerName := ""
+	playlistName := ""
 	for _, raw := range attachments {
 		attachment, ok := raw.(map[string]any)
 		if !ok {
@@ -831,6 +832,11 @@ func lastMessageBodyPreview(messageType, body, attachmentsJSON string) string {
 		}
 		if attachmentType == "sticker" && stickerName == "" {
 			stickerName = displayName
+		}
+		if attachmentType == "playlist" && playlistName == "" {
+			if playlist, ok := attachment["playlist"].(map[string]any); ok {
+				playlistName = stringFromMap(playlist, "name")
+			}
 		}
 		if attachmentType == "file" {
 			hasFile = true
@@ -852,6 +858,9 @@ func lastMessageBodyPreview(messageType, body, attachmentsJSON string) string {
 	}
 	if messageType == "sticker" || stickerName != "" {
 		return labelledLastMessagePreview("[表情]", firstNonEmptyString(stickerName, stickerNameFromBody(body)))
+	}
+	if messageType == "playlist" || playlistName != "" {
+		return labelledLastMessagePreview("[歌单]", playlistName)
 	}
 	if hasFile {
 		if hasImage && !hasNonImageFile {
