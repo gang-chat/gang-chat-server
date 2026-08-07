@@ -104,6 +104,10 @@ func (h *Handler) enqueueMusicBox(c *gin.Context) {
 		AddedByUserID: currentUserID(c),
 	})
 	if err != nil {
+		if errors.Is(err, musicbox.ErrQueueItemAlreadyExists) {
+			h.jsonError(c, http.StatusConflict, "music_box_item_already_queued", "music box item is already queued")
+			return
+		}
 		h.jsonError(c, http.StatusInternalServerError, "internal_error", "enqueue failed")
 		return
 	}

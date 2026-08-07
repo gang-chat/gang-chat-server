@@ -9,6 +9,44 @@ import (
 	"github.com/zhuangkaiyi/gang-chat/server/internal/musicbox"
 )
 
+func insertLegacyDuplicateMusicPlaylistItem(
+	t *testing.T,
+	api *apiHarness,
+	playlistID, source, externalTrackID, title, addedByUserID, itemID string,
+	sortOrder int64,
+) {
+	t.Helper()
+	var trackID string
+	if err := api.db.QueryRow(
+		`SELECT id FROM music_tracks WHERE source = ? AND external_track_id = ?`,
+		source,
+		externalTrackID,
+	).Scan(&trackID); err != nil {
+		t.Fatalf("resolve legacy duplicate track: %v", err)
+	}
+	if _, err := api.db.Exec(
+		`UPDATE music_tracks SET title = ? WHERE id = ?`,
+		title,
+		trackID,
+	); err != nil {
+		t.Fatalf("update legacy duplicate track metadata: %v", err)
+	}
+	if _, err := api.db.Exec(
+		`INSERT INTO music_playlist_items
+		 (id, playlist_id, track_id, added_by_user_id, sort_order, created_at, updated_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		itemID,
+		playlistID,
+		trackID,
+		addedByUserID,
+		sortOrder,
+		int64(1),
+		int64(1),
+	); err != nil {
+		t.Fatalf("insert legacy duplicate playlist item: %v", err)
+	}
+}
+
 func TestPersonalMusicPlaylistCRUDAndOwnership(t *testing.T) {
 	api := newAPIHarness(t)
 	owner := api.register("playlist_owner")
@@ -69,18 +107,36 @@ func TestPersonalMusicPlaylistCRUDAndOwnership(t *testing.T) {
 	)
 	api.requireStatus(status, http.StatusBadRequest, response)
 
+	firstTrack := map[string]any{
+		"track_id": "track_1",
+		"source":   "netease",
+		"title":    "晴天",
+		"artists":  []string{"周杰伦"},
+	}
+	status, response = api.request(
+		http.MethodPost,
+		"/me/music-box/playlists/"+playlistID+"/items",
+		owner.Token,
+		firstTrack,
+	)
+	api.requireStatus(status, http.StatusCreated, response)
+
+	status, response = api.request(
+		http.MethodPost,
+		"/me/music-box/playlists/"+playlistID+"/items",
+		owner.Token,
+		firstTrack,
+	)
+	api.requireStatus(status, http.StatusConflict, response)
+	if code := responseErrorCode(response); code != "playlist_item_already_exists" {
+		t.Fatalf("duplicate playlist item code = %q, response=%v", code, response)
+	}
+
 	for _, track := range []map[string]any{
 		{
-			"track_id": "track_1",
+			"track_id": "track_2",
 			"source":   "netease",
-			"title":    "晴天",
-			"artists":  []string{"周杰伦"},
-		},
-		{
-			// Duplicate tracks are intentionally allowed in saved playlists.
-			"track_id": "track_1",
-			"source":   "netease",
-			"title":    "晴天",
+			"title":    "七里香",
 			"artists":  []string{"周杰伦"},
 		},
 	} {
@@ -340,7 +396,19 @@ func TestPersonalMusicPlaylistMergePreservesSelectionOrderAndDeduplicatesLinks(t
 	foreignID := createPlaylist(other.Token, "外部来源")
 	addTrack(firstID, "link-a", "A", "netease")
 	addTrack(firstID, "link-b", "B", "netease")
-	addTrack(firstID, "link-a", "A 重复", "netease")
+	// New writes reject duplicate links. Keep this explicit legacy fixture so
+	// merge compatibility with playlists created by older releases is covered.
+	insertLegacyDuplicateMusicPlaylistItem(
+		t,
+		api,
+		firstID,
+		"netease",
+		"link-a",
+		"A 重复",
+		ownerID,
+		"legacy_merge_duplicate_item",
+		30,
+	)
 	addTrack(secondID, "link-b", "B 重复", "netease")
 	addTrack(secondID, "link-c", "C", "netease")
 	// The same external id on another source is a different concrete link.
@@ -448,7 +516,20 @@ func TestPersonalMusicPlaylistBatchAddCopiesWithoutMutatingSource(t *testing.T) 
 	foreignID := createPlaylist(other.Token, "其他人的目标")
 	itemA := addTrack(sourceID, "batch-link-a", "A")
 	itemB := addTrack(sourceID, "batch-link-b", "B")
-	itemBDuplicate := addTrack(sourceID, "batch-link-b", "B 重复")
+	// New writes reject duplicate links, but batch add must still deduplicate
+	// legacy playlists created before that rule was enforced.
+	itemBDuplicate := "legacy_batch_duplicate_item"
+	insertLegacyDuplicateMusicPlaylistItem(
+		t,
+		api,
+		sourceID,
+		"netease",
+		"batch-link-b",
+		"B 重复",
+		owner.User["id"].(string),
+		itemBDuplicate,
+		30,
+	)
 	addTrack(targetID, "batch-link-a", "A 已存在")
 
 	status, response := api.request(
@@ -593,6 +674,17 @@ func TestRoomMusicPlaylistPermissionsAndIsolation(t *testing.T) {
 	)
 	api.requireStatus(status, http.StatusCreated, response)
 	itemID := response["item"].(map[string]any)["id"].(string)
+
+	status, response = api.request(
+		http.MethodPost,
+		"/rooms/"+roomID+"/music-box/playlists/"+playlistID+"/items",
+		owner.Token,
+		track,
+	)
+	api.requireStatus(status, http.StatusConflict, response)
+	if code := responseErrorCode(response); code != "playlist_item_already_exists" {
+		t.Fatalf("duplicate room playlist item code = %q, response=%v", code, response)
+	}
 
 	status, response = api.request(
 		http.MethodGet,

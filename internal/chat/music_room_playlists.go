@@ -339,6 +339,8 @@ func (h *Handler) addRoomMusicPlaylistItem(c *gin.Context) {
 			h.jsonError(c, http.StatusNotFound, "not_found", "music playlist not found")
 		case errors.Is(err, musicbox.ErrPlaylistItemLimit):
 			h.jsonError(c, http.StatusConflict, "playlist_item_limit_reached", "playlist item limit reached")
+		case errors.Is(err, musicbox.ErrPlaylistItemExists):
+			h.jsonError(c, http.StatusConflict, "playlist_item_already_exists", "music playlist item already exists")
 		default:
 			h.jsonError(c, http.StatusInternalServerError, "internal_error", "add room music playlist item failed")
 		}

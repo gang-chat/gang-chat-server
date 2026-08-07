@@ -18,12 +18,13 @@ const (
 )
 
 var (
-	ErrPlaylistNotFound  = errors.New("music playlist not found")
-	ErrPlaylistLimit     = errors.New("music playlist limit reached")
-	ErrPlaylistItemLimit = errors.New("music playlist item limit reached")
-	ErrPlaylistOrder     = errors.New("invalid music playlist item order")
-	ErrPlaylistName      = errors.New("music playlist name already exists")
-	ErrPlaylistSelection = errors.New("invalid music playlist selection")
+	ErrPlaylistNotFound   = errors.New("music playlist not found")
+	ErrPlaylistLimit      = errors.New("music playlist limit reached")
+	ErrPlaylistItemLimit  = errors.New("music playlist item limit reached")
+	ErrPlaylistItemExists = errors.New("music playlist item already exists")
+	ErrPlaylistOrder      = errors.New("invalid music playlist item order")
+	ErrPlaylistName       = errors.New("music playlist name already exists")
+	ErrPlaylistSelection  = errors.New("invalid music playlist selection")
 )
 
 // PlaylistStore persists reusable playlists independently from the transient
@@ -962,6 +963,24 @@ func (s *PlaylistStore) addPlaylistItem(
 		true,
 	); err != nil {
 		return PlaylistItem{}, err
+	}
+	var duplicate int
+	if err := tx.QueryRowContext(
+		ctx,
+		`SELECT EXISTS(
+			SELECT 1
+			FROM music_playlist_items i
+			JOIN music_tracks t ON t.id = i.track_id
+			WHERE i.playlist_id = ? AND t.source = ? AND t.external_track_id = ?
+		)`,
+		params.PlaylistID,
+		params.Source,
+		params.ExternalTrackID,
+	).Scan(&duplicate); err != nil {
+		return PlaylistItem{}, err
+	}
+	if duplicate != 0 {
+		return PlaylistItem{}, ErrPlaylistItemExists
 	}
 	var count int
 	if err := tx.QueryRowContext(

@@ -1,9 +1,57 @@
 package musicbox
 
 import (
+	"context"
 	"errors"
 	"testing"
 )
+
+func TestEnqueueRejectsDuplicateTrackInTemporaryQueue(t *testing.T) {
+	store := newTestStore(t)
+	if _, err := store.insertItem(QueueItem{
+		ID:            "ready-cap-blocker",
+		RoomID:        "r1",
+		Source:        "netease",
+		TrackID:       "other-track",
+		Title:         "Other track",
+		Status:        StatusReady,
+		FileSizeBytes: 1,
+		AddedByUserID: "u1",
+		SortOrder:     10,
+	}); err != nil {
+		t.Fatalf("insert ready cap blocker: %v", err)
+	}
+	manager := &Manager{
+		cfg:          Config{Enabled: true, MaxBytesPerRoom: 1},
+		store:        store,
+		players:      map[string]*player{},
+		seenCommands: map[string]map[string]int64{},
+		playCursors:  map[string]playCursor{},
+	}
+	params := EnqueueParams{
+		RoomID:        "r1",
+		Source:        "netease",
+		TrackID:       "same-track",
+		Title:         "Same track",
+		AddedByUserID: "u1",
+	}
+	if _, err := manager.Enqueue(context.Background(), params); err != nil {
+		t.Fatalf("first enqueue: %v", err)
+	}
+	if _, err := manager.Enqueue(
+		context.Background(),
+		params,
+	); !errors.Is(err, ErrQueueItemAlreadyExists) {
+		t.Fatalf("duplicate enqueue error = %v, want ErrQueueItemAlreadyExists", err)
+	}
+	queue, err := store.listScopedQueue("r1", QueueScopeTemporary, "")
+	if err != nil {
+		t.Fatalf("list temporary queue: %v", err)
+	}
+	if len(queue) != 2 {
+		t.Fatalf("temporary queue length = %d, want 2", len(queue))
+	}
+}
 
 func TestPlayNowRejectsMissingPendingAndInactiveItems(t *testing.T) {
 	store := newTestStore(t)

@@ -30,10 +30,11 @@ const defaultGDSource = "netease"
 var (
 	// ErrUnavailable is returned when the music box can't operate (LiveKit not
 	// configured). Handlers map it to 503.
-	ErrUnavailable       = errors.New("music box is not available")
-	ErrRevisionConflict  = errors.New("music box revision conflict")
-	ErrQueueItemNotFound = errors.New("music box queue item not found")
-	ErrQueueItemNotReady = errors.New("music box queue item not ready")
+	ErrUnavailable            = errors.New("music box is not available")
+	ErrRevisionConflict       = errors.New("music box revision conflict")
+	ErrQueueItemNotFound      = errors.New("music box queue item not found")
+	ErrQueueItemNotReady      = errors.New("music box queue item not ready")
+	ErrQueueItemAlreadyExists = errors.New("music box queue item already exists")
 )
 
 // TokenFunc issues a LiveKit join token for the bot in a room. Provided by the
@@ -419,6 +420,19 @@ func (m *Manager) Enqueue(ctx context.Context, p EnqueueParams) (*QueueItem, err
 	source := p.Source
 	if source == "" {
 		source = defaultGDSource
+	}
+	temporaryQueue, err := m.store.listScopedQueue(
+		p.RoomID,
+		QueueScopeTemporary,
+		"",
+	)
+	if err != nil {
+		return nil, err
+	}
+	for _, existing := range temporaryQueue {
+		if existing.Source == source && existing.TrackID == p.TrackID {
+			return nil, ErrQueueItemAlreadyExists
+		}
 	}
 	sortOrder, err := m.store.nextSortOrder(p.RoomID)
 	if err != nil {
