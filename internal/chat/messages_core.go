@@ -13,7 +13,10 @@ import (
 	"github.com/zhuangkaiyi/gang-chat/server/internal/push"
 )
 
-var errInvalidPlaylistShare = errors.New("invalid playlist share")
+var (
+	errInvalidPlaylistShare = errors.New("invalid playlist share")
+	errInvalidTrackShare    = errors.New("invalid music track share")
+)
 
 func (h *Handler) listMessages(c *gin.Context) {
 	roomID := c.Param("room_id")
@@ -129,7 +132,7 @@ func (h *Handler) sendMessage(c *gin.Context) {
 	if messageType == "" {
 		messageType = "text"
 	}
-	if !allowed(messageType, "text", "sticker", "audio", "file", "playlist") {
+	if !allowed(messageType, "text", "sticker", "audio", "file", "playlist", "music_track") {
 		h.jsonError(c, http.StatusBadRequest, "validation_failed", "invalid message type")
 		return
 	}
@@ -172,6 +175,26 @@ func (h *Handler) sendMessage(c *gin.Context) {
 		}
 		req.Attachments = []any{attachment}
 		body = "[歌单] " + playlistName
+	}
+	if messageType == "music_track" {
+		attachment, trackName, err := h.sharedMusicTrackAttachment(
+			c.Request.Context(),
+			userID,
+			req.Attachments,
+		)
+		if err != nil {
+			switch {
+			case errors.Is(err, musicbox.ErrPlaylistNotFound):
+				h.jsonError(c, http.StatusNotFound, "not_found", "music playlist or track not found")
+			case errors.Is(err, errInvalidTrackShare):
+				h.jsonError(c, http.StatusBadRequest, "validation_failed", "invalid music track share")
+			default:
+				h.jsonError(c, http.StatusInternalServerError, "internal_error", "failed to share music track")
+			}
+			return
+		}
+		req.Attachments = []any{attachment}
+		body = "[歌曲] " + trackName
 	}
 	mentionsJSON := mustJSON(req.Mentions)
 	attachmentsJSON := mustJSON(req.Attachments)
@@ -263,11 +286,17 @@ func (h *Handler) sharedPlaylistAttachment(
 	roomID, userID string,
 	attachments []any,
 ) (gin.H, string, error) {
-	if h.Playlists == nil || len(attachments) != 1 {
+	if len(attachments) != 1 {
 		return nil, "", errInvalidPlaylistShare
 	}
 	raw, ok := attachments[0].(map[string]any)
 	if !ok || strings.ToLower(strings.TrimSpace(stringFromMap(raw, "type"))) != "playlist" {
+		return nil, "", errInvalidPlaylistShare
+	}
+	if sourceMessageID := strings.TrimSpace(stringFromMap(raw, "source_message_id")); sourceMessageID != "" {
+		return h.copiedMusicComponentAttachment(userID, sourceMessageID, "playlist")
+	}
+	if h.Playlists == nil {
 		return nil, "", errInvalidPlaylistShare
 	}
 	playlistID := strings.TrimSpace(stringFromMap(raw, "playlist_id"))
@@ -293,6 +322,104 @@ func (h *Handler) sharedPlaylistAttachment(
 		"type":     "playlist",
 		"playlist": playlist,
 	}, snapshot.Playlist.Name, nil
+}
+
+// sharedMusicTrackAttachment replaces the untrusted source playlist/item
+// reference with an immutable track snapshot. A personal source must belong to
+// the sender; a room source must still be accessible to the sender at send
+// time. The destination room is intentionally independent from the source so
+// a saved track can be shared across joined rooms.
+func (h *Handler) sharedMusicTrackAttachment(
+	ctx context.Context,
+	userID string,
+	attachments []any,
+) (gin.H, string, error) {
+	if len(attachments) != 1 {
+		return nil, "", errInvalidTrackShare
+	}
+	raw, ok := attachments[0].(map[string]any)
+	if !ok || strings.ToLower(strings.TrimSpace(stringFromMap(raw, "type"))) != "music_track" {
+		return nil, "", errInvalidTrackShare
+	}
+	if sourceMessageID := strings.TrimSpace(stringFromMap(raw, "source_message_id")); sourceMessageID != "" {
+		return h.copiedMusicComponentAttachment(userID, sourceMessageID, "music_track")
+	}
+	if h.Playlists == nil {
+		return nil, "", errInvalidTrackShare
+	}
+	playlistID := strings.TrimSpace(stringFromMap(raw, "playlist_id"))
+	itemID := strings.TrimSpace(stringFromMap(raw, "item_id"))
+	scope := strings.ToLower(strings.TrimSpace(stringFromMap(raw, "playlist_scope")))
+	if playlistID == "" || itemID == "" || !allowed(scope, "personal", "room") {
+		return nil, "", errInvalidTrackShare
+	}
+
+	var snapshot musicbox.PlaylistItemsPage
+	var err error
+	if scope == "room" {
+		sourceRoomID := strings.TrimSpace(stringFromMap(raw, "source_room_id"))
+		if sourceRoomID == "" || (!h.isRoomMember(sourceRoomID, userID) && !h.isSuperuser(userID)) {
+			return nil, "", musicbox.ErrPlaylistNotFound
+		}
+		snapshot, err = h.Playlists.RoomPlaylistSnapshot(ctx, sourceRoomID, playlistID)
+	} else {
+		snapshot, err = h.Playlists.UserPlaylistSnapshot(ctx, userID, playlistID)
+	}
+	if err != nil {
+		return nil, "", err
+	}
+	for _, item := range snapshot.Items {
+		if item.ID != itemID {
+			continue
+		}
+		return gin.H{
+			"type":  "music_track",
+			"track": musicPlaylistItemPayload(item),
+		}, item.Title, nil
+	}
+	return nil, "", musicbox.ErrPlaylistNotFound
+}
+
+// copiedMusicComponentAttachment reuses the immutable snapshot stored on a
+// message the sender can still access. The client never resubmits snapshot
+// fields, so a copied card cannot forge a playlist or song owned by somebody
+// else. This also lets a copied component survive source playlist deletion.
+func (h *Handler) copiedMusicComponentAttachment(
+	userID, sourceMessageID, expectedType string,
+) (gin.H, string, error) {
+	source, err := h.messageByID(sourceMessageID)
+	if err != nil || source.IsRecalled || source.IsForceDeleted ||
+		strings.ToLower(strings.TrimSpace(source.Type)) != expectedType ||
+		(!h.isRoomMember(source.RoomID, userID) && !h.isSuperuser(userID)) {
+		if expectedType == "playlist" {
+			return nil, "", errInvalidPlaylistShare
+		}
+		return nil, "", errInvalidTrackShare
+	}
+	payloadKey := "track"
+	nameKey := "title"
+	invalid := errInvalidTrackShare
+	if expectedType == "playlist" {
+		payloadKey = "playlist"
+		nameKey = "name"
+		invalid = errInvalidPlaylistShare
+	}
+	for _, value := range source.Attachments {
+		attachment, ok := value.(map[string]any)
+		if !ok || strings.ToLower(strings.TrimSpace(stringFromMap(attachment, "type"))) != expectedType {
+			continue
+		}
+		payload, ok := attachment[payloadKey].(map[string]any)
+		name := strings.TrimSpace(stringFromMap(payload, nameKey))
+		if !ok || name == "" {
+			return nil, "", invalid
+		}
+		return gin.H{
+			"type":     expectedType,
+			payloadKey: payload,
+		}, name, nil
+	}
+	return nil, "", invalid
 }
 
 func (h *Handler) cloneSharedPlaylistToMe(c *gin.Context) {

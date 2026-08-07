@@ -228,6 +228,28 @@ func TestPlaylistMessageUsesOwnedImmutableSnapshot(t *testing.T) {
 		nil,
 	)
 	api.requireStatus(status, http.StatusOK, response)
+
+	// A member can copy the immutable component from an accessible message even
+	// after the managed source playlist was deleted. The server, not the client,
+	// supplies every field of the copied component.
+	status, response = api.request(
+		http.MethodPost,
+		"/rooms/"+roomID+"/messages",
+		other.Token,
+		map[string]any{
+			"client_message_id": "playlist_share_copy",
+			"type":              "playlist",
+			"attachments": []any{map[string]any{
+				"type":              "playlist",
+				"source_message_id": message["id"],
+			}},
+		},
+	)
+	api.requireStatus(status, http.StatusCreated, response)
+	copiedPlaylist := response["message"].(map[string]any)["attachments"].([]any)[0].(map[string]any)["playlist"].(map[string]any)
+	if copiedPlaylist["name"] != snapshot["name"] || len(copiedPlaylist["items"].([]any)) != 1 {
+		t.Fatalf("copied playlist component lost its snapshot: %v", copiedPlaylist)
+	}
 	status, response = api.request(
 		http.MethodGet,
 		"/rooms/"+roomID+"/messages?limit=50",
@@ -250,6 +272,136 @@ func TestPlaylistMessageUsesOwnedImmutableSnapshot(t *testing.T) {
 	historySnapshot := historyMessage["attachments"].([]any)[0].(map[string]any)["playlist"].(map[string]any)
 	if historySnapshot["name"] != "夜晚精选" || len(historySnapshot["items"].([]any)) != 1 {
 		t.Fatalf("historical snapshot changed after source deletion: %v", historySnapshot)
+	}
+}
+
+func TestMusicTrackMessageUsesOwnedImmutableSnapshot(t *testing.T) {
+	api := newAPIHarness(t)
+	owner := api.register("track_message_owner")
+	other := api.register("track_message_other")
+	room := api.createRoom(owner.Token, map[string]any{
+		"name":        "Track Share Room",
+		"join_policy": "open",
+	})
+	roomID := room["id"].(string)
+
+	status, response := api.request(
+		http.MethodPost,
+		"/me/music-box/playlists",
+		owner.Token,
+		map[string]any{"name": "Track Source"},
+	)
+	api.requireStatus(status, http.StatusCreated, response)
+	playlistID := response["playlist"].(map[string]any)["id"].(string)
+	status, response = api.request(
+		http.MethodPost,
+		"/me/music-box/playlists/"+playlistID+"/items",
+		owner.Token,
+		map[string]any{
+			"track_id":    "shared_track_2",
+			"source":      "netease",
+			"title":       "Shared Song",
+			"artists":     []string{"Artist"},
+			"duration_ms": 180000,
+		},
+	)
+	api.requireStatus(status, http.StatusCreated, response)
+	itemID := response["item"].(map[string]any)["id"].(string)
+
+	status, response = api.request(
+		http.MethodPost,
+		"/rooms/"+roomID+"/messages",
+		owner.Token,
+		map[string]any{
+			"client_message_id": "music_track_share_1",
+			"type":              "music_track",
+			"body":              "forged body",
+			"attachments": []any{map[string]any{
+				"type":           "music_track",
+				"playlist_id":    playlistID,
+				"playlist_scope": "personal",
+				"item_id":        itemID,
+				"track":          map[string]any{"title": "forged title"},
+			}},
+		},
+	)
+	api.requireStatus(status, http.StatusCreated, response)
+	message := response["message"].(map[string]any)
+	if message["body"] != "[歌曲] Shared Song" {
+		t.Fatalf("music track message body = %v", message["body"])
+	}
+	attachment := message["attachments"].([]any)[0].(map[string]any)
+	track := attachment["track"].(map[string]any)
+	if track["title"] != "Shared Song" || track["track_id"] != "shared_track_2" {
+		t.Fatalf("unexpected music track snapshot: %v", track)
+	}
+
+	status, response = api.request(http.MethodPost, "/rooms/"+roomID+"/join", other.Token, nil)
+	api.requireStatus(status, http.StatusOK, response)
+	status, response = api.request(
+		http.MethodPost,
+		"/rooms/"+roomID+"/messages",
+		other.Token,
+		map[string]any{
+			"client_message_id": "music_track_share_foreign",
+			"type":              "music_track",
+			"attachments": []any{map[string]any{
+				"type":           "music_track",
+				"playlist_id":    playlistID,
+				"playlist_scope": "personal",
+				"item_id":        itemID,
+			}},
+		},
+	)
+	api.requireStatus(status, http.StatusNotFound, response)
+
+	status, response = api.request(
+		http.MethodDelete,
+		"/me/music-box/playlists/"+playlistID,
+		owner.Token,
+		nil,
+	)
+	api.requireStatus(status, http.StatusOK, response)
+
+	status, response = api.request(
+		http.MethodPost,
+		"/rooms/"+roomID+"/messages",
+		other.Token,
+		map[string]any{
+			"client_message_id": "music_track_share_copy",
+			"type":              "music_track",
+			"attachments": []any{map[string]any{
+				"type":              "music_track",
+				"source_message_id": message["id"],
+			}},
+		},
+	)
+	api.requireStatus(status, http.StatusCreated, response)
+	copiedTrack := response["message"].(map[string]any)["attachments"].([]any)[0].(map[string]any)["track"].(map[string]any)
+	if copiedTrack["title"] != "Shared Song" || copiedTrack["track_id"] != "shared_track_2" {
+		t.Fatalf("copied track component lost its snapshot: %v", copiedTrack)
+	}
+	status, response = api.request(
+		http.MethodGet,
+		"/rooms/"+roomID+"/messages?limit=50",
+		owner.Token,
+		nil,
+	)
+	api.requireStatus(status, http.StatusOK, response)
+	var retained map[string]any
+	for _, raw := range response["messages"].([]any) {
+		candidate := raw.(map[string]any)
+		if candidate["type"] == "music_track" {
+			retained = candidate
+			break
+		}
+	}
+	if retained == nil {
+		t.Fatalf("message history should retain music track share: %v", response)
+	}
+	retainedTrack := retained["attachments"].([]any)[0].(map[string]any)["track"].(map[string]any)
+	if retainedTrack["title"] != "Shared Song" {
+		t.Fatalf("historical music track snapshot changed: %v", retainedTrack)
 	}
 }
 

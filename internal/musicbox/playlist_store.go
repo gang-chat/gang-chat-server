@@ -111,6 +111,25 @@ func (s *PlaylistStore) UserPlaylistSnapshot(
 	ctx context.Context,
 	ownerUserID, playlistID string,
 ) (PlaylistItemsPage, error) {
+	return s.playlistSnapshot(ctx, userPlaylistScope(ownerUserID), playlistID)
+}
+
+// RoomPlaylistSnapshot returns the complete, ordered contents of one room
+// playlist for an immutable share payload. Authorization remains the chat
+// handler's responsibility because the playlist store deliberately has no
+// knowledge of room memberships or superuser access.
+func (s *PlaylistStore) RoomPlaylistSnapshot(
+	ctx context.Context,
+	roomID, playlistID string,
+) (PlaylistItemsPage, error) {
+	return s.playlistSnapshot(ctx, roomPlaylistScope(roomID), playlistID)
+}
+
+func (s *PlaylistStore) playlistSnapshot(
+	ctx context.Context,
+	scope playlistScope,
+	playlistID string,
+) (PlaylistItemsPage, error) {
 	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
 	if err != nil {
 		return PlaylistItemsPage{}, err
@@ -119,7 +138,7 @@ func (s *PlaylistStore) UserPlaylistSnapshot(
 	playlist, err := s.playlistSummary(
 		ctx,
 		tx,
-		userPlaylistScope(ownerUserID),
+		scope,
 		playlistID,
 		false,
 	)

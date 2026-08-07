@@ -175,7 +175,7 @@ func (h *Handler) listMessageHistory(c *gin.Context) {
 
 func validMessageHistoryCategory(category string) bool {
 	switch category {
-	case "all", "links", "voice", "stickers", "images", "files", "system":
+	case "all", "links", "voice", "stickers", "images", "files", "music", "system":
 		return true
 	default:
 		return false
@@ -191,6 +191,9 @@ func messageMatchesHistoryCategory(msg message, category string) bool {
 	}
 	if category == "system" {
 		return msg.Type == "system"
+	}
+	if category == "music" {
+		return msg.Type == "playlist" || msg.Type == "music_track"
 	}
 
 	hasVoice := messageHasVoiceAttachment(msg)

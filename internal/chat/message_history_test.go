@@ -122,6 +122,18 @@ func TestMessageMatchesHistoryCategory(t *testing.T) {
 			category: "system",
 			want:     true,
 		},
+		{
+			name:     "playlist share is music",
+			message:  message{Type: "playlist"},
+			category: "music",
+			want:     true,
+		},
+		{
+			name:     "track share is music",
+			message:  message{Type: "music_track"},
+			category: "music",
+			want:     true,
+		},
 	}
 
 	for _, test := range tests {
@@ -136,7 +148,7 @@ func TestMessageMatchesHistoryCategory(t *testing.T) {
 
 func TestValidMessageHistoryCategory(t *testing.T) {
 	t.Parallel()
-	for _, category := range []string{"all", "links", "voice", "stickers", "images", "files", "system"} {
+	for _, category := range []string{"all", "links", "voice", "stickers", "images", "files", "music", "system"} {
 		if !validMessageHistoryCategory(category) {
 			t.Fatalf("expected %q to be valid", category)
 		}
