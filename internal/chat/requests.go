@@ -111,9 +111,10 @@ type musicBoxControlRequest struct {
 }
 
 type musicBoxActivatePlaylistRequest struct {
-	SourceType string `json:"source_type"`
-	PlaylistID string `json:"playlist_id"`
-	StartPlay  bool   `json:"start_play"`
+	SourceType  string `json:"source_type"`
+	PlaylistID  string `json:"playlist_id"`
+	StartPlay   bool   `json:"start_play"`
+	StartItemID string `json:"start_item_id"`
 }
 
 type musicBoxCloneActivePlaylistRequest struct {

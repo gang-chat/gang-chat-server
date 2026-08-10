@@ -489,7 +489,12 @@ func (m *Manager) pumpRoom(roomID string) {
 	}
 	st, _ := m.store.getState(roomID)
 	scope, snapshotID := playbackScope(st)
-	next, err := m.store.firstPendingInScope(roomID, scope, snapshotID)
+	next, err := m.store.firstPendingInScopeAfter(
+		roomID,
+		m.cursorAfter(roomID, scope, snapshotID),
+		scope,
+		snapshotID,
+	)
 	if err != nil || next == nil {
 		return
 	}
@@ -832,7 +837,12 @@ func (m *Manager) ensurePlayingItem(roomID string, preferred *QueueItem) error {
 	first := preferred
 	var err error
 	if first == nil {
-		first, err = m.store.firstPlayableInScope(roomID, -1, scope, snapshotID)
+		first, err = m.store.firstPlayableInScope(
+			roomID,
+			m.cursorAfter(roomID, scope, snapshotID),
+			scope,
+			snapshotID,
+		)
 	}
 	if err != nil || first == nil {
 		m.mu.Unlock()
@@ -1113,6 +1123,8 @@ func (m *Manager) ActivatePlaylist(
 	actorUserID string,
 	tracks []SnapshotTrack,
 	startPlaying bool,
+	preferredTemporaryItemID string,
+	preferredTrackIndex int,
 ) error {
 	if !m.Enabled() {
 		return ErrUnavailable
@@ -1122,9 +1134,33 @@ func (m *Manager) ActivatePlaylist(
 		sourceType != ActiveSourceUserPlaylist {
 		return fmt.Errorf("unknown active source %q", sourceType)
 	}
+	if preferredTrackIndex >= 0 &&
+		(sourceType == ActiveSourceTemporary ||
+			!startPlaying ||
+			preferredTrackIndex >= len(tracks)) {
+		return ErrQueueItemNotFound
+	}
 	lock := m.controlLock(roomID)
 	lock.Lock()
 	defer lock.Unlock()
+
+	var preferredTemporaryItem *QueueItem
+	if preferredTemporaryItemID != "" {
+		if sourceType != ActiveSourceTemporary || !startPlaying {
+			return ErrQueueItemNotFound
+		}
+		item, err := m.store.getRoomItem(roomID, preferredTemporaryItemID)
+		if err != nil {
+			return err
+		}
+		if item == nil || item.QueueScope != QueueScopeTemporary {
+			return ErrQueueItemNotFound
+		}
+		if item.Status != StatusReady {
+			return ErrQueueItemNotReady
+		}
+		preferredTemporaryItem = item
+	}
 
 	if player := m.getPlayer(roomID); player != nil {
 		if err := player.stop(); err != nil {
@@ -1133,10 +1169,11 @@ func (m *Manager) ActivatePlaylist(
 	}
 
 	snapshotID := ""
+	var preferredSnapshotItem *QueueItem
 	if sourceType != ActiveSourceTemporary {
 		snapshotID = "mbs_" + randomID()
 		for index, track := range tracks {
-			if _, err := m.store.insertItem(QueueItem{
+			item, err := m.store.insertItem(QueueItem{
 				ID:            "mbx_" + randomID(),
 				RoomID:        roomID,
 				Source:        track.Source,
@@ -1149,9 +1186,13 @@ func (m *Manager) ActivatePlaylist(
 				QueueScope:    QueueScopeSavedPlaylistSnapshot,
 				SnapshotID:    snapshotID,
 				SortOrder:     int64(index+1) * 10,
-			}); err != nil {
+			})
+			if err != nil {
 				_, _ = m.store.deleteSavedSnapshot(roomID, snapshotID)
 				return err
+			}
+			if index == preferredTrackIndex {
+				preferredSnapshotItem = item
 			}
 		}
 	}
@@ -1186,7 +1227,11 @@ func (m *Manager) ActivatePlaylist(
 	if sourceType != ActiveSourceTemporary {
 		activeScope = QueueScopeSavedPlaylistSnapshot
 	}
-	m.setCursor(roomID, activeScope, snapshotID, -1)
+	startAfterSort := int64(-1)
+	if preferredSnapshotItem != nil {
+		startAfterSort = preferredSnapshotItem.SortOrder - 1
+	}
+	m.setCursor(roomID, activeScope, snapshotID, startAfterSort)
 	removed, cleanupErr := m.store.deleteSavedSnapshotsExcept(roomID, snapshotID)
 	if cleanupErr != nil {
 		log.Printf("musicbox: room %s failed to clean obsolete playlist snapshots: %v", roomID, cleanupErr)
@@ -1200,17 +1245,25 @@ func (m *Manager) ActivatePlaylist(
 	m.notify(roomID)
 	go m.pumpRoom(roomID)
 	if startPlaying {
-		go m.ensurePlayingAfterStop(roomID)
+		if preferredTemporaryItem != nil {
+			go m.ensurePlayingItemAfterStop(roomID, preferredTemporaryItem)
+		} else {
+			go m.ensurePlayingAfterStop(roomID)
+		}
 	}
 	return nil
 }
 
 func (m *Manager) ensurePlayingAfterStop(roomID string) {
+	m.ensurePlayingItemAfterStop(roomID, nil)
+}
+
+func (m *Manager) ensurePlayingItemAfterStop(roomID string, preferred *QueueItem) {
 	if err := m.waitForPlayerStop(roomID); err != nil {
 		log.Printf("musicbox: room %s player cleanup failed: %v", roomID, err)
 		return
 	}
-	if err := m.ensurePlaying(roomID); err != nil {
+	if err := m.ensurePlayingItem(roomID, preferred); err != nil {
 		log.Printf("musicbox: room %s restart after stop failed: %v", roomID, err)
 	}
 }

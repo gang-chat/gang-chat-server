@@ -408,9 +408,19 @@ func (s *store) firstPendingInScope(
 	scope QueueScope,
 	snapshotID string,
 ) (*QueueItem, error) {
+	return s.firstPendingInScopeAfter(roomID, -1, scope, snapshotID)
+}
+
+func (s *store) firstPendingInScopeAfter(
+	roomID string,
+	afterSort int64,
+	scope QueueScope,
+	snapshotID string,
+) (*QueueItem, error) {
 	query := `SELECT ` + itemColumns + ` FROM room_music_box_queue
-		 WHERE room_id = ? AND status = 'pending' AND queue_scope = ?`
-	args := []any{roomID, string(scope)}
+		 WHERE room_id = ? AND status = 'pending' AND queue_scope = ?
+		   AND sort_order > ?`
+	args := []any{roomID, string(scope), afterSort}
 	if scope == QueueScopeSavedPlaylistSnapshot {
 		query += ` AND snapshot_id = ?`
 		args = append(args, snapshotID)
@@ -422,6 +432,9 @@ func (s *store) firstPendingInScope(
 	)
 	it, err := scanItem(row)
 	if err == sql.ErrNoRows {
+		if afterSort >= 0 {
+			return s.firstPendingInScopeAfter(roomID, -1, scope, snapshotID)
+		}
 		return nil, nil
 	}
 	return it, err

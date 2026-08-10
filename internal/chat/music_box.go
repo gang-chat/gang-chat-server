@@ -208,8 +208,10 @@ func (h *Handler) activateMusicBoxPlaylist(c *gin.Context) {
 	}
 	sourceType := strings.TrimSpace(req.SourceType)
 	playlistID := strings.TrimSpace(req.PlaylistID)
+	startItemID := strings.TrimSpace(req.StartItemID)
 	if !allowed(sourceType, "temporary", "room_playlist", "user_playlist") ||
-		(sourceType != "temporary" && playlistID == "") {
+		(sourceType != "temporary" && playlistID == "") ||
+		(startItemID != "" && !req.StartPlay) {
 		h.jsonError(c, http.StatusBadRequest, "validation_failed", "invalid music box source")
 		return
 	}
@@ -226,7 +228,17 @@ func (h *Handler) activateMusicBoxPlaylist(c *gin.Context) {
 			actorID,
 			nil,
 			req.StartPlay,
+			startItemID,
+			-1,
 		); err != nil {
+			if errors.Is(err, musicbox.ErrQueueItemNotFound) {
+				h.jsonError(c, http.StatusNotFound, "not_found", "music box queue item not found")
+				return
+			}
+			if errors.Is(err, musicbox.ErrQueueItemNotReady) {
+				h.jsonError(c, http.StatusConflict, "music_box_item_not_ready", "music box queue item is not ready")
+				return
+			}
 			h.jsonError(c, http.StatusInternalServerError, "internal_error", "switch music box source failed")
 			return
 		}
@@ -236,6 +248,7 @@ func (h *Handler) activateMusicBoxPlaylist(c *gin.Context) {
 
 	page := 1
 	tracks := make([]musicbox.SnapshotTrack, 0)
+	startTrackIndex := -1
 	playlistName := ""
 	var playlistCreatedAt int64
 	for {
@@ -261,6 +274,9 @@ func (h *Handler) activateMusicBoxPlaylist(c *gin.Context) {
 		playlistName = result.Playlist.Name
 		playlistCreatedAt = result.Playlist.CreatedAt
 		for _, item := range result.Items {
+			if startItemID != "" && item.ID == startItemID {
+				startTrackIndex = len(tracks)
+			}
 			tracks = append(tracks, musicbox.SnapshotTrack{
 				Source: item.Source, TrackID: item.ExternalTrackID,
 				Title: item.Title, Artist: strings.Join(item.Artists, "、"),
@@ -272,6 +288,12 @@ func (h *Handler) activateMusicBoxPlaylist(c *gin.Context) {
 		}
 		page++
 	}
+	if startItemID != "" {
+		if startTrackIndex < 0 {
+			h.jsonError(c, http.StatusNotFound, "not_found", "music playlist item not found")
+			return
+		}
+	}
 	activeType := musicbox.ActiveSourceRoomPlaylist
 	ownerID := ""
 	if sourceType == "user_playlist" {
@@ -280,7 +302,7 @@ func (h *Handler) activateMusicBoxPlaylist(c *gin.Context) {
 	}
 	if err := h.MusicBox.ActivatePlaylist(
 		roomID, activeType, playlistID, playlistName, ownerID,
-		playlistCreatedAt, actorID, tracks, req.StartPlay,
+		playlistCreatedAt, actorID, tracks, req.StartPlay, "", startTrackIndex,
 	); err != nil {
 		h.jsonError(c, http.StatusInternalServerError, "internal_error", "activate music playlist failed")
 		return

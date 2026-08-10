@@ -101,6 +101,54 @@ func TestPlayNowRejectsMissingPendingAndInactiveItems(t *testing.T) {
 	}
 }
 
+func TestActivateTemporaryAtPendingItemDoesNotExposePartialSourceSwitch(t *testing.T) {
+	store := newTestStore(t)
+	state, err := store.ensureState("r1")
+	if err != nil {
+		t.Fatalf("ensure state: %v", err)
+	}
+	state.ActiveSourceType = ActiveSourceRoomPlaylist
+	state.ActivePlaylistID = "room-list"
+	state.ActiveSnapshotID = "snapshot-1"
+	if err := store.saveState(*state); err != nil {
+		t.Fatalf("save active state: %v", err)
+	}
+	pending := add(t, store, "pending", 10)
+	manager := &Manager{
+		cfg:          Config{Enabled: true},
+		store:        store,
+		players:      map[string]*player{},
+		seenCommands: map[string]map[string]int64{},
+		playCursors:  map[string]playCursor{},
+	}
+
+	err = manager.ActivatePlaylist(
+		"r1",
+		ActiveSourceTemporary,
+		"",
+		"点歌队列",
+		"",
+		0,
+		"u1",
+		nil,
+		true,
+		pending.ID,
+		-1,
+	)
+	if !errors.Is(err, ErrQueueItemNotReady) {
+		t.Fatalf("activate pending item error = %v, want ErrQueueItemNotReady", err)
+	}
+	after, err := store.getState("r1")
+	if err != nil {
+		t.Fatalf("get state: %v", err)
+	}
+	if after.ActiveSourceType != ActiveSourceRoomPlaylist ||
+		after.ActivePlaylistID != "room-list" ||
+		after.ActiveSnapshotID != "snapshot-1" {
+		t.Fatalf("activation exposed partial state: %+v", after)
+	}
+}
+
 func TestPlayNowReusesPlayerAndPublishesTargetBeforeAcknowledgement(t *testing.T) {
 	store := newTestStore(t)
 	state, err := store.ensureState("r1")
