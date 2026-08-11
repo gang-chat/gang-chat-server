@@ -74,6 +74,7 @@ type Manager struct {
 
 	mu           sync.Mutex
 	players      map[string]*player
+	startLocks   sync.Map // map[string]*sync.Mutex; serializes player startup per room
 	controlLocks sync.Map // map[string]*sync.Mutex
 	persistMu    sync.Mutex
 	seenCommands map[string]map[string]int64
@@ -346,6 +347,11 @@ func (m *Manager) notify(roomID string) {
 
 func (m *Manager) controlLock(roomID string) *sync.Mutex {
 	value, _ := m.controlLocks.LoadOrStore(roomID, &sync.Mutex{})
+	return value.(*sync.Mutex)
+}
+
+func (m *Manager) startLock(roomID string) *sync.Mutex {
+	value, _ := m.startLocks.LoadOrStore(roomID, &sync.Mutex{})
 	return value.(*sync.Mutex)
 }
 
@@ -819,9 +825,15 @@ func (m *Manager) ensurePlaying(roomID string) error {
 // the initial item before the goroutine starts makes a successful play_now
 // response immediately consistent with State() and SSE snapshots.
 func (m *Manager) ensurePlayingItem(roomID string, preferred *QueueItem) error {
-	m.mu.Lock()
-	if pl, ok := m.players[roomID]; ok {
-		m.mu.Unlock()
+	// Startup includes database reads, token generation, and a LiveKit
+	// connection. Serialize those potentially blocking operations per room,
+	// never under m.mu: State() and unrelated rooms must remain responsive if
+	// an upstream dependency stalls.
+	startLock := m.startLock(roomID)
+	startLock.Lock()
+	defer startLock.Unlock()
+
+	if pl := m.getPlayer(roomID); pl != nil {
 		if preferred != nil {
 			return pl.playNow(preferred)
 		}
@@ -831,7 +843,8 @@ func (m *Manager) ensurePlayingItem(roomID string, preferred *QueueItem) error {
 		pl.wake()
 		return nil
 	}
-	// Reserve the slot under lock to avoid two concurrent starts.
+	// The per-room start lock above reserves this startup without blocking the
+	// global player registry.
 	st, _ := m.store.getState(roomID)
 	scope, snapshotID := playbackScope(st)
 	first := preferred
@@ -845,12 +858,10 @@ func (m *Manager) ensurePlayingItem(roomID string, preferred *QueueItem) error {
 		)
 	}
 	if err != nil || first == nil {
-		m.mu.Unlock()
 		return err
 	}
 	token, err := m.tokenFn(roomID, botIdentity)
 	if err != nil {
-		m.mu.Unlock()
 		return err
 	}
 	pl := newPlayer(roomID, m.cfg.LiveKitHost, token,
@@ -860,6 +871,7 @@ func (m *Manager) ensurePlayingItem(roomID string, preferred *QueueItem) error {
 		func() { m.persistAndNotify(roomID) },
 		func() { m.persistAndNotifyForced(roomID) },
 	)
+	m.mu.Lock()
 	m.players[roomID] = pl
 	m.mu.Unlock()
 

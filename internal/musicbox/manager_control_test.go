@@ -4,7 +4,60 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 )
+
+func TestEnsurePlayingDoesNotHoldGlobalPlayerLockDuringStartup(t *testing.T) {
+	store := newTestStore(t)
+	item := add(t, store, "ready", 10)
+	if err := store.markReady(item.ID, "/tmp/ready.ogg", 1, 1000); err != nil {
+		t.Fatalf("mark ready: %v", err)
+	}
+	tokenStarted := make(chan struct{})
+	releaseToken := make(chan struct{})
+	tokenErr := errors.New("token generation stopped for test")
+	manager := &Manager{
+		cfg:          Config{Enabled: true},
+		store:        store,
+		players:      map[string]*player{},
+		seenCommands: map[string]map[string]int64{},
+		playCursors:  map[string]playCursor{},
+		tokenFn: func(_, _ string) (string, error) {
+			close(tokenStarted)
+			<-releaseToken
+			return "", tokenErr
+		},
+	}
+
+	result := make(chan error, 1)
+	go func() { result <- manager.ensurePlaying("r1") }()
+	select {
+	case <-tokenStarted:
+	case <-time.After(time.Second):
+		t.Fatal("player startup deadlocked before token generation")
+	}
+
+	playerRead := make(chan *player, 1)
+	go func() { playerRead <- manager.getPlayer("r1") }()
+	select {
+	case player := <-playerRead:
+		if player != nil {
+			t.Fatalf("player became visible before startup completed: %p", player)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("global player lock was held during token generation")
+	}
+
+	close(releaseToken)
+	select {
+	case err := <-result:
+		if !errors.Is(err, tokenErr) {
+			t.Fatalf("ensure playing error = %v, want %v", err, tokenErr)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("player startup did not finish after token generation returned")
+	}
+}
 
 func TestEnqueueRejectsDuplicateTrackInTemporaryQueue(t *testing.T) {
 	store := newTestStore(t)
