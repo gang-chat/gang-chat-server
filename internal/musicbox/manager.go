@@ -35,7 +35,18 @@ var (
 	ErrQueueItemNotFound      = errors.New("music box queue item not found")
 	ErrQueueItemNotReady      = errors.New("music box queue item not ready")
 	ErrQueueItemAlreadyExists = errors.New("music box queue item already exists")
+	ErrQueueLimitReached      = errors.New("music box temporary queue limit reached")
 )
+
+// MaxTemporaryQueueItems bounds the room request queue. Saved-playlist
+// snapshots have their own 500-track limit; the temporary queue stays smaller
+// so reconnect snapshots and room broadcasts remain predictable.
+const MaxTemporaryQueueItems = 200
+
+// MaxTemporaryPlaybackHistory bounds already-played request rows while keeping
+// enough real history for the previous command. Future rows and saved-playlist
+// snapshots are never counted or pruned by this limit.
+const MaxTemporaryPlaybackHistory = 20
 
 // TokenFunc issues a LiveKit join token for the bot in a room. Provided by the
 // caller so token policy (TTL, identity, grants) stays in one place.
@@ -45,12 +56,20 @@ type TokenFunc func(roomID, identity string) (token string, err error)
 type Config struct {
 	Dir              string // base dir for transcoded files
 	MaxBytesPerRoom  int64
+	CacheMaxBytes    int64 // global shared broadcast-cache soft limit
 	FFmpegPath       string
 	OpusBitrate      string
 	TranscodeWorkers int
 	DownloadBitrate  string // GD download quality
 	LiveKitHost      string
 	Enabled          bool // false when LiveKit isn't configured
+	// CompactProgressOnly stops the legacy per-second full snapshot after all
+	// supported clients understand music_box_progress. Keep false during the
+	// compatibility window.
+	CompactProgressOnly bool
+	// EmptyRoomGracePeriod delays destructive transient-state cleanup after the
+	// last visible voice participant leaves. A non-positive value uses 10m.
+	EmptyRoomGracePeriod time.Duration
 
 	// QQ is the optional self-hosted QQ音乐 client. nil disables the tencent
 	// source; search/resolve for it then return an error.
@@ -71,6 +90,12 @@ type Manager struct {
 	// onRoomChanged is invoked (room id) whenever a room's music box state or
 	// queue changes, so the chat layer can fan out an SSE snapshot.
 	onRoomChanged func(roomID string)
+	// onRoomProgress carries the small per-second playback delta separately
+	// from structural queue/state changes.
+	onRoomProgress func(roomID string, progress ProgressSnapshot)
+	// roomOccupied is supplied by the chat layer because visible voice
+	// membership is authoritative there, not in the music-box package.
+	roomOccupied func(roomID string) (bool, error)
 
 	mu           sync.Mutex
 	players      map[string]*player
@@ -79,6 +104,10 @@ type Manager struct {
 	persistMu    sync.Mutex
 	seenCommands map[string]map[string]int64
 	playCursors  map[string]playCursor
+
+	emptyRoomMu          sync.Mutex
+	emptyRoomTimers      map[string]*time.Timer
+	emptyRoomGenerations map[string]uint64
 
 	// pumpMu serializes the download scheduler (pumpRoom) so two concurrent
 	// triggers can't both start a download for the same room.
@@ -89,6 +118,13 @@ type Manager struct {
 	// through controlLocks so concurrent clients do not transcode the same track
 	// more than once.
 	previewCleanupMu sync.Mutex
+
+	// cacheLeases protect files currently opened by room players from global
+	// LRU cleanup. Queue rows reference shared artifacts but never own them.
+	cacheMu        sync.Mutex
+	cacheLeases    map[string]int
+	cacheCleanupMu sync.Mutex
+	obs            observabilityCounters
 }
 
 const previewCacheMaxBytes int64 = 512 << 20
@@ -96,20 +132,29 @@ const previewCacheMaxBytes int64 = 512 << 20
 // NewManager builds a Manager. If cfg.Enabled is false every operation returns
 // ErrUnavailable, so callers don't need nil checks.
 func NewManager(db *sql.DB, cfg Config, tokenFn TokenFunc, onRoomChanged func(string)) *Manager {
+	if cfg.EmptyRoomGracePeriod <= 0 {
+		cfg.EmptyRoomGracePeriod = 10 * time.Minute
+	}
+	if cfg.CacheMaxBytes <= 0 {
+		cfg.CacheMaxBytes = defaultBroadcastCacheMaxBytes
+	}
 	gd := gdmusic.New(
 		gdmusic.WithDefaultBitrate(cfg.DownloadBitrate),
 	)
 	m := &Manager{
-		cfg:           cfg,
-		store:         &store{db: db},
-		tc:            newTranscoder(cfg.FFmpegPath, cfg.OpusBitrate, cfg.TranscodeWorkers),
-		gd:            gd,
-		qq:            cfg.QQ,
-		tokenFn:       tokenFn,
-		onRoomChanged: onRoomChanged,
-		players:       map[string]*player{},
-		seenCommands:  map[string]map[string]int64{},
-		playCursors:   map[string]playCursor{},
+		cfg:                  cfg,
+		store:                &store{db: db},
+		tc:                   newTranscoder(cfg.FFmpegPath, cfg.OpusBitrate, cfg.TranscodeWorkers),
+		gd:                   gd,
+		qq:                   cfg.QQ,
+		tokenFn:              tokenFn,
+		onRoomChanged:        onRoomChanged,
+		players:              map[string]*player{},
+		seenCommands:         map[string]map[string]int64{},
+		playCursors:          map[string]playCursor{},
+		emptyRoomTimers:      map[string]*time.Timer{},
+		emptyRoomGenerations: map[string]uint64{},
+		cacheLeases:          map[string]int{},
 	}
 	m.search = newSearchCoordinator(m.searchUpstream)
 	// A restart preserves queues and prepared media, but resets every room to a
@@ -138,6 +183,7 @@ func (m *Manager) resetOnStartup() {
 	if m.cfg.Dir != "" {
 		_ = os.MkdirAll(m.cfg.Dir, 0o755)
 	}
+	go m.cleanupBroadcastCache("")
 }
 
 // BackfillActivePlaylistCreatedAt upgrades saved sources activated by an older
@@ -336,6 +382,198 @@ func (m *Manager) SetOnRoomChanged(fn func(roomID string)) {
 	m.onRoomChanged = fn
 }
 
+// ProgressSnapshot is the minimal monotonic playback update required by
+// clients. Queue and playlist metadata deliberately stay in full snapshots.
+type ProgressSnapshot struct {
+	Revision      int64
+	CurrentItemID string
+	PositionMS    int64
+}
+
+// SetOnRoomProgress installs the compact playback-progress callback.
+func (m *Manager) SetOnRoomProgress(fn func(roomID string, progress ProgressSnapshot)) {
+	m.onRoomProgress = fn
+}
+
+// SetRoomOccupancyChecker installs the authoritative visible-voice-member
+// lookup. The music bot and auxiliary publishers never create chat-layer live
+// participant rows, so they cannot keep transient music state alive.
+func (m *Manager) SetRoomOccupancyChecker(fn func(roomID string) (bool, error)) {
+	m.emptyRoomMu.Lock()
+	if m.emptyRoomTimers == nil {
+		m.emptyRoomTimers = map[string]*time.Timer{}
+	}
+	if m.emptyRoomGenerations == nil {
+		m.emptyRoomGenerations = map[string]uint64{}
+	}
+	m.roomOccupied = fn
+	m.emptyRoomMu.Unlock()
+}
+
+// ReconcilePersistedRoomOccupancy starts grace timers after a process restart
+// for rooms that still have persisted transient music state but no visible
+// voice members. It is called after the chat layer installs its checker.
+func (m *Manager) ReconcilePersistedRoomOccupancy() {
+	if m == nil || !m.Enabled() {
+		return
+	}
+	roomIDs, err := m.store.listMusicRoomIDs()
+	if err != nil {
+		log.Printf("musicbox: list persisted rooms for empty cleanup: %v", err)
+		return
+	}
+	m.emptyRoomMu.Lock()
+	checker := m.roomOccupied
+	m.emptyRoomMu.Unlock()
+	if checker == nil {
+		return
+	}
+	for _, roomID := range roomIDs {
+		occupied, checkErr := checker(roomID)
+		if checkErr != nil {
+			log.Printf("musicbox: check room %s occupancy on startup: %v", roomID, checkErr)
+			continue
+		}
+		if occupied {
+			m.ObserveRoomOccupancy(roomID, 1)
+		} else {
+			m.ObserveRoomOccupancy(roomID, 0)
+		}
+	}
+}
+
+// ObserveRoomOccupancy starts or cancels a generation-guarded cleanup timer.
+// Repeated empty snapshots do not extend the grace period. Any visible member
+// immediately invalidates the pending generation, so a late timer cannot clear
+// a room that has been reused.
+func (m *Manager) ObserveRoomOccupancy(roomID string, participantCount int) {
+	if m == nil || !m.Enabled() || strings.TrimSpace(roomID) == "" {
+		return
+	}
+	m.emptyRoomMu.Lock()
+	defer m.emptyRoomMu.Unlock()
+	if m.emptyRoomTimers == nil {
+		m.emptyRoomTimers = map[string]*time.Timer{}
+	}
+	if m.emptyRoomGenerations == nil {
+		m.emptyRoomGenerations = map[string]uint64{}
+	}
+	if participantCount > 0 {
+		m.emptyRoomGenerations[roomID]++
+		if timer := m.emptyRoomTimers[roomID]; timer != nil {
+			timer.Stop()
+			delete(m.emptyRoomTimers, roomID)
+			m.obs.emptyTimersCancelled.Add(1)
+		}
+		return
+	}
+	if m.emptyRoomTimers[roomID] != nil {
+		return
+	}
+	m.emptyRoomGenerations[roomID]++
+	generation := m.emptyRoomGenerations[roomID]
+	m.emptyRoomTimers[roomID] = time.AfterFunc(
+		m.cfg.EmptyRoomGracePeriod,
+		func() { m.expireEmptyRoom(roomID, generation) },
+	)
+	m.obs.emptyTimersStarted.Add(1)
+}
+
+func (m *Manager) expireEmptyRoom(roomID string, generation uint64) {
+	m.emptyRoomMu.Lock()
+	if m.emptyRoomGenerations[roomID] != generation ||
+		m.emptyRoomTimers[roomID] == nil {
+		m.emptyRoomMu.Unlock()
+		return
+	}
+	delete(m.emptyRoomTimers, roomID)
+	checker := m.roomOccupied
+	m.emptyRoomMu.Unlock()
+
+	if checker == nil {
+		return
+	}
+	occupied, err := checker(roomID)
+	if err != nil {
+		// A transient DB error must never destroy music state. Rearm a full grace
+		// window and retry only if no newer occupancy observation superseded us.
+		m.rearmEmptyRoomCleanup(roomID, generation)
+		return
+	}
+	if occupied {
+		m.ObserveRoomOccupancy(roomID, 1)
+		return
+	}
+
+	lock := m.controlLock(roomID)
+	lock.Lock()
+	defer lock.Unlock()
+
+	// Re-check both the generation and authoritative roster after waiting for
+	// any in-flight music command. This is the state-machine confirmation that
+	// prevents a stale timer from winning over a room re-entry.
+	m.emptyRoomMu.Lock()
+	currentGeneration := m.emptyRoomGenerations[roomID]
+	m.emptyRoomMu.Unlock()
+	if currentGeneration != generation {
+		return
+	}
+	occupied, err = checker(roomID)
+	if err != nil {
+		m.rearmEmptyRoomCleanup(roomID, generation)
+		return
+	}
+	if occupied {
+		m.ObserveRoomOccupancy(roomID, 1)
+		return
+	}
+	if err := m.clearExpiredRoomPlayback(roomID); err != nil {
+		log.Printf("musicbox: expire empty room %s: %v", roomID, err)
+		m.rearmEmptyRoomCleanup(roomID, generation)
+		return
+	}
+	m.obs.emptyRoomsExpired.Add(1)
+}
+
+func (m *Manager) rearmEmptyRoomCleanup(roomID string, generation uint64) {
+	m.emptyRoomMu.Lock()
+	defer m.emptyRoomMu.Unlock()
+	if m.emptyRoomGenerations[roomID] != generation ||
+		m.emptyRoomTimers[roomID] != nil {
+		return
+	}
+	m.emptyRoomGenerations[roomID]++
+	nextGeneration := m.emptyRoomGenerations[roomID]
+	m.emptyRoomTimers[roomID] = time.AfterFunc(
+		m.cfg.EmptyRoomGracePeriod,
+		func() { m.expireEmptyRoom(roomID, nextGeneration) },
+	)
+	m.obs.emptyCleanupRetries.Add(1)
+	m.obs.emptyTimersStarted.Add(1)
+}
+
+func (m *Manager) clearExpiredRoomPlayback(roomID string) error {
+	if pl := m.getPlayer(roomID); pl != nil {
+		if err := pl.stop(); err != nil {
+			return err
+		}
+	}
+	items, changed, err := m.store.expireRoomPlayback(roomID)
+	if err != nil {
+		return err
+	}
+	if !changed {
+		return nil
+	}
+	m.releaseQueueMedia(items)
+	m.mu.Lock()
+	delete(m.playCursors, roomID)
+	delete(m.seenCommands, roomID)
+	m.mu.Unlock()
+	m.notify(roomID)
+	return nil
+}
+
 // Enabled reports whether the music box can broadcast.
 func (m *Manager) Enabled() bool { return m != nil && m.cfg.Enabled }
 
@@ -411,10 +649,10 @@ type EnqueueParams struct {
 	AddedByUserID string
 }
 
-// Enqueue appends a track to a room's queue. The queue itself is unbounded:
-// the byte cap (MaxBytesPerRoom) only governs how many tracks are downloaded
-// and held on disk at once, not how many can be queued. A newly enqueued track
-// starts as pending and is picked up by pumpRoom once there's room on disk.
+// Enqueue appends a track to a room's queue. The byte cap (MaxBytesPerRoom)
+// governs downloaded cache data independently from the 200-item request-queue
+// cap. A newly enqueued track starts as pending and is picked up by pumpRoom
+// once there's room on disk.
 func (m *Manager) Enqueue(ctx context.Context, p EnqueueParams) (*QueueItem, error) {
 	if !m.Enabled() {
 		return nil, ErrUnavailable
@@ -439,6 +677,9 @@ func (m *Manager) Enqueue(ctx context.Context, p EnqueueParams) (*QueueItem, err
 		if existing.Source == source && existing.TrackID == p.TrackID {
 			return nil, ErrQueueItemAlreadyExists
 		}
+	}
+	if len(temporaryQueue) >= MaxTemporaryQueueItems {
+		return nil, ErrQueueLimitReached
 	}
 	sortOrder, err := m.store.nextSortOrder(p.RoomID)
 	if err != nil {
@@ -494,13 +735,7 @@ func (m *Manager) pumpRoom(roomID string) {
 		return
 	}
 	st, _ := m.store.getState(roomID)
-	scope, snapshotID := playbackScope(st)
-	next, err := m.store.firstPendingInScopeAfter(
-		roomID,
-		m.cursorAfter(roomID, scope, snapshotID),
-		scope,
-		snapshotID,
-	)
+	next, err := m.nextPendingPrefetch(roomID, st)
 	if err != nil || next == nil {
 		return
 	}
@@ -516,6 +751,7 @@ func (m *Manager) pumpRoom(roomID string) {
 // process resolves the track URL, transcodes it, updates the row, and nudges
 // the room's player to (re)start if it was idle/exhausted.
 func (m *Manager) process(itemID string) {
+	startedAt := time.Now()
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 	defer cancel()
 
@@ -525,30 +761,21 @@ func (m *Manager) process(itemID string) {
 	}
 	// Status is already 'downloading' (set by pumpRoom under its lock).
 
-	resolvedURL, err := m.resolveURL(ctx, item)
+	res, dst, err := m.prepareBroadcastMedia(ctx, item)
+	m.obs.prepareDurationMS.Add(time.Since(startedAt).Milliseconds())
 	if err != nil {
-		_ = m.store.markFailed(itemID, "resolve url: "+err.Error())
-		m.bumpRevision(item.RoomID)
-		go m.pumpRoom(item.RoomID)
-		return
-	}
-
-	roomDir := filepath.Join(m.cfg.Dir, sanitize(item.RoomID))
-	if err := os.MkdirAll(roomDir, 0o755); err != nil {
-		_ = m.store.markFailed(itemID, "prepare dir: "+err.Error())
-		m.bumpRevision(item.RoomID)
-		go m.pumpRoom(item.RoomID)
-		return
-	}
-	dst := filepath.Join(roomDir, itemID+".ogg")
-
-	res, err := m.tc.transcode(ctx, item.Source, resolvedURL, dst)
-	if err != nil {
+		m.obs.prepareFailures.Add(1)
+		log.Printf(
+			"musicbox prepare failed room_id=%q queue_item_id=%q source=%q latency_ms=%d error_kind=%q",
+			item.RoomID, item.ID, item.Source, time.Since(startedAt).Milliseconds(),
+			musicBoxPrepareErrorKind(err),
+		)
 		_ = m.store.markFailed(itemID, err.Error())
 		m.bumpRevision(item.RoomID)
 		go m.pumpRoom(item.RoomID)
 		return
 	}
+	m.obs.prepareSuccesses.Add(1)
 
 	// No post-transcode cap check: pumpRoom already gated this download on the
 	// cap before starting it, and we allow one in-flight track to push the room
@@ -556,15 +783,34 @@ func (m *Manager) process(itemID string) {
 	// starting until space frees up (for example, an operator removes a stored
 	// queue item or a playlist snapshot is replaced).
 	if err := m.store.markReady(itemID, dst, res.SizeBytes, res.DurationMS); err != nil {
-		_ = os.Remove(dst)
 		go m.pumpRoom(item.RoomID)
 		return
 	}
+	m.cleanupBroadcastCache(dst)
 	m.bumpRevision(item.RoomID)
 	// A track is ready: make sure the room is playing it (no-op if already).
 	m.ensurePlaying(item.RoomID)
 	// Try the next pending track (no-op if now at the cap).
 	go m.pumpRoom(item.RoomID)
+}
+
+func musicBoxPrepareErrorKind(err error) string {
+	switch {
+	case err == nil:
+		return "none"
+	case errors.Is(err, context.DeadlineExceeded):
+		return "timeout"
+	case errors.Is(err, context.Canceled):
+		return "cancelled"
+	case strings.Contains(strings.ToLower(err.Error()), "resolve"):
+		return "resolve"
+	case strings.Contains(strings.ToLower(err.Error()), "ffmpeg"):
+		return "transcode"
+	case strings.Contains(strings.ToLower(err.Error()), "publish broadcast cache"):
+		return "cache_publish"
+	default:
+		return "prepare"
+	}
 }
 
 // Control applies a playback action to a room. Valid actions: play, pause,
@@ -597,7 +843,27 @@ func (m *Manager) ApplyControl(
 func (m *Manager) ApplyItemControl(
 	roomID, action, itemID, mode, commandID string,
 	expectedRevision *int64,
-) error {
+) (resultErr error) {
+	if m == nil {
+		return ErrUnavailable
+	}
+	startedAt := time.Now()
+	m.obs.controlAttempts.Add(1)
+	defer func() {
+		m.obs.controlDurationMS.Add(time.Since(startedAt).Milliseconds())
+		if resultErr == nil {
+			m.obs.controlSuccesses.Add(1)
+			return
+		}
+		m.obs.controlFailures.Add(1)
+		if errors.Is(resultErr, ErrRevisionConflict) {
+			m.obs.revisionConflicts.Add(1)
+		}
+		log.Printf(
+			"musicbox control failed room_id=%q command_id=%q action=%q queue_item_id=%q latency_ms=%d error=%q",
+			roomID, commandID, action, itemID, time.Since(startedAt).Milliseconds(), resultErr.Error(),
+		)
+	}()
 	if !m.Enabled() {
 		return ErrUnavailable
 	}
@@ -703,11 +969,7 @@ func (m *Manager) clearTemporaryQueue(roomID string) error {
 	if err != nil {
 		return err
 	}
-	for _, item := range items {
-		if item.FilePath != "" {
-			_ = os.Remove(item.FilePath)
-		}
-	}
+	m.releaseQueueMedia(items)
 
 	m.persistMu.Lock()
 	st, err = m.store.ensureState(roomID)
@@ -870,6 +1132,8 @@ func (m *Manager) ensurePlayingItem(roomID string, preferred *QueueItem) error {
 		},
 		func() { m.persistAndNotify(roomID) },
 		func() { m.persistAndNotifyForced(roomID) },
+		func() { m.heartbeat(roomID) },
+		func(item *QueueItem) func() { return m.acquireMediaLease(item) },
 	)
 	m.mu.Lock()
 	m.players[roomID] = pl
@@ -992,8 +1256,35 @@ func (m *Manager) nextItem(
 		item, _ = m.store.firstPlayableInScope(roomID, -1, scope, snapshotID)
 	} else if mode != ModeShuffle {
 		m.setCursor(roomID, scope, snapshotID, prev.SortOrder)
+		if scope == QueueScopeTemporary {
+			m.pruneTemporaryHistory(roomID, prev.SortOrder)
+		}
 	}
 	return item
+}
+
+func (m *Manager) pruneTemporaryHistory(roomID string, throughSort int64) {
+	items, err := m.store.listScopedQueue(roomID, QueueScopeTemporary, "")
+	if err != nil {
+		return
+	}
+	history := make([]*QueueItem, 0, len(items))
+	for _, item := range items {
+		if item.SortOrder <= throughSort {
+			history = append(history, item)
+		}
+	}
+	if len(history) <= MaxTemporaryPlaybackHistory {
+		return
+	}
+	removed := make([]*QueueItem, 0, len(history)-MaxTemporaryPlaybackHistory)
+	for _, item := range history[:len(history)-MaxTemporaryPlaybackHistory] {
+		deleted, deleteErr := m.store.deleteRoomItem(roomID, item.ID)
+		if deleteErr == nil && deleted != nil {
+			removed = append(removed, deleted)
+		}
+	}
+	m.releaseQueueMedia(removed)
 }
 
 func musicBoxShuffleRank(roomID, itemID string) uint64 {
@@ -1065,8 +1356,42 @@ func (m *Manager) persistAndNotifyForced(roomID string) {
 	m.persistPlayerStateAndNotify(roomID, true)
 }
 
+// heartbeat keeps old clients working while introducing the compact progress
+// contract. Once CompactProgressOnly is enabled, the hot path no longer writes
+// the playback position to MySQL or serializes the full queue every second.
+func (m *Manager) heartbeat(roomID string) {
+	if !m.cfg.CompactProgressOnly {
+		m.persistAndNotify(roomID)
+	}
+	m.notifyProgress(roomID)
+}
+
+func (m *Manager) notifyProgress(roomID string) {
+	if m.onRoomProgress == nil {
+		return
+	}
+	pl := m.getPlayer(roomID)
+	if pl == nil {
+		return
+	}
+	state, currentItemID, positionMS := pl.snapshot()
+	if state != StatePlaying || currentItemID == "" {
+		return
+	}
+	st, err := m.store.getState(roomID)
+	if err != nil || st == nil || st.CurrentItemID != currentItemID {
+		return
+	}
+	m.onRoomProgress(roomID, ProgressSnapshot{
+		Revision:      st.Revision,
+		CurrentItemID: currentItemID,
+		PositionMS:    positionMS,
+	})
+}
+
 func (m *Manager) persistPlayerStateAndNotify(roomID string, forceRevision bool) {
 	m.persistMu.Lock()
+	structuralChange := false
 	pl := m.getPlayer(roomID)
 	st, _ := m.store.ensureState(roomID)
 	if st == nil {
@@ -1074,7 +1399,7 @@ func (m *Manager) persistPlayerStateAndNotify(roomID string, forceRevision bool)
 	}
 	if pl != nil {
 		state, currentID, pos := pl.snapshot()
-		structuralChange := st.State != state || st.CurrentItemID != currentID
+		structuralChange = st.State != state || st.CurrentItemID != currentID
 		st.State = state
 		st.CurrentItemID = currentID
 		st.PositionMS = pos
@@ -1082,7 +1407,7 @@ func (m *Manager) persistPlayerStateAndNotify(roomID string, forceRevision bool)
 			st.Revision++
 		}
 	} else {
-		structuralChange := st.State != StateStopped
+		structuralChange = st.State != StateStopped
 		st.State = StateStopped
 		st.PositionMS = 0
 		if structuralChange {
@@ -1092,10 +1417,13 @@ func (m *Manager) persistPlayerStateAndNotify(roomID string, forceRevision bool)
 	_ = m.store.saveState(*st)
 	m.persistMu.Unlock()
 	m.notify(roomID)
+	if structuralChange {
+		go m.pumpRoom(roomID)
+	}
 }
 
-// RemoveItem deletes a queue item, removing its file. If it's the track
-// currently playing, the player skips to the next.
+// RemoveItem deletes a queue item. Shared media remains cached for other
+// rooms; if it's the track currently playing, the player skips to the next.
 func (m *Manager) RemoveItem(roomID, itemID string) error {
 	if !m.Enabled() {
 		return ErrUnavailable
@@ -1110,14 +1438,12 @@ func (m *Manager) RemoveItem(roomID, itemID string) error {
 	if err != nil {
 		return err
 	}
-	if item != nil && item.FilePath != "" {
-		_ = os.Remove(item.FilePath)
-	}
 	if playingCurrent && pl != nil {
 		if err := pl.skip(); err != nil {
 			return err
 		}
 	}
+	m.releaseQueueMedia([]*QueueItem{item})
 	m.bumpRevision(roomID)
 	// Removing a ready track frees disk space; let a pending track download.
 	go m.pumpRoom(roomID)
@@ -1248,11 +1574,7 @@ func (m *Manager) ActivatePlaylist(
 	if cleanupErr != nil {
 		log.Printf("musicbox: room %s failed to clean obsolete playlist snapshots: %v", roomID, cleanupErr)
 	} else {
-		for _, item := range removed {
-			if item.FilePath != "" {
-				_ = os.Remove(item.FilePath)
-			}
-		}
+		m.releaseQueueMedia(removed)
 	}
 	m.notify(roomID)
 	go m.pumpRoom(roomID)

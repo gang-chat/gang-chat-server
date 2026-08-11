@@ -13,6 +13,8 @@ const (
 	DefaultStickerAssetOrphanTTLSeconds       int64 = 30 * 24 * 60 * 60
 	DefaultStickerAssetCleanupIntervalSeconds int64 = 60 * 60
 	DefaultMusicBoxMaxBytesPerRoom            int64 = 200 * 1024 * 1024
+	DefaultMusicBoxCacheMaxBytes              int64 = 2 * 1024 * 1024 * 1024
+	DefaultMusicBoxEmptyRoomGraceSeconds      int64 = 10 * 60
 )
 
 type Config struct {
@@ -43,9 +45,12 @@ type Config struct {
 	FFmpegPath                         string   `json:"ffmpeg_path"`
 	MusicBoxDir                        string   `json:"music_box_dir"`
 	MusicBoxMaxBytesPerRoom            int64    `json:"music_box_max_bytes_per_room"`
+	MusicBoxCacheMaxBytes              int64    `json:"music_box_cache_max_bytes"`
 	MusicBoxOpusBitrate                string   `json:"music_box_opus_bitrate"`
 	MusicBoxTranscodeWorkers           int      `json:"music_box_transcode_workers"`
 	MusicBoxDownloadBitrate            string   `json:"music_box_download_bitrate"`
+	MusicBoxCompactProgressOnly        bool     `json:"music_box_compact_progress_only"`
+	MusicBoxEmptyRoomGraceSeconds      int64    `json:"music_box_empty_room_grace_seconds"`
 
 	QQMusicBaseURL  string `json:"qqmusic_base_url"`
 	QQMusicPassword string `json:"qqmusic_password"`
@@ -108,9 +113,12 @@ func Load() *Config {
 	flag.StringVar(&cfg.FFmpegPath, "ffmpeg-path", cfg.FFmpegPath, "path to the ffmpeg binary used for music transcoding")
 	flag.StringVar(&cfg.MusicBoxDir, "music-box-dir", cfg.MusicBoxDir, "directory for transcoded room music files")
 	flag.Int64Var(&cfg.MusicBoxMaxBytesPerRoom, "music-box-max-bytes-per-room", cfg.MusicBoxMaxBytesPerRoom, "max on-disk bytes of transcoded music per room")
+	flag.Int64Var(&cfg.MusicBoxCacheMaxBytes, "music-box-cache-max-bytes", cfg.MusicBoxCacheMaxBytes, "global max bytes for shared broadcast music cache")
 	flag.StringVar(&cfg.MusicBoxOpusBitrate, "music-box-opus-bitrate", cfg.MusicBoxOpusBitrate, "Opus bitrate for broadcast transcode, e.g. 128k")
 	flag.IntVar(&cfg.MusicBoxTranscodeWorkers, "music-box-transcode-workers", cfg.MusicBoxTranscodeWorkers, "max concurrent transcode jobs")
 	flag.StringVar(&cfg.MusicBoxDownloadBitrate, "music-box-download-bitrate", cfg.MusicBoxDownloadBitrate, "GD download quality (128/192/320/740/999)")
+	flag.BoolVar(&cfg.MusicBoxCompactProgressOnly, "music-box-compact-progress-only", cfg.MusicBoxCompactProgressOnly, "publish compact music progress heartbeats without legacy full snapshots")
+	flag.Int64Var(&cfg.MusicBoxEmptyRoomGraceSeconds, "music-box-empty-room-grace-seconds", cfg.MusicBoxEmptyRoomGraceSeconds, "seconds an empty voice room keeps its temporary music state")
 	flag.StringVar(&cfg.ResendAPIBaseURL, "resend-api-base-url", cfg.ResendAPIBaseURL, "Resend API base URL")
 	flag.StringVar(&cfg.ResendAPIKey, "resend-api-key", cfg.ResendAPIKey, "Resend API key")
 	flag.StringVar(&cfg.EmailFrom, "email-from", cfg.EmailFrom, "sender used for account emails")
@@ -125,6 +133,12 @@ func Load() *Config {
 	}
 	if cfg.StickerAssetCleanupIntervalSeconds <= 0 {
 		cfg.StickerAssetCleanupIntervalSeconds = DefaultStickerAssetCleanupIntervalSeconds
+	}
+	if cfg.MusicBoxEmptyRoomGraceSeconds <= 0 {
+		cfg.MusicBoxEmptyRoomGraceSeconds = DefaultMusicBoxEmptyRoomGraceSeconds
+	}
+	if cfg.MusicBoxCacheMaxBytes <= 0 {
+		cfg.MusicBoxCacheMaxBytes = DefaultMusicBoxCacheMaxBytes
 	}
 	cfg.TrustedProxies = parseList(trustedProxies)
 	cfg.AllowedOrigins = parseList(allowedOrigins)

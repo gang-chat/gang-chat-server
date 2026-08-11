@@ -76,6 +76,10 @@ func RegisterRoutes(g *gin.RouterGroup, db *sql.DB, cfg *config.Config, bus *eve
 		MusicBox:  mb,
 		Playlists: musicbox.NewPlaylistStore(db),
 	}
+	if h.MusicBox != nil {
+		h.MusicBox.SetRoomOccupancyChecker(h.musicBoxRoomOccupied)
+		h.MusicBox.ReconcilePersistedRoomOccupancy()
+	}
 	if err := model.EnsureHistoricalMessageRetentionSchema(db); err != nil {
 		log.Printf("chat: ensure historical message retention schema: %v", err)
 	}
@@ -110,6 +114,9 @@ func RegisterRoutes(g *gin.RouterGroup, db *sql.DB, cfg *config.Config, bus *eve
 	if mb != nil {
 		mb.SetOnRoomChanged(func(roomID string) {
 			h.publishMusicBoxSnapshot(roomID)
+		})
+		mb.SetOnRoomProgress(func(roomID string, progress musicbox.ProgressSnapshot) {
+			h.publishMusicBoxProgress(roomID, progress)
 		})
 	}
 

@@ -38,7 +38,7 @@ type player struct {
 	positionMS int64
 
 	// done is closed once when the player shuts down, so the heartbeat goroutine
-	// that fans out per-second position snapshots can exit.
+	// that fans out compact per-second position updates can exit.
 	done     chan struct{}
 	doneOnce sync.Once
 
@@ -49,6 +49,8 @@ type player struct {
 	// persist it and fan out an SSE snapshot.
 	onState         func()
 	onPriorityState func()
+	onHeartbeat     func()
+	acquireLease    func(item *QueueItem) func()
 }
 
 type commandKind int
@@ -90,6 +92,8 @@ func newPlayer(
 	advance func(prev *QueueItem, transition playbackTransition, positionMS int64) *QueueItem,
 	onState func(),
 	onPriorityState func(),
+	onHeartbeat func(),
+	acquireLease func(item *QueueItem) func(),
 ) *player {
 	return &player{
 		roomID:          roomID,
@@ -100,6 +104,8 @@ func newPlayer(
 		advance:         advance,
 		onState:         onState,
 		onPriorityState: onPriorityState,
+		onHeartbeat:     onHeartbeat,
+		acquireLease:    acquireLease,
 	}
 }
 
@@ -216,11 +222,11 @@ func (p *player) idleWait() bool {
 	}
 }
 
-// heartbeat fans out a fresh state snapshot once per second while a track is
-// actively playing, so SSE subscribers get a steadily advancing position. The
-// audio write loop only records the position locally (setPosition); driving the
-// fan-out from a separate goroutine keeps the per-second DB write and network
-// broadcast off the 20ms sample-pacing path. Exits when the player shuts down.
+// heartbeat asks the manager for a compact progress update once per second
+// while a track is actively playing. The audio write loop only records the
+// position locally (setPosition); keeping fan-out on a separate goroutine
+// avoids network work on the 20ms sample-pacing path. Compatibility policy
+// (compact-only or compact plus a legacy full snapshot) belongs to the manager.
 func (p *player) heartbeat() {
 	ticker := time.NewTicker(time.Second)
 	defer ticker.Stop()
@@ -229,8 +235,8 @@ func (p *player) heartbeat() {
 		case <-p.done:
 			return
 		case <-ticker.C:
-			if p.isPlaying() && p.onState != nil {
-				p.onState()
+			if p.isPlaying() && p.onHeartbeat != nil {
+				p.onHeartbeat()
 			}
 		}
 	}
@@ -246,6 +252,11 @@ func (p *player) isPlaying() bool {
 
 // pause/resume/skip/stop. Returns true if the player should stop entirely.
 func (p *player) playFile(item *QueueItem) playResult {
+	releaseLease := func() {}
+	if p.acquireLease != nil {
+		releaseLease = p.acquireLease(item)
+	}
+	defer releaseLease()
 	f, err := os.Open(item.FilePath)
 	if err != nil {
 		return playResult{transition: transitionNatural} // skip a vanished file

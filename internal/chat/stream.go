@@ -132,11 +132,17 @@ func (h *Handler) userRoomIDs(userID string) ([]string, error) {
 // errors (including a nil bus) are swallowed so they never block the HTTP
 // write path that triggered them. extra fields are merged into the payload.
 func (h *Handler) PublishLiveSnapshot(roomID, eventType string, extra map[string]any) {
-	if h == nil || h.Bus == nil || roomID == "" {
+	if h == nil || roomID == "" {
 		return
 	}
 	live, err := h.buildLiveState(roomID, nowMillis())
 	if err != nil {
+		return
+	}
+	if h.MusicBox != nil {
+		h.MusicBox.ObserveRoomOccupancy(roomID, live.ParticipantCount)
+	}
+	if h.Bus == nil {
 		return
 	}
 	preview, count, err := h.livePreview(roomID)
@@ -157,4 +163,14 @@ func (h *Handler) PublishLiveSnapshot(roomID, eventType string, extra map[string
 		RoomID: roomID,
 		Data:   payload,
 	})
+}
+
+func (h *Handler) musicBoxRoomOccupied(roomID string) (bool, error) {
+	var count int
+	err := h.DB.QueryRow(
+		`SELECT COUNT(*) FROM live_participants
+		 WHERE room_id = ? AND connection_state != 'left'`,
+		roomID,
+	).Scan(&count)
+	return count > 0, err
 }

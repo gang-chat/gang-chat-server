@@ -7,14 +7,15 @@ import (
 	"time"
 )
 
-// newTestPlayer builds a player wired only with the fields the heartbeat needs,
-// skipping connect()/run() so no LiveKit connection is involved.
-func newTestPlayer(onState func()) *player {
+// newTestPlayer builds a player wired only with the fields the compact
+// heartbeat needs, skipping connect()/run() so no LiveKit connection is
+// involved.
+func newTestPlayer(onHeartbeat func()) *player {
 	return &player{
-		roomID:  "room-1",
-		cmd:     make(chan command, 8),
-		done:    make(chan struct{}),
-		onState: onState,
+		roomID:      "room-1",
+		cmd:         make(chan command, 8),
+		done:        make(chan struct{}),
+		onHeartbeat: onHeartbeat,
 	}
 }
 

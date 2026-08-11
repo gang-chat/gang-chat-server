@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"log"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/zhuangkaiyi/gang-chat/server/internal/auth"
@@ -58,15 +59,18 @@ func main() {
 	// needs LiveKit to publish a bot track, so it's only enabled when LiveKit
 	// is configured. The token func issues a publish-only token for the bot.
 	musicBox := musicbox.NewManager(pool, musicbox.Config{
-		Dir:              cfg.MusicBoxDir,
-		MaxBytesPerRoom:  cfg.MusicBoxMaxBytesPerRoom,
-		FFmpegPath:       cfg.FFmpegPath,
-		OpusBitrate:      cfg.MusicBoxOpusBitrate,
-		TranscodeWorkers: cfg.MusicBoxTranscodeWorkers,
-		DownloadBitrate:  cfg.MusicBoxDownloadBitrate,
-		LiveKitHost:      cfg.LiveKitHost,
-		Enabled:          cfg.LiveKitAPIKey != "" && cfg.LiveKitAPISecret != "",
-		QQ:               qqClient,
+		Dir:                  cfg.MusicBoxDir,
+		MaxBytesPerRoom:      cfg.MusicBoxMaxBytesPerRoom,
+		CacheMaxBytes:        cfg.MusicBoxCacheMaxBytes,
+		FFmpegPath:           cfg.FFmpegPath,
+		OpusBitrate:          cfg.MusicBoxOpusBitrate,
+		TranscodeWorkers:     cfg.MusicBoxTranscodeWorkers,
+		DownloadBitrate:      cfg.MusicBoxDownloadBitrate,
+		CompactProgressOnly:  cfg.MusicBoxCompactProgressOnly,
+		EmptyRoomGracePeriod: time.Duration(cfg.MusicBoxEmptyRoomGraceSeconds) * time.Second,
+		LiveKitHost:          cfg.LiveKitHost,
+		Enabled:              cfg.LiveKitAPIKey != "" && cfg.LiveKitAPISecret != "",
+		QQ:                   qqClient,
 	}, func(roomID, identity string) (string, error) {
 		return livekithandler.GenerateJoinToken(livekithandler.TokenParams{
 			APIKey:       cfg.LiveKitAPIKey,
@@ -78,6 +82,7 @@ func main() {
 			CanSubscribe: false,
 		})
 	}, nil)
+	go musicBox.RunObservabilityLog(context.Background(), 5*time.Minute)
 
 	r := gin.Default()
 	if err := r.SetTrustedProxies(cfg.TrustedProxies); err != nil {

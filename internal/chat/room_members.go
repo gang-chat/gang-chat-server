@@ -1326,6 +1326,11 @@ func (h *Handler) updateMemberRole(c *gin.Context) {
 	}
 	if roleChanged {
 		h.publishRoomUpdated(roomID)
+		// Music-box capabilities depend on every member's current role. A role
+		// change can affect both the target and users comparing their rank with
+		// the target, so fan out a structural refresh to the whole room. Each
+		// client then reloads its actor-specific capability snapshot.
+		h.publishMusicBoxSnapshot(roomID)
 		h.publishRoomNotificationsUpdated(targetID)
 	}
 	if displayNameChanged {
@@ -1506,6 +1511,7 @@ func (h *Handler) transferRoomCreator(c *gin.Context) {
 		h.publishRoomNotificationsUpdated(userID)
 	}
 	h.publishRoomUpdated(roomID)
+	h.publishMusicBoxSnapshot(roomID)
 	detail, err := h.buildRoomDetail(roomID, actorID)
 	if err != nil {
 		h.jsonError(c, http.StatusInternalServerError, "internal_error", "failed to read room")

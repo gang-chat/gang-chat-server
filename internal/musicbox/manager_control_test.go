@@ -3,6 +3,7 @@ package musicbox
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 )
@@ -103,6 +104,109 @@ func TestEnqueueRejectsDuplicateTrackInTemporaryQueue(t *testing.T) {
 	}
 	if len(queue) != 2 {
 		t.Fatalf("temporary queue length = %d, want 2", len(queue))
+	}
+}
+
+func TestEnqueueRejectsTracksBeyondTemporaryQueueLimit(t *testing.T) {
+	store := newTestStore(t)
+	for index := 0; index < MaxTemporaryQueueItems; index++ {
+		if _, err := store.insertItem(QueueItem{
+			ID:            fmt.Sprintf("queue-limit-%03d", index),
+			RoomID:        "r1",
+			Source:        "netease",
+			TrackID:       fmt.Sprintf("track-%03d", index),
+			Title:         "Queued track",
+			Status:        StatusPending,
+			AddedByUserID: "u1",
+			SortOrder:     int64(index + 1),
+		}); err != nil {
+			t.Fatalf("insert queue item %d: %v", index, err)
+		}
+	}
+	manager := &Manager{
+		cfg:          Config{Enabled: true, MaxBytesPerRoom: 1},
+		store:        store,
+		players:      map[string]*player{},
+		seenCommands: map[string]map[string]int64{},
+		playCursors:  map[string]playCursor{},
+	}
+
+	_, err := manager.Enqueue(context.Background(), EnqueueParams{
+		RoomID:        "r1",
+		Source:        "netease",
+		TrackID:       "track-over-limit",
+		Title:         "Track over limit",
+		AddedByUserID: "u1",
+	})
+	if !errors.Is(err, ErrQueueLimitReached) {
+		t.Fatalf("enqueue error = %v, want ErrQueueLimitReached", err)
+	}
+	queue, listErr := store.listScopedQueue("r1", QueueScopeTemporary, "")
+	if listErr != nil {
+		t.Fatalf("list temporary queue: %v", listErr)
+	}
+	if len(queue) != MaxTemporaryQueueItems {
+		t.Fatalf("temporary queue length = %d, want %d", len(queue), MaxTemporaryQueueItems)
+	}
+}
+
+func TestTemporaryPlaybackHistoryKeepsOnlyTheLatestTwentyPlayedRows(t *testing.T) {
+	store := newTestStore(t)
+	manager := &Manager{
+		cfg:          Config{Enabled: true, Dir: t.TempDir(), CacheMaxBytes: 1 << 20},
+		store:        store,
+		players:      map[string]*player{},
+		seenCommands: map[string]map[string]int64{},
+		playCursors:  map[string]playCursor{},
+		cacheLeases:  map[string]int{},
+	}
+	var lastPlayed *QueueItem
+	for index := 1; index <= MaxTemporaryPlaybackHistory+7; index++ {
+		item, err := store.insertItem(QueueItem{
+			ID: fmt.Sprintf("history-%d", index), RoomID: "r1",
+			Source: "netease", TrackID: fmt.Sprintf("track-%d", index),
+			Title: "Track", Status: StatusPending, SortOrder: int64(index * 10),
+			QueueScope: QueueScopeTemporary,
+		})
+		if err != nil {
+			t.Fatalf("insert history row %d: %v", index, err)
+		}
+		if err := store.markReady(item.ID, "", 0, 1000); err != nil {
+			t.Fatalf("mark history row %d ready: %v", index, err)
+		}
+		reloaded, err := store.getItem(item.ID)
+		if err != nil {
+			t.Fatalf("reload history row %d: %v", index, err)
+		}
+		if index == MaxTemporaryPlaybackHistory+5 {
+			lastPlayed = reloaded
+		}
+	}
+	state, err := store.ensureState("r1")
+	if err != nil {
+		t.Fatalf("ensure state: %v", err)
+	}
+	state.ActiveSourceType = ActiveSourceTemporary
+	if err := store.saveState(*state); err != nil {
+		t.Fatalf("save state: %v", err)
+	}
+
+	if next := manager.nextItem("r1", lastPlayed, transitionNatural, 1000); next == nil || next.ID != "history-26" {
+		t.Fatalf("next item = %+v, want history-26", next)
+	}
+	remaining, err := store.listScopedQueue("r1", QueueScopeTemporary, "")
+	if err != nil {
+		t.Fatalf("list remaining history: %v", err)
+	}
+	if len(remaining) != MaxTemporaryPlaybackHistory+2 {
+		t.Fatalf("remaining rows = %d, want %d", len(remaining), MaxTemporaryPlaybackHistory+2)
+	}
+	if remaining[0].ID != "history-6" || remaining[len(remaining)-1].ID != "history-27" {
+		t.Fatalf(
+			"unexpected retained history range: first=%q last=%q",
+			remaining[0].ID,
+			remaining[len(remaining)-1].ID,
+		)
 	}
 }
 

@@ -16,11 +16,23 @@ import (
 // transcodes tracks to Opus and broadcasts a single audio track into the
 // room's LiveKit session via a bot participant. See internal/musicbox.
 //
-// Permissions (per product decision): any room member can search, enqueue, and
-// control playback (play/pause/resume/skip/stop), remove queue items, and clear
-// the request queue. Destructive client actions still require confirmation.
+// Search and enqueue are available to room members. Playback, queue mutation,
+// and saved-playlist controls are authorized per command from the caller's
+// current room role and the active source owner; client capabilities are only
+// a presentation hint and never replace these checks.
 
 const musicBoxRequestQueueDisplayName = "点歌队列"
+
+type musicBoxActorCapabilities struct {
+	CanEnqueue    bool
+	CanSwitch     bool
+	CanControl    bool
+	CanChangeMode bool
+	CanReorder    bool
+	CanClear      bool
+	CanPlayNow    bool
+	AllowedModes  []string
+}
 
 func (h *Handler) musicBoxReady(c *gin.Context) bool {
 	if h.MusicBox == nil || !h.MusicBox.Enabled() {
@@ -30,9 +42,134 @@ func (h *Handler) musicBoxReady(c *gin.Context) bool {
 	return true
 }
 
+func (h *Handler) musicBoxPermissionDenied(c *gin.Context) {
+	h.jsonError(
+		c,
+		http.StatusForbidden,
+		"music_box_permission_denied",
+		"the current room role cannot perform this music box action",
+	)
+}
+
+func (h *Handler) musicBoxRoleRank(roomID, userID string) int {
+	if h == nil || h.DB == nil || strings.TrimSpace(userID) == "" {
+		return 0
+	}
+	if h.isSuperuser(userID) && h.roomIDExists(roomID) {
+		return 4
+	}
+	var role string
+	if err := h.DB.QueryRow(
+		`SELECT role FROM room_memberships WHERE room_id = ? AND user_id = ?`,
+		roomID,
+		userID,
+	).Scan(&role); err != nil {
+		return 0
+	}
+	return roleRank(role)
+}
+
+func (h *Handler) musicBoxCapabilities(
+	roomID, actorID string,
+	state *musicbox.RoomState,
+) musicBoxActorCapabilities {
+	actorRank := h.musicBoxRoleRank(roomID, actorID)
+	capabilities := musicBoxActorCapabilities{
+		CanEnqueue: actorRank > 0,
+		CanSwitch:  actorRank > 0,
+	}
+	if state == nil {
+		return capabilities
+	}
+	capabilities.AllowedModes = []string{"sequential", "repeat_one"}
+	if state.ActiveSourceType != musicbox.ActiveSourceTemporary {
+		capabilities.AllowedModes = append(
+			capabilities.AllowedModes,
+			"repeat_all",
+			"shuffle",
+		)
+	}
+
+	switch state.ActiveSourceType {
+	case musicbox.ActiveSourceTemporary:
+		capabilities.CanControl = actorRank >= roleRank("admin")
+	case musicbox.ActiveSourceRoomPlaylist:
+		capabilities.CanControl = actorRank > 0
+	case musicbox.ActiveSourceUserPlaylist:
+		ownerID := strings.TrimSpace(state.ActivePlaylistOwnerID)
+		if ownerID != "" && ownerID == actorID {
+			capabilities.CanControl = true
+		} else if actorRank >= roleRank("admin") && ownerID != "" {
+			capabilities.CanControl = actorRank > h.musicBoxRoleRank(roomID, ownerID)
+		}
+	}
+	capabilities.CanChangeMode = capabilities.CanControl
+	capabilities.CanReorder = capabilities.CanControl
+	capabilities.CanPlayNow = capabilities.CanControl
+	capabilities.CanClear = actorRank >= roleRank("admin")
+	return capabilities
+}
+
+func switchMusicBoxCommandAllowed(
+	action string,
+	capabilities musicBoxActorCapabilities,
+) bool {
+	switch action {
+	case "play", "pause", "resume", "skip", "next", "previous", "stop":
+		return capabilities.CanControl
+	case "set_mode":
+		return capabilities.CanChangeMode
+	case "play_now":
+		return capabilities.CanPlayNow
+	case "clear_temporary_playlist":
+		return capabilities.CanClear
+	default:
+		return false
+	}
+}
+
+func (h *Handler) musicBoxCanRemoveItem(
+	actorID string,
+	item *musicbox.QueueItem,
+	capabilities musicBoxActorCapabilities,
+) bool {
+	if item == nil || strings.TrimSpace(actorID) == "" {
+		return false
+	}
+	if item.QueueScope == musicbox.QueueScopeTemporary {
+		return item.AddedByUserID == actorID || capabilities.CanClear
+	}
+	return capabilities.CanControl
+}
+
+func (h *Handler) musicBoxQueueItemPermission(
+	roomID, actorID, itemID string,
+) (*musicbox.QueueItem, bool, error) {
+	state, activeItems, err := h.MusicBox.State(roomID)
+	if err != nil {
+		return nil, false, err
+	}
+	capabilities := h.musicBoxCapabilities(roomID, actorID, state)
+	for _, item := range activeItems {
+		if item.ID == itemID {
+			return item, h.musicBoxCanRemoveItem(actorID, item, capabilities), nil
+		}
+	}
+	temporaryItems, err := h.MusicBox.TemporaryQueue(roomID)
+	if err != nil {
+		return nil, false, err
+	}
+	for _, item := range temporaryItems {
+		if item.ID == itemID {
+			return item, h.musicBoxCanRemoveItem(actorID, item, capabilities), nil
+		}
+	}
+	return nil, false, nil
+}
+
 func (h *Handler) searchMusicBox(c *gin.Context) {
 	roomID := c.Param("room_id")
-	if !h.requireMember(c, roomID) {
+	if !h.requireRoomAccess(c, roomID) {
 		return
 	}
 	if !h.musicBoxReady(c) {
@@ -74,12 +211,12 @@ func (h *Handler) getMusicBoxState(c *gin.Context) {
 		h.jsonError(c, http.StatusServiceUnavailable, "music_box_unavailable", "music box is not available")
 		return
 	}
-	c.JSON(http.StatusOK, h.musicBoxStatePayload(roomID))
+	c.JSON(http.StatusOK, h.musicBoxStatePayload(roomID, currentUserID(c)))
 }
 
 func (h *Handler) enqueueMusicBox(c *gin.Context) {
 	roomID := c.Param("room_id")
-	if !h.requireMember(c, roomID) {
+	if !h.requireRoomAccess(c, roomID) {
 		return
 	}
 	if !h.musicBoxReady(c) {
@@ -108,34 +245,49 @@ func (h *Handler) enqueueMusicBox(c *gin.Context) {
 			h.jsonError(c, http.StatusConflict, "music_box_item_already_queued", "music box item is already queued")
 			return
 		}
+		if errors.Is(err, musicbox.ErrQueueLimitReached) {
+			h.jsonError(c, http.StatusConflict, "music_box_queue_limit_reached", "music box request queue reached its 200 item limit")
+			return
+		}
 		h.jsonError(c, http.StatusInternalServerError, "internal_error", "enqueue failed")
 		return
 	}
-	c.JSON(http.StatusCreated, h.musicBoxStatePayload(roomID))
+	c.JSON(http.StatusCreated, h.musicBoxStatePayload(roomID, currentUserID(c)))
 }
 
 func (h *Handler) removeMusicBoxItem(c *gin.Context) {
 	roomID := c.Param("room_id")
 	itemID := c.Param("item_id")
-	if !h.requireMember(c, roomID) {
+	if !h.requireRoomAccess(c, roomID) {
 		return
 	}
 	if !h.musicBoxReady(c) {
 		return
 	}
-	// Any room member may remove a queued track, same as enqueue and playback
-	// control. Restricting removal to the adder or an admin left tracks stuck in
-	// the queue when the adder had left the room and no admin was around.
+	actorID := currentUserID(c)
+	item, canRemove, err := h.musicBoxQueueItemPermission(roomID, actorID, itemID)
+	if err != nil {
+		h.jsonError(c, http.StatusInternalServerError, "internal_error", "load music box item failed")
+		return
+	}
+	if item == nil {
+		h.jsonError(c, http.StatusNotFound, "not_found", "music box queue item not found")
+		return
+	}
+	if !canRemove {
+		h.musicBoxPermissionDenied(c)
+		return
+	}
 	if err := h.MusicBox.RemoveItem(roomID, itemID); err != nil {
 		h.jsonError(c, http.StatusInternalServerError, "internal_error", "remove failed")
 		return
 	}
-	c.JSON(http.StatusOK, h.musicBoxStatePayload(roomID))
+	c.JSON(http.StatusOK, h.musicBoxStatePayload(roomID, actorID))
 }
 
 func (h *Handler) controlMusicBox(c *gin.Context) {
 	roomID := c.Param("room_id")
-	if !h.requireMember(c, roomID) {
+	if !h.requireRoomAccess(c, roomID) {
 		return
 	}
 	if !h.musicBoxReady(c) {
@@ -164,6 +316,18 @@ func (h *Handler) controlMusicBox(c *gin.Context) {
 		h.jsonError(c, http.StatusBadRequest, "validation_failed", "item_id is required")
 		return
 	}
+	actorID := currentUserID(c)
+	st, _, err := h.MusicBox.State(roomID)
+	if err != nil {
+		h.jsonError(c, http.StatusInternalServerError, "internal_error", "load music box state failed")
+		return
+	}
+	capabilities := h.musicBoxCapabilities(roomID, actorID, st)
+	allowedCommand := switchMusicBoxCommandAllowed(req.Action, capabilities)
+	if !allowedCommand {
+		h.musicBoxPermissionDenied(c)
+		return
+	}
 	if err := h.MusicBox.ApplyItemControl(
 		roomID,
 		req.Action,
@@ -178,7 +342,7 @@ func (h *Handler) controlMusicBox(c *gin.Context) {
 					"code":    "music_box_revision_conflict",
 					"message": "music box state changed; refresh and try again",
 				},
-				"state": h.musicBoxStatePayload(roomID),
+				"state": h.musicBoxStatePayload(roomID, actorID),
 			})
 			return
 		}
@@ -193,12 +357,12 @@ func (h *Handler) controlMusicBox(c *gin.Context) {
 		h.jsonError(c, http.StatusInternalServerError, "internal_error", "control failed: "+err.Error())
 		return
 	}
-	c.JSON(http.StatusOK, h.musicBoxStatePayload(roomID))
+	c.JSON(http.StatusOK, h.musicBoxStatePayload(roomID, actorID))
 }
 
 func (h *Handler) activateMusicBoxPlaylist(c *gin.Context) {
 	roomID := c.Param("room_id")
-	if !h.requireMember(c, roomID) || !h.musicBoxReady(c) {
+	if !h.requireRoomAccess(c, roomID) || !h.musicBoxReady(c) {
 		return
 	}
 	var req musicBoxActivatePlaylistRequest
@@ -218,6 +382,10 @@ func (h *Handler) activateMusicBoxPlaylist(c *gin.Context) {
 
 	actorID := currentUserID(c)
 	if sourceType == "temporary" {
+		if req.StartPlay && !h.isAdmin(roomID, actorID) {
+			h.musicBoxPermissionDenied(c)
+			return
+		}
 		if err := h.MusicBox.ActivatePlaylist(
 			roomID,
 			musicbox.ActiveSourceTemporary,
@@ -242,7 +410,7 @@ func (h *Handler) activateMusicBoxPlaylist(c *gin.Context) {
 			h.jsonError(c, http.StatusInternalServerError, "internal_error", "switch music box source failed")
 			return
 		}
-		c.JSON(http.StatusOK, h.musicBoxStatePayload(roomID))
+		c.JSON(http.StatusOK, h.musicBoxStatePayload(roomID, actorID))
 		return
 	}
 
@@ -307,12 +475,12 @@ func (h *Handler) activateMusicBoxPlaylist(c *gin.Context) {
 		h.jsonError(c, http.StatusInternalServerError, "internal_error", "activate music playlist failed")
 		return
 	}
-	c.JSON(http.StatusOK, h.musicBoxStatePayload(roomID))
+	c.JSON(http.StatusOK, h.musicBoxStatePayload(roomID, actorID))
 }
 
 func (h *Handler) cloneActiveMusicBoxPlaylist(c *gin.Context) {
 	roomID := c.Param("room_id")
-	if !h.requireMember(c, roomID) || !h.musicBoxReady(c) {
+	if !h.requireRoomAccess(c, roomID) || !h.musicBoxReady(c) {
 		return
 	}
 	var req musicBoxCloneActivePlaylistRequest
@@ -383,15 +551,43 @@ func (h *Handler) publishMusicBoxSnapshot(roomID string) {
 	if h == nil || h.Bus == nil || roomID == "" {
 		return
 	}
+	if h.MusicBox != nil {
+		h.MusicBox.RecordFullSnapshotEvent()
+	}
 	h.Bus.PublishRoom(roomID, eventbus.Event{
 		Type:   "music_box_changed",
 		RoomID: roomID,
-		Data:   h.musicBoxStatePayload(roomID),
+		// Room broadcasts are deliberately conservative because subscribers have
+		// different roles. Current clients refresh the personalized HTTP snapshot;
+		// older clients safely receive disabled capabilities rather than an
+		// over-authorized shared snapshot.
+		Data: h.musicBoxStatePayload(roomID, ""),
+	})
+}
+
+// publishMusicBoxProgress avoids rebuilding and serializing the full queue for
+// a position-only heartbeat. Clients apply it only when revision and current
+// item still match their authoritative snapshot.
+func (h *Handler) publishMusicBoxProgress(roomID string, progress musicbox.ProgressSnapshot) {
+	if h == nil || h.Bus == nil || roomID == "" || progress.CurrentItemID == "" {
+		return
+	}
+	if h.MusicBox != nil {
+		h.MusicBox.RecordCompactProgressEvent()
+	}
+	h.Bus.PublishRoom(roomID, eventbus.Event{
+		Type:   "music_box_progress",
+		RoomID: roomID,
+		Data: gin.H{
+			"revision":        progress.Revision,
+			"current_item_id": progress.CurrentItemID,
+			"position_ms":     progress.PositionMS,
+		},
 	})
 }
 
 // musicBoxStatePayload builds the SSE/HTTP snapshot for a room's music box.
-func (h *Handler) musicBoxStatePayload(roomID string) gin.H {
+func (h *Handler) musicBoxStatePayload(roomID, actorID string) gin.H {
 	if h.MusicBox == nil {
 		return gin.H{"enabled": false}
 	}
@@ -412,7 +608,8 @@ func (h *Handler) musicBoxStatePayload(roomID string) gin.H {
 		allItems,
 		st.ActivePlaylistOwnerID,
 	)
-	queuePayload := func(source []*musicbox.QueueItem) []gin.H {
+	capabilities := h.musicBoxCapabilities(roomID, actorID, st)
+	queuePayload := func(source []*musicbox.QueueItem, active bool) []gin.H {
 		queue := make([]gin.H, 0, len(source))
 		for _, it := range source {
 			payload := gin.H{
@@ -427,7 +624,8 @@ func (h *Handler) musicBoxStatePayload(roomID string) gin.H {
 				"error":            it.Error,
 				"added_by_user_id": it.AddedByUserID,
 				"created_at":       formatMillis(it.CreatedAt),
-				"can_play_now":     it.Status == musicbox.StatusReady,
+				"can_remove":       h.musicBoxCanRemoveItem(actorID, it, capabilities),
+				"can_play_now":     active && capabilities.CanPlayNow && it.Status == musicbox.StatusReady,
 			}
 			if requester := requesters[it.AddedByUserID]; requester != nil {
 				payload["requested_by"] = requester
@@ -436,8 +634,11 @@ func (h *Handler) musicBoxStatePayload(roomID string) gin.H {
 		}
 		return queue
 	}
-	queue := queuePayload(items)
-	temporaryQueue := queuePayload(temporaryItems)
+	queue := queuePayload(items, true)
+	temporaryQueue := queuePayload(
+		temporaryItems,
+		st.ActiveSourceType == musicbox.ActiveSourceTemporary,
+	)
 	activeSource := gin.H{
 		"type": st.ActiveSourceType,
 		"name": st.ActivePlaylistName,
@@ -455,10 +656,6 @@ func (h *Handler) musicBoxStatePayload(roomID string) gin.H {
 			activeSource["owner"] = owner
 		}
 	}
-	allowedModes := []string{"sequential", "repeat_one"}
-	if st.ActiveSourceType != musicbox.ActiveSourceTemporary {
-		allowedModes = append(allowedModes, "repeat_all", "shuffle")
-	}
 	return gin.H{
 		"enabled":       h.MusicBox.Enabled(),
 		"revision":      st.Revision,
@@ -466,9 +663,11 @@ func (h *Handler) musicBoxStatePayload(roomID string) gin.H {
 		"temporary_playlist": gin.H{
 			"queued_count": len(temporaryQueue),
 			"capabilities": gin.H{
-				"can_enqueue": true,
-				"can_reorder": true,
-				"can_clear":   true,
+				"can_enqueue":  capabilities.CanEnqueue,
+				"can_switch":   capabilities.CanSwitch,
+				"can_reorder":  capabilities.CanReorder && st.ActiveSourceType == musicbox.ActiveSourceTemporary,
+				"can_clear":    capabilities.CanClear,
+				"can_play_now": capabilities.CanPlayNow && st.ActiveSourceType == musicbox.ActiveSourceTemporary,
 			},
 		},
 		"playback": gin.H{
@@ -480,9 +679,10 @@ func (h *Handler) musicBoxStatePayload(roomID string) gin.H {
 			"can_previous":    st.CurrentItemID != "" && len(queue) > 0,
 			"can_next":        len(queue) > 0,
 			"capabilities": gin.H{
-				"can_control":     true,
-				"can_change_mode": true,
-				"allowed_modes":   allowedModes,
+				"can_control":     capabilities.CanControl,
+				"can_change_mode": capabilities.CanChangeMode,
+				"can_reorder":     capabilities.CanReorder,
+				"allowed_modes":   capabilities.AllowedModes,
 			},
 			"updated_at": formatMillis(st.UpdatedAt),
 		},

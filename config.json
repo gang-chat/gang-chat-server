@@ -26,9 +26,12 @@
   "ffmpeg_path": "ffmpeg",
   "music_box_dir": "music-box",
   "music_box_max_bytes_per_room": 209715200,
+  "music_box_cache_max_bytes": 2147483648,
   "music_box_opus_bitrate": "128k",
   "music_box_transcode_workers": 3,
   "music_box_download_bitrate": "192",
+  "music_box_compact_progress_only": false,
+  "music_box_empty_room_grace_seconds": 600,
 
   "resend_api_base_url": "https://api.resend.com",
   "resend_api_key": "",

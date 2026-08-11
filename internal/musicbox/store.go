@@ -478,6 +478,82 @@ func (s *store) markFailed(id, errMsg string) error {
 	return err
 }
 
+func (s *store) cachedMediaDuration(filePath string) (int64, error) {
+	var duration sql.NullInt64
+	err := s.db.QueryRow(
+		`SELECT MAX(duration_ms) FROM room_music_box_queue
+		 WHERE file_path = ? AND status = 'ready'`,
+		filePath,
+	).Scan(&duration)
+	if err != nil {
+		return 0, err
+	}
+	return duration.Int64, nil
+}
+
+func (s *store) countMediaPathReferences(filePath string) (int, error) {
+	var count int
+	err := s.db.QueryRow(
+		`SELECT COUNT(*) FROM room_music_box_queue WHERE file_path = ?`,
+		filePath,
+	).Scan(&count)
+	return count, err
+}
+
+// mediaPathIsCurrent closes the small selection-to-open gap before the player
+// has acquired its filesystem lease. A selected row remains protected even if
+// another room finishes a transcode and starts LRU cleanup at that instant.
+func (s *store) mediaPathIsCurrent(filePath string) (bool, error) {
+	var count int
+	err := s.db.QueryRow(
+		`SELECT COUNT(*)
+		 FROM room_music_box_state AS state
+		 JOIN room_music_box_queue AS item ON item.id = state.current_item_id
+		 WHERE item.file_path = ?`,
+		filePath,
+	).Scan(&count)
+	return count > 0, err
+}
+
+// markMediaPathMissing repairs every queue row that referenced an evicted
+// cache artifact. Rows remain in their original queue order and can be
+// prepared again when they re-enter a room's current+next-two window.
+func (s *store) markMediaPathMissing(filePath string) ([]string, error) {
+	rows, err := s.db.Query(
+		`SELECT DISTINCT room_id FROM room_music_box_queue WHERE file_path = ?`,
+		filePath,
+	)
+	if err != nil {
+		return nil, err
+	}
+	roomIDs := make([]string, 0)
+	for rows.Next() {
+		var roomID string
+		if err := rows.Scan(&roomID); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		roomIDs = append(roomIDs, roomID)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return nil, err
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if _, err := s.db.Exec(
+		`UPDATE room_music_box_queue
+		 SET status = 'pending', file_path = NULL, file_size_bytes = 0,
+		     error = NULL, updated_at = ?
+		 WHERE file_path = ?`,
+		nowMillis(), filePath,
+	); err != nil {
+		return nil, err
+	}
+	return roomIDs, nil
+}
+
 // deleteItem removes a row and returns it (so the caller can clean up the file
 // and adjust the player). Returns nil if the row doesn't exist.
 func (s *store) deleteItem(id string) (*QueueItem, error) {
@@ -588,6 +664,117 @@ func (s *store) deleteSavedSnapshot(
 		return nil, err
 	}
 	return items, nil
+}
+
+// expireRoomPlayback atomically removes only transient playback data for an
+// empty voice room. Saved playlists live in music_playlists/music_playlist_items
+// and are intentionally untouched; queue rows contain the request queue and
+// disposable active-playlist snapshots only.
+func (s *store) expireRoomPlayback(roomID string) ([]*QueueItem, bool, error) {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return nil, false, err
+	}
+	defer tx.Rollback()
+
+	rows, err := tx.Query(
+		`SELECT `+itemColumns+` FROM room_music_box_queue
+		 WHERE room_id = ?
+		 ORDER BY sort_order ASC, created_at ASC, id ASC
+		 FOR UPDATE`,
+		roomID,
+	)
+	if err != nil {
+		return nil, false, err
+	}
+	items := make([]*QueueItem, 0)
+	for rows.Next() {
+		item, scanErr := scanItem(rows)
+		if scanErr != nil {
+			rows.Close()
+			return nil, false, scanErr
+		}
+		items = append(items, item)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return nil, false, err
+	}
+	if err := rows.Close(); err != nil {
+		return nil, false, err
+	}
+
+	var state, activeSource string
+	var currentItemID, activePlaylistID, activeSnapshotID sql.NullString
+	var positionMS int64
+	var playbackMode string
+	stateErr := tx.QueryRow(
+		`SELECT state, current_item_id, position_ms, playback_mode,
+		        active_source_type, active_playlist_id, active_snapshot_id
+		 FROM room_music_box_state WHERE room_id = ? FOR UPDATE`,
+		roomID,
+	).Scan(
+		&state, &currentItemID, &positionMS, &playbackMode,
+		&activeSource, &activePlaylistID, &activeSnapshotID,
+	)
+	if stateErr != nil && stateErr != sql.ErrNoRows {
+		return nil, false, stateErr
+	}
+	stateNeedsReset := stateErr == nil && (state != string(StateStopped) || currentItemID.Valid || positionMS != 0 ||
+		NormalizePlaybackMode(playbackMode) != ModeSequential ||
+		activeSource != string(ActiveSourceTemporary) || activePlaylistID.Valid ||
+		activeSnapshotID.Valid)
+	if len(items) == 0 && !stateNeedsReset {
+		if err := tx.Commit(); err != nil {
+			return nil, false, err
+		}
+		return nil, false, nil
+	}
+	if _, err := tx.Exec(
+		`DELETE FROM room_music_box_queue WHERE room_id = ?`,
+		roomID,
+	); err != nil {
+		return nil, false, err
+	}
+	if _, err := tx.Exec(
+		`UPDATE room_music_box_state
+		 SET state = 'stopped', current_item_id = NULL, position_ms = 0,
+		     revision = revision + 1, playback_mode = 'sequential',
+		     active_source_type = 'temporary', active_playlist_id = NULL,
+		     active_playlist_name = NULL, active_playlist_owner_id = NULL,
+		     active_playlist_created_at = 0, active_snapshot_id = NULL,
+		     updated_at = ?
+		 WHERE room_id = ?`,
+		nowMillis(), roomID,
+	); err != nil {
+		return nil, false, err
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, false, err
+	}
+	return items, true, nil
+}
+
+func (s *store) listMusicRoomIDs() ([]string, error) {
+	rows, err := s.db.Query(
+		`SELECT room_id FROM room_music_box_state
+		 UNION
+		 SELECT room_id FROM room_music_box_queue
+		 ORDER BY room_id`,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	roomIDs := make([]string, 0)
+	for rows.Next() {
+		var roomID string
+		if err := rows.Scan(&roomID); err != nil {
+			return nil, err
+		}
+		roomIDs = append(roomIDs, roomID)
+	}
+	return roomIDs, rows.Err()
 }
 
 // clearAllQueues is retained for explicit maintenance and legacy store tests.

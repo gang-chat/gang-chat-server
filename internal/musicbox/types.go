@@ -8,14 +8,13 @@
 //
 // Pipeline:
 //
-//	enqueue ──▶ transcode worker pool ──▶ .ogg on disk
-//	                                          │
-//	      player (one per active room) ◀──────┘
-//	          ConnectToRoom + PublishTrack(Opus), reads pages from disk,
-//	          pause/resume by gating the read loop.
+//	enqueue -> bounded prefetch -> shared Opus cache -> room player
 //
-// The queue is bounded by total transcoded bytes per room (config), not item
-// count: adding a track that would exceed the cap is rejected.
+// The player publishes one LiveKit audio track per active room. Prepared media
+// is keyed by source, track ID, and encoding settings so rooms can reuse the
+// same artifact. Active readers hold leases while the global LRU reclaims old
+// files. Temporary request queues also have an explicit item limit, while the
+// per-room byte limit continues to bound the ready media referenced by a room.
 package musicbox
 
 // QueueStatus is the lifecycle of a queued track's audio file.
