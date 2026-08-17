@@ -662,3 +662,65 @@ func TestClearTemporaryPlaylistKeepsSavedSnapshotsAndIsIdempotent(t *testing.T) 
 		t.Fatalf("retry revision = %d, want %d", retried.Revision, updated.Revision)
 	}
 }
+
+func TestControlActionRevisionGuardPolicy(t *testing.T) {
+	transportActions := []string{
+		"play",
+		"resume",
+		"pause",
+		"skip",
+		"next",
+		"previous",
+		"play_now",
+		"stop",
+	}
+	for _, action := range transportActions {
+		if controlActionRequiresRevisionGuard(action) {
+			t.Fatalf("transport action %q unexpectedly requires a revision", action)
+		}
+	}
+	for _, action := range []string{"clear_temporary_playlist", "set_mode"} {
+		if !controlActionRequiresRevisionGuard(action) {
+			t.Fatalf("structural action %q must require a revision", action)
+		}
+	}
+}
+
+func TestTransportControlIgnoresStaleClientRevision(t *testing.T) {
+	store := newTestStore(t)
+	state, err := store.ensureState("r1")
+	if err != nil {
+		t.Fatalf("ensure state: %v", err)
+	}
+	staleRevision := state.Revision
+	state.Revision++
+	if err := store.saveState(*state); err != nil {
+		t.Fatalf("advance revision: %v", err)
+	}
+	manager := &Manager{
+		cfg:          Config{Enabled: true},
+		store:        store,
+		players:      map[string]*player{},
+		seenCommands: map[string]map[string]int64{},
+		playCursors:  map[string]playCursor{},
+	}
+
+	if err := manager.ApplyControl(
+		"r1",
+		"pause",
+		"",
+		"pause-stale-client",
+		&staleRevision,
+	); err != nil {
+		t.Fatalf("stale transport control: %v", err)
+	}
+	if err := manager.ApplyControl(
+		"r1",
+		"set_mode",
+		string(ModeRepeatOne),
+		"mode-stale-client",
+		&staleRevision,
+	); !errors.Is(err, ErrRevisionConflict) {
+		t.Fatalf("stale structural control error = %v, want ErrRevisionConflict", err)
+	}
+}

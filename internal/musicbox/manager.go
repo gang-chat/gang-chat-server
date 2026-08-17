@@ -819,9 +819,8 @@ func (m *Manager) Control(roomID, action string) error {
 	return m.ApplyControl(roomID, action, "", "", nil)
 }
 
-// ApplyControl serializes a command, optionally rejects an obsolete client
-// revision, and remembers command IDs long enough to make HTTP retries
-// idempotent.
+// ApplyControl serializes a command, revision-guards snapshot-dependent edits,
+// and remembers command IDs long enough to make HTTP retries idempotent.
 func (m *Manager) ApplyControl(
 	roomID, action, mode, commandID string,
 	expectedRevision *int64,
@@ -837,9 +836,8 @@ func (m *Manager) ApplyControl(
 }
 
 // ApplyItemControl extends ApplyControl for commands that target a specific
-// queue item. Keeping the target inside the same serialized, revision-checked
-// command path preserves idempotency across client retries and concurrent
-// controllers.
+// queue item. Keeping the target inside the same serialized command path
+// preserves idempotency across client retries and concurrent controllers.
 func (m *Manager) ApplyItemControl(
 	roomID, action, itemID, mode, commandID string,
 	expectedRevision *int64,
@@ -879,7 +877,7 @@ func (m *Manager) ApplyItemControl(
 			return nil
 		}
 	}
-	if expectedRevision != nil {
+	if expectedRevision != nil && controlActionRequiresRevisionGuard(action) {
 		st, err := m.store.getState(roomID)
 		if err != nil {
 			return err
@@ -945,6 +943,20 @@ func (m *Manager) ApplyItemControl(
 		m.mu.Unlock()
 	}
 	return nil
+}
+
+// Transport commands intentionally resolve against the authoritative state
+// after acquiring the room control lock. Realtime preparation and playback
+// events can legitimately advance the revision between a client's render and
+// click, so rejecting those commands as stale would make play/pause/skip
+// unreliable. Structural edits keep optimistic concurrency protection.
+func controlActionRequiresRevisionGuard(action string) bool {
+	switch action {
+	case "clear_temporary_playlist", "set_mode":
+		return true
+	default:
+		return false
+	}
 }
 
 // clearTemporaryQueue removes the room request queue while preserving saved
