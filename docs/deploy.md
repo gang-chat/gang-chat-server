@@ -76,4 +76,4 @@ sudo systemctl start coturn
 | 7880 | TCP | LiveKit 信令 + 后端 API |
 | 7881 | TCP | ICE TCP 备用 |
 | 3478 | UDP | STUN 探测 |
-| 50000-50100 | UDP | ICE 媒体直连 |
+| 50000-50500 | UDP | ICE 媒体直连 |
