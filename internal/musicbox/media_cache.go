@@ -16,6 +16,10 @@ import (
 const (
 	defaultBroadcastCacheMaxBytes int64 = 2 << 30
 	broadcastPrefetchWindow             = 3
+	// staleTempFileAge is how old an unfinished transcode's temporary file must
+	// be before startup removes it. It exceeds process's 10-minute timeout, so
+	// a file another instance is still writing during a rolling restart stays.
+	staleTempFileAge = 15 * time.Minute
 )
 
 // broadcastCacheKey is stable across rooms and queue-row lifetimes. Encoding
@@ -115,6 +119,30 @@ func (m *Manager) prepareBroadcastMedia(
 		return nil, "", fmt.Errorf("publish broadcast cache: %w", err)
 	}
 	return result, dst, nil
+}
+
+// removeStaleTempFiles deletes temporary transcode outputs ("<name>.tmp-<id>")
+// that a process stopped mid-transcode left in dir. Cache cleanup never sees
+// them, since it only counts finished files. It returns how many it removed.
+func removeStaleTempFiles(dir string, olderThan time.Duration, now time.Time) int {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return 0
+	}
+	removed := 0
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.Contains(entry.Name(), ".tmp-") {
+			continue
+		}
+		info, err := entry.Info()
+		if err != nil || now.Sub(info.ModTime()) < olderThan {
+			continue
+		}
+		if os.Remove(filepath.Join(dir, entry.Name())) == nil {
+			removed++
+		}
+	}
+	return removed
 }
 
 // acquireMediaLease protects a file from LRU cleanup for the complete period
@@ -264,9 +292,13 @@ func (m *Manager) releaseQueueMedia(items []*QueueItem) {
 	go m.cleanupBroadcastCache("")
 }
 
-// prefetchWindow returns at most current+next-two rows in actual playback
+// prefetchWindow returns the current row plus the next two in actual playback
 // order. It is pure so queue edits, wrap and shuffle boundaries can be tested
 // without starting download goroutines.
+//
+// Failed rows are skipped without taking a slot: the player skips them too,
+// and counting them would let a run of failures hide every pending row behind
+// it, so nothing after them would ever be downloaded.
 func prefetchWindow(
 	items []*QueueItem,
 	currentItemID string,
@@ -316,34 +348,62 @@ func prefetchWindow(
 			}
 			index %= len(ordered)
 		}
+		if ordered[index].Status == StatusFailed {
+			continue
+		}
 		window = append(window, ordered[index])
 	}
 	return window
 }
 
-func (m *Manager) nextPendingPrefetch(roomID string, st *RoomState) (*QueueItem, error) {
-	scope, snapshotID := playbackScope(st)
-	items, err := m.store.listScopedQueue(roomID, scope, snapshotID)
-	if err != nil {
-		return nil, err
+// preparedBytes is what the per-room byte cap limits: audio already prepared
+// for the songs about to play. Songs that finished playing stay cached for
+// replay but no longer count, so a long session can't fill the cap with
+// history and stop every later download.
+func preparedBytes(window []*QueueItem) int64 {
+	var total int64
+	for _, item := range window {
+		if item.Status == StatusReady {
+			total += item.FileSizeBytes
+		}
 	}
+	return total
+}
+
+func firstPendingItem(window []*QueueItem) *QueueItem {
+	for _, item := range window {
+		if item.Status == StatusPending {
+			return item
+		}
+	}
+	return nil
+}
+
+// upcomingItems returns the room's prefetch window from its already-loaded
+// active queue.
+func (m *Manager) upcomingItems(roomID string, st *RoomState, items []*QueueItem) []*QueueItem {
+	scope, snapshotID := playbackScope(st)
 	mode := ModeSequential
 	currentItemID := ""
 	if st != nil {
 		mode = NormalizePlaybackMode(string(st.PlaybackMode))
 		currentItemID = st.CurrentItemID
 	}
-	for _, item := range prefetchWindow(
+	return prefetchWindow(
 		items,
 		currentItemID,
 		m.cursorAfter(roomID, scope, snapshotID),
 		mode,
 		roomID,
 		broadcastPrefetchWindow,
-	) {
-		if item.Status == StatusPending {
-			return item, nil
-		}
+	)
+}
+
+func (m *Manager) loadUpcomingItems(roomID string, st *RoomState) ([]*QueueItem, error) {
+	scope, snapshotID := playbackScope(st)
+	items, err := m.store.listScopedQueue(roomID, scope, snapshotID)
+	if err != nil {
+		return nil, err
 	}
-	return nil, nil
+	return m.upcomingItems(roomID, st, items), nil
 }

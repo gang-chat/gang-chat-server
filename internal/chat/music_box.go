@@ -599,7 +599,7 @@ func (h *Handler) musicBoxStatePayload(roomID, actorID string) gin.H {
 	if err != nil {
 		return gin.H{"enabled": h.MusicBox.Enabled()}
 	}
-	used, capBytes := h.MusicBox.RoomUsage(roomID)
+	used, capBytes := h.MusicBox.RoomUsage(roomID, st, items)
 	allItems := make([]*musicbox.QueueItem, 0, len(items)+len(temporaryItems))
 	allItems = append(allItems, items...)
 	allItems = append(allItems, temporaryItems...)

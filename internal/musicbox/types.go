@@ -14,7 +14,7 @@
 // is keyed by source, track ID, and encoding settings so rooms can reuse the
 // same artifact. Active readers hold leases while the global LRU reclaims old
 // files. Temporary request queues also have an explicit item limit, while the
-// per-room byte limit continues to bound the ready media referenced by a room.
+// per-room byte limit bounds the media prepared for a room's upcoming songs.
 package musicbox
 
 // QueueStatus is the lifecycle of a queued track's audio file.

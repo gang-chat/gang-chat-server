@@ -76,6 +76,8 @@ func newTestStore(t *testing.T) *store {
 			active_playlist_owner_id VARCHAR(128),
 			active_playlist_created_at BIGINT NOT NULL DEFAULT 0,
 			active_snapshot_id VARCHAR(128),
+			play_cursor_scope VARCHAR(32), play_cursor_snapshot_id VARCHAR(128),
+			play_cursor_after_sort BIGINT NOT NULL DEFAULT -1,
 			updated_at BIGINT NOT NULL) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
 		`INSERT INTO users (id) VALUES ('u1')`,
 		`INSERT INTO rooms (id) VALUES ('r1')`,
@@ -136,28 +138,6 @@ func add(t *testing.T, s *store, id string, sort int64) *QueueItem {
 		t.Fatalf("insert %s: %v", id, err)
 	}
 	return it
-}
-
-func TestRoomReadyBytesCountsReadyAndDownloading(t *testing.T) {
-	s := newTestStore(t)
-	add(t, s, "a", 10) // pending, not counted
-	add(t, s, "b", 20)
-	add(t, s, "c", 30)
-
-	if err := s.markReady("b", "/tmp/b.ogg", 1000, 0); err != nil {
-		t.Fatalf("markReady: %v", err)
-	}
-	if err := s.setStatus("c", StatusDownloading); err != nil {
-		t.Fatalf("setStatus: %v", err)
-	}
-	// downloading items have 0 bytes until ready, so only b's 1000 counts.
-	got, err := s.roomReadyBytes("r1")
-	if err != nil {
-		t.Fatalf("roomReadyBytes: %v", err)
-	}
-	if got != 1000 {
-		t.Errorf("roomReadyBytes = %d, want 1000", got)
-	}
 }
 
 func TestFirstPlayableSkipsNonReadyAndOrders(t *testing.T) {
@@ -619,5 +599,48 @@ func TestProvisionalDurationFillsUnknownAndIsReplacedWhenReady(t *testing.T) {
 	}
 	if got := duration("unknown"); got != 249500 {
 		t.Fatalf("ready duration = %d, want measured 249500", got)
+	}
+}
+
+func TestResetInterruptedDownloadsReturnsRowsToPending(t *testing.T) {
+	s := newTestStore(t)
+	add(t, s, "interrupted", 10)
+	add(t, s, "ready", 20)
+	add(t, s, "failed", 30)
+	add(t, s, "pending", 40)
+	if err := s.setStatus("interrupted", StatusDownloading); err != nil {
+		t.Fatalf("set downloading: %v", err)
+	}
+	if err := s.markReady("ready", "/tmp/ready.ogg", 10, 1000); err != nil {
+		t.Fatalf("mark ready: %v", err)
+	}
+	if err := s.markFailed("failed", "upstream 403"); err != nil {
+		t.Fatalf("mark failed: %v", err)
+	}
+
+	reset, err := s.resetInterruptedDownloads()
+	if err != nil {
+		t.Fatalf("reset interrupted downloads: %v", err)
+	}
+	if reset != 1 {
+		t.Fatalf("reset rows = %d, want 1", reset)
+	}
+	if inflight, err := s.countDownloading("r1"); err != nil || inflight != 0 {
+		t.Fatalf("downloads in flight = (%d, %v), want 0", inflight, err)
+	}
+	want := map[string]QueueStatus{
+		"interrupted": StatusPending,
+		"ready":       StatusReady,
+		"failed":      StatusFailed,
+		"pending":     StatusPending,
+	}
+	for id, status := range want {
+		item, err := s.getItem(id)
+		if err != nil {
+			t.Fatalf("get %s: %v", id, err)
+		}
+		if item.Status != status {
+			t.Fatalf("%s status = %q, want %q", id, item.Status, status)
+		}
 	}
 }
