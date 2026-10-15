@@ -52,9 +52,6 @@ type Config struct {
 	MusicBoxCompactProgressOnly        bool     `json:"music_box_compact_progress_only"`
 	MusicBoxEmptyRoomGraceSeconds      int64    `json:"music_box_empty_room_grace_seconds"`
 
-	QQMusicBaseURL  string `json:"qqmusic_base_url"`
-	QQMusicPassword string `json:"qqmusic_password"`
-
 	ResendAPIBaseURL string `json:"resend_api_base_url"`
 	ResendAPIKey     string `json:"resend_api_key"`
 	EmailFrom        string `json:"email_from"`

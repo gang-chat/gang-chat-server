@@ -45,16 +45,6 @@ func main() {
 
 	bus := eventbus.New()
 
-	// QQ音乐 is an optional source. Its availability must never prevent the
-	// chat API from starting; when its startup probe fails, the manager receives
-	// a nil client and exposes the remaining music sources normally.
-	qqClient := initOptionalQQMusic(
-		cfg.QQMusicBaseURL,
-		cfg.QQMusicPassword,
-		defaultQQMusicStartupTimeout,
-		log.Printf,
-	)
-
 	// Music box: server-side download/transcode/broadcast of room music. It
 	// needs LiveKit to publish a bot track, so it's only enabled when LiveKit
 	// is configured. The token func issues a publish-only token for the bot.
@@ -70,7 +60,6 @@ func main() {
 		EmptyRoomGracePeriod: time.Duration(cfg.MusicBoxEmptyRoomGraceSeconds) * time.Second,
 		LiveKitHost:          cfg.LiveKitHost,
 		Enabled:              cfg.LiveKitAPIKey != "" && cfg.LiveKitAPISecret != "",
-		QQ:                   qqClient,
 	}, func(roomID, identity string) (string, error) {
 		return livekithandler.GenerateJoinToken(livekithandler.TokenParams{
 			APIKey:       cfg.LiveKitAPIKey,

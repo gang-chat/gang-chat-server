@@ -17,13 +17,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/zhuangkaiyi/gang-chat/server/internal/gdmusic"
-	"github.com/zhuangkaiyi/gang-chat/server/internal/qqmusic"
 )
-
-// SourceTencent routes search and URL resolution to the self-hosted QQ音乐
-// service instead of the GD API. It matches the source value the client sends
-// for QQ音乐 tracks.
-const SourceTencent = "tencent"
 
 const defaultGDSource = "netease"
 
@@ -70,10 +64,6 @@ type Config struct {
 	// EmptyRoomGracePeriod delays destructive transient-state cleanup after the
 	// last visible voice participant leaves. A non-positive value uses 10m.
 	EmptyRoomGracePeriod time.Duration
-
-	// QQ is the optional self-hosted QQ音乐 client. nil disables the tencent
-	// source; search/resolve for it then return an error.
-	QQ *qqmusic.Client
 }
 
 // Manager owns all room music boxes: the queue store, the transcode pool, the
@@ -83,7 +73,6 @@ type Manager struct {
 	store   *store
 	tc      *transcoder
 	gd      *gdmusic.Client
-	qq      *qqmusic.Client // nil when QQ音乐 integration is disabled
 	search  *searchCoordinator
 	tokenFn TokenFunc
 
@@ -153,7 +142,6 @@ func NewManager(db *sql.DB, cfg Config, tokenFn TokenFunc, onRoomChanged func(st
 		store:                &store{db: db},
 		tc:                   newTranscoder(cfg.FFmpegPath, cfg.OpusBitrate, cfg.TranscodeWorkers),
 		gd:                   gd,
-		qq:                   cfg.QQ,
 		tokenFn:              tokenFn,
 		onRoomChanged:        onRoomChanged,
 		players:              map[string]*player{},
@@ -240,9 +228,6 @@ func (m *Manager) recordTrackDuration(source, trackID string, durationMS int64) 
 // GD exposes the underlying GD API client (used for album art lookups).
 func (m *Manager) GD() *gdmusic.Client { return m.gd }
 
-// QQEnabled reports whether the QQ音乐 (tencent) source is available.
-func (m *Manager) QQEnabled() bool { return m.qq != nil }
-
 // SearchTrack is one normalized search hit across sources.
 type SearchTrack struct {
 	TrackID string
@@ -251,10 +236,9 @@ type SearchTrack struct {
 	Source  string
 }
 
-// Search routes a keyword search to the right backend by source. The tencent
-// source uses the self-hosted QQ音乐 service; every other source (or empty,
-// meaning the GD default) uses the GD API. Results are normalized so callers
-// don't branch on source.
+// Search runs a keyword search through the GD API for the given source (empty
+// means the GD default). Results are normalized so callers don't branch on
+// source.
 func (m *Manager) Search(ctx context.Context, source, keyword string, count, page int) ([]SearchTrack, error) {
 	if m.search == nil {
 		return m.searchUpstream(ctx, source, keyword, count, page)
@@ -263,20 +247,6 @@ func (m *Manager) Search(ctx context.Context, source, keyword string, count, pag
 }
 
 func (m *Manager) searchUpstream(ctx context.Context, source, keyword string, count, page int) ([]SearchTrack, error) {
-	if source == SourceTencent {
-		if m.qq == nil {
-			return nil, fmt.Errorf("musicbox: QQ音乐 source is not configured")
-		}
-		hits, err := m.qq.Search(ctx, keyword, count, page)
-		if err != nil {
-			return nil, err
-		}
-		out := make([]SearchTrack, 0, len(hits))
-		for _, h := range hits {
-			out = append(out, SearchTrack{TrackID: h.ID, Name: h.Name, Artists: h.Artists, Source: SourceTencent})
-		}
-		return out, nil
-	}
 	hits, err := m.gd.Search(ctx, source, keyword, count, page)
 	if err != nil {
 		return nil, err
@@ -297,18 +267,9 @@ type resolvedTrack struct {
 	EstimatedDurationMS int64
 }
 
-// resolveTrack resolves a playable source URL for a queue item by source.
-// The tencent source resolves a fresh OGG_192 link via the QQ音乐 service at
-// this moment (vkey is short-lived, so we resolve just before transcoding);
-// other sources use the GD API.
+// resolveTrack resolves a playable source URL for a queue item through the GD
+// API.
 func (m *Manager) resolveTrack(ctx context.Context, item *QueueItem) (resolvedTrack, error) {
-	if item.Source == SourceTencent {
-		if m.qq == nil {
-			return resolvedTrack{}, fmt.Errorf("musicbox: QQ音乐 source is not configured")
-		}
-		url, err := m.qq.TrackURL(ctx, item.TrackID)
-		return resolvedTrack{URL: url}, err
-	}
 	resolved, err := m.gd.TrackURL(ctx, item.Source, item.TrackID, m.cfg.DownloadBitrate)
 	if err != nil {
 		return resolvedTrack{}, err
