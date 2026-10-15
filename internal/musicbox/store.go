@@ -27,6 +27,12 @@ var nextGenerationStateColumns = []stateColumn{
 	{name: "active_playlist_owner_id", definition: "VARCHAR(128) NULL"},
 	{name: "active_playlist_created_at", definition: "BIGINT NOT NULL DEFAULT 0"},
 	{name: "active_snapshot_id", definition: "VARCHAR(128) NULL"},
+	// The play cursor (see Manager.playCursor) is written only by
+	// savePlayCursor, never by saveState, so a concurrent full-state save
+	// can't revert a newer cursor.
+	{name: "play_cursor_scope", definition: "VARCHAR(32) NULL"},
+	{name: "play_cursor_snapshot_id", definition: "VARCHAR(128) NULL"},
+	{name: "play_cursor_after_sort", definition: "BIGINT NOT NULL DEFAULT -1"},
 }
 
 var nextGenerationQueueColumns = []stateColumn{
@@ -372,21 +378,6 @@ func (s *store) countTemporaryQueue(roomID string) (int, error) {
 	return count, err
 }
 
-// roomBytes sums transcoded bytes already counted against a room's cap:
-// ready files plus an estimate reserved for in-flight (pending/downloading)
-// items. Since pending items have no file yet, only ready bytes are real;
-// callers add the projected size of a new item before comparing to the cap.
-func (s *store) roomReadyBytes(roomID string) (int64, error) {
-	var total sql.NullInt64
-	err := s.db.QueryRow(
-		`SELECT COALESCE(SUM(file_size_bytes), 0) FROM room_music_box_queue
-		 WHERE room_id = ? AND status IN ('ready', 'downloading')`, roomID).Scan(&total)
-	if err != nil {
-		return 0, err
-	}
-	return total.Int64, nil
-}
-
 // countDownloading returns how many items are mid-download in a room. The
 // scheduler keeps this at most 1 so the on-disk total stays predictable.
 func (s *store) countDownloading(roomID string) (int, error) {
@@ -452,6 +443,24 @@ func (s *store) nextSortOrder(roomID string) (int64, error) {
 		return 10, nil
 	}
 	return max.Int64 + 10, nil
+}
+
+// resetInterruptedDownloads returns rows a previous process was still
+// downloading to pending. Nothing else clears that status, and a room with a
+// download in flight never starts another, so a restart mid-download would
+// otherwise stop the room's downloads for good. During a rolling restart the
+// old instance may still finish one of them; a duplicate download is
+// harmless, since publishing into the cache tolerates losing the race.
+func (s *store) resetInterruptedDownloads() (int64, error) {
+	result, err := s.db.Exec(
+		`UPDATE room_music_box_queue SET status = 'pending', updated_at = ?
+		 WHERE status = 'downloading'`,
+		nowMillis(),
+	)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
 }
 
 func (s *store) setStatus(id string, status QueueStatus) error {
@@ -743,6 +752,8 @@ func (s *store) expireRoomPlayback(roomID string) ([]*QueueItem, bool, error) {
 		     active_source_type = 'temporary', active_playlist_id = NULL,
 		     active_playlist_name = NULL, active_playlist_owner_id = NULL,
 		     active_playlist_created_at = 0, active_snapshot_id = NULL,
+		     play_cursor_scope = NULL, play_cursor_snapshot_id = NULL,
+		     play_cursor_after_sort = -1,
 		     updated_at = ?
 		 WHERE room_id = ?`,
 		nowMillis(), roomID,
@@ -951,6 +962,50 @@ func (s *store) saveState(st RoomState) error {
 		ns(st.ActivePlaylistOwnerID), st.ActivePlaylistCreatedAt,
 		ns(st.ActiveSnapshotID), nowMillis())
 	return err
+}
+
+// savePlayCursor persists the room's playback position. A missing state row
+// is created with ensureState's defaults; an existing one has only its cursor
+// columns updated.
+func (s *store) savePlayCursor(roomID string, cursor playCursor) error {
+	_, err := s.db.Exec(
+		`INSERT INTO room_music_box_state
+		 (room_id, state, position_ms, volume, revision, playback_mode,
+		  active_source_type, play_cursor_scope, play_cursor_snapshot_id,
+		  play_cursor_after_sort, updated_at)
+		 VALUES (?, 'stopped', 0, 100, 0, 'sequential', 'temporary', ?, ?, ?, ?)
+		 ON DUPLICATE KEY UPDATE
+		   play_cursor_scope = VALUES(play_cursor_scope),
+		   play_cursor_snapshot_id = VALUES(play_cursor_snapshot_id),
+		   play_cursor_after_sort = VALUES(play_cursor_after_sort)`,
+		roomID, ns(string(cursor.scope)), ns(cursor.snapshotID),
+		cursor.afterSort, nowMillis(),
+	)
+	return err
+}
+
+// loadPlayCursor returns the persisted playback position. A room without one
+// gets a cursor with no scope, which matches no queue.
+func (s *store) loadPlayCursor(roomID string) (playCursor, error) {
+	var scope, snapshotID sql.NullString
+	cursor := playCursor{afterSort: -1}
+	err := s.db.QueryRow(
+		`SELECT play_cursor_scope, play_cursor_snapshot_id, play_cursor_after_sort
+		 FROM room_music_box_state WHERE room_id = ?`,
+		roomID,
+	).Scan(&scope, &snapshotID, &cursor.afterSort)
+	if err == sql.ErrNoRows {
+		return playCursor{afterSort: -1}, nil
+	}
+	if err != nil {
+		return playCursor{}, err
+	}
+	if !scope.Valid {
+		return playCursor{afterSort: -1}, nil
+	}
+	cursor.scope = QueueScope(scope.String)
+	cursor.snapshotID = snapshotID.String
+	return cursor, nil
 }
 
 // resetPlaybackOnStartup preserves the queue and prepared media while making

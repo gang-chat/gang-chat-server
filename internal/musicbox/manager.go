@@ -177,11 +177,23 @@ type playCursor struct {
 }
 
 // resetOnStartup preserves queue/cache data and only restores a safe silent
-// playback state.
+// playback state. Downloads a previous process left unfinished are made
+// retryable, and their temporary files removed.
 func (m *Manager) resetOnStartup() {
 	_ = m.store.resetPlaybackOnStartup()
+	if reset, err := m.store.resetInterruptedDownloads(); err != nil {
+		log.Printf("musicbox: reset interrupted downloads: %v", err)
+	} else if reset > 0 {
+		log.Printf("musicbox: returned %d interrupted downloads to pending", reset)
+	}
 	if m.cfg.Dir != "" {
 		_ = os.MkdirAll(m.cfg.Dir, 0o755)
+		now := time.Now()
+		removed := removeStaleTempFiles(m.broadcastCacheDir(), staleTempFileAge, now) +
+			removeStaleTempFiles(filepath.Join(m.cfg.Dir, "previews"), staleTempFileAge, now)
+		if removed > 0 {
+			log.Printf("musicbox: removed %d unfinished transcode files", removed)
+		}
 	}
 	go m.cleanupBroadcastCache("")
 }
@@ -629,13 +641,40 @@ func (m *Manager) cursorAfter(
 	scope QueueScope,
 	snapshotID string,
 ) int64 {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	cursor, ok := m.playCursors[roomID]
-	if !ok || cursor.scope != scope || cursor.snapshotID != snapshotID {
+	cursor := m.playCursor(roomID)
+	if cursor.scope != scope || cursor.snapshotID != snapshotID {
 		return -1
 	}
 	return cursor.afterSort
+}
+
+// playCursor returns where the room's playback has got to. The first lookup
+// after a restart loads the persisted cursor; without it, downloads and
+// playback would start over from the top of the queue, which is mostly songs
+// already played. The database read happens outside m.mu.
+func (m *Manager) playCursor(roomID string) playCursor {
+	m.mu.Lock()
+	cursor, ok := m.playCursors[roomID]
+	m.mu.Unlock()
+	if ok || m.store == nil {
+		return cursor
+	}
+	loaded, err := m.store.loadPlayCursor(roomID)
+	if err != nil {
+		return playCursor{afterSort: -1}
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if current, ok := m.playCursors[roomID]; ok {
+		return current
+	}
+	if m.playCursors == nil {
+		m.playCursors = map[string]playCursor{}
+	}
+	// Cached even when nothing was persisted, so a room without a cursor
+	// doesn't cost a query on every lookup.
+	m.playCursors[roomID] = loaded
+	return loaded
 }
 
 func (m *Manager) setCursor(
@@ -644,11 +683,20 @@ func (m *Manager) setCursor(
 	snapshotID string,
 	afterSort int64,
 ) {
-	m.mu.Lock()
-	m.playCursors[roomID] = playCursor{
+	cursor := playCursor{
 		scope: scope, snapshotID: snapshotID, afterSort: afterSort,
 	}
+	m.mu.Lock()
+	if m.playCursors == nil {
+		m.playCursors = map[string]playCursor{}
+	}
+	m.playCursors[roomID] = cursor
 	m.mu.Unlock()
+	if m.store != nil {
+		if err := m.store.savePlayCursor(roomID, cursor); err != nil {
+			log.Printf("musicbox: room %s save play cursor: %v", roomID, err)
+		}
+	}
 }
 
 func (m *Manager) bumpRevision(roomID string) {
@@ -676,7 +724,7 @@ type EnqueueParams struct {
 // Enqueue appends a track to a room's queue. The byte cap (MaxBytesPerRoom)
 // governs downloaded cache data independently from the 200-item request-queue
 // cap. A newly enqueued track starts as pending and is picked up by pumpRoom
-// once there's room on disk.
+// once it is among the next songs to play.
 func (m *Manager) Enqueue(ctx context.Context, p EnqueueParams) (*QueueItem, error) {
 	if !m.Enabled() {
 		return nil, ErrUnavailable
@@ -709,6 +757,12 @@ func (m *Manager) Enqueue(ctx context.Context, p EnqueueParams) (*QueueItem, err
 	if err != nil {
 		return nil, err
 	}
+	// A request always joins after the playback position. Clearing the queue
+	// or removing played songs lowers the highest sort order below the cursor,
+	// and a request sorted before the cursor would never download or play.
+	if after := m.cursorAfter(p.RoomID, QueueScopeTemporary, ""); sortOrder <= after {
+		sortOrder = after + 10
+	}
 	item, err := m.store.insertItem(QueueItem{
 		ID:            "mbx_" + randomID(),
 		RoomID:        p.RoomID,
@@ -731,12 +785,13 @@ func (m *Manager) Enqueue(ctx context.Context, p EnqueueParams) (*QueueItem, err
 	return item, nil
 }
 
-// pumpRoom starts downloading the next pending track(s) for a room while there
-// is room under the byte cap. It downloads at most one track at a time per room
-// (a track in flight reserves no real bytes until it finishes, so we serialize
-// to keep the on-disk total predictable). An empty room (zero bytes used) is
-// always allowed to start one track, so a single track larger than the cap can
-// still play rather than being stuck forever.
+// pumpRoom starts downloading the next pending track for a room. It looks only
+// at the current song and the next two (see prefetchWindow), downloads at most
+// one track at a time per room (a track in flight reserves no real bytes until
+// it finishes, so we serialize to keep the on-disk total predictable), and
+// stops while the songs already prepared in that window reach the byte cap.
+// A window with nothing prepared may always start one track, so a single track
+// larger than the cap can still play rather than being stuck forever.
 func (m *Manager) pumpRoom(roomID string) {
 	if !m.Enabled() {
 		return
@@ -749,18 +804,16 @@ func (m *Manager) pumpRoom(roomID string) {
 	if err != nil || inflight > 0 {
 		return
 	}
-	used, err := m.store.roomReadyBytes(roomID)
+	st, _ := m.store.getState(roomID)
+	upcoming, err := m.loadUpcomingItems(roomID, st)
 	if err != nil {
 		return
 	}
-	// Stop pumping once at/over the cap, but always allow the first track in an
-	// empty room so an oversized single track isn't wedged.
-	if used >= m.cfg.MaxBytesPerRoom && used > 0 {
+	if used := preparedBytes(upcoming); used >= m.cfg.MaxBytesPerRoom && used > 0 {
 		return
 	}
-	st, _ := m.store.getState(roomID)
-	next, err := m.nextPendingPrefetch(roomID, st)
-	if err != nil || next == nil {
+	next := firstPendingItem(upcoming)
+	if next == nil {
 		return
 	}
 	// Reserve the slot by flipping to downloading under the pump lock, so a
@@ -781,6 +834,13 @@ func (m *Manager) process(itemID string) {
 
 	item, err := m.store.getItem(itemID)
 	if err != nil {
+		// A deleted row needs nothing. Any other row must not stay
+		// 'downloading': nothing else clears it, and the room would never start
+		// another download. The next pump retries it.
+		if !errors.Is(err, sql.ErrNoRows) {
+			log.Printf("musicbox: load queue item %s for download: %v", itemID, err)
+			_ = m.store.setStatus(itemID, StatusPending)
+		}
 		return
 	}
 	// Status is already 'downloading' (set by pumpRoom under its lock).
@@ -804,10 +864,13 @@ func (m *Manager) process(itemID string) {
 	// No post-transcode cap check: pumpRoom already gated this download on the
 	// cap before starting it, and we allow one in-flight track to push the room
 	// up to ~cap + one track. The cap simply prevents the *next* download from
-	// starting until space frees up (for example, an operator removes a stored
-	// queue item or a playlist snapshot is replaced).
+	// starting until earlier songs finish playing and leave the window.
 	if err := m.store.markReady(itemID, dst, res.SizeBytes, res.DurationMS); err != nil {
-		go m.pumpRoom(item.RoomID)
+		// Don't leave the row 'downloading' forever. Retrying is cheap: the
+		// next preparation finds the file in the cache. It waits for the next
+		// pump rather than looping on a failing database.
+		log.Printf("musicbox: mark queue item %s ready: %v", itemID, err)
+		_ = m.store.setStatus(itemID, StatusPending)
 		return
 	}
 	m.recordTrackDuration(item.Source, item.TrackID, res.DurationMS)
@@ -1156,8 +1219,14 @@ func (m *Manager) ensurePlayingItem(roomID string, preferred *QueueItem) error {
 			snapshotID,
 		)
 	}
-	if err != nil || first == nil {
+	if err != nil {
 		return err
+	}
+	if first == nil {
+		// Nothing is ready yet. Make sure the songs that would play next are
+		// downloading, so pressing play on a waiting queue isn't a no-op.
+		go m.pumpRoom(roomID)
+		return nil
 	}
 	token, err := m.tokenFn(roomID, botIdentity)
 	if err != nil {
@@ -1674,10 +1743,11 @@ func (m *Manager) TemporaryQueue(roomID string) ([]*QueueItem, error) {
 	return m.store.listScopedQueue(roomID, QueueScopeTemporary, "")
 }
 
-// RoomUsage returns bytes used and the cap, for surfacing to clients.
-func (m *Manager) RoomUsage(roomID string) (used, cap int64) {
-	used, _ = m.store.roomReadyBytes(roomID)
-	return used, m.cfg.MaxBytesPerRoom
+// RoomUsage returns the bytes counted against the room's cap (audio prepared
+// for the songs about to play) and the cap, for surfacing to clients. st and
+// items are the room's state and active queue as returned by State.
+func (m *Manager) RoomUsage(roomID string, st *RoomState, items []*QueueItem) (used, cap int64) {
+	return preparedBytes(m.upcomingItems(roomID, st, items)), m.cfg.MaxBytesPerRoom
 }
 
 func randomID() string {
