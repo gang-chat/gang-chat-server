@@ -522,3 +522,102 @@ func TestDeleteRoomItemDoesNotCrossRoomBoundary(t *testing.T) {
 		t.Fatalf("item should still exist: item=%+v err=%v", item, err)
 	}
 }
+
+func TestFirstPlayableInScopeIncludesOnlyStreamableDownloadingRows(t *testing.T) {
+	s := newTestStore(t)
+	add(t, s, "pending", 10)
+	add(t, s, "cold", 20)
+	add(t, s, "streaming", 30)
+	add(t, s, "ready", 40)
+	add(t, s, "failed", 50)
+	for id, status := range map[string]QueueStatus{
+		"cold":      StatusDownloading,
+		"streaming": StatusDownloading,
+		"failed":    StatusFailed,
+	} {
+		if err := s.setStatus(id, status); err != nil {
+			t.Fatalf("set %s status: %v", id, err)
+		}
+	}
+	if err := s.markReady("ready", "/tmp/ready.ogg", 10, 0); err != nil {
+		t.Fatalf("mark ready: %v", err)
+	}
+	streaming := func(item *QueueItem) bool { return item.ID == "streaming" }
+	everything := func(*QueueItem) bool { return true }
+
+	cases := []struct {
+		name   string
+		filter streamingFilter
+		first  string
+		last   string
+	}{
+		{name: "ready only", filter: nil, first: "ready", last: "ready"},
+		{name: "streamable row", filter: streaming, first: "streaming", last: "ready"},
+		// The filter is only consulted for downloading rows: pending and
+		// failed rows never become playable.
+		{name: "permissive filter", filter: everything, first: "cold", last: "ready"},
+	}
+	for _, tc := range cases {
+		first, err := s.firstPlayableInScope("r1", -1, QueueScopeTemporary, "", tc.filter)
+		if err != nil {
+			t.Fatalf("%s: first playable: %v", tc.name, err)
+		}
+		if first == nil || first.ID != tc.first {
+			t.Fatalf("%s: first playable = %+v, want %s", tc.name, first, tc.first)
+		}
+		last, err := s.lastPlayableBefore("r1", 60, QueueScopeTemporary, "", tc.filter)
+		if err != nil {
+			t.Fatalf("%s: last playable: %v", tc.name, err)
+		}
+		if last == nil || last.ID != tc.last {
+			t.Fatalf("%s: last playable = %+v, want %s", tc.name, last, tc.last)
+		}
+	}
+	before, err := s.lastPlayableBefore("r1", 40, QueueScopeTemporary, "", streaming)
+	if err != nil {
+		t.Fatalf("last playable before ready: %v", err)
+	}
+	if before == nil || before.ID != "streaming" {
+		t.Fatalf("last playable before ready = %+v, want streaming", before)
+	}
+}
+
+func TestProvisionalDurationFillsUnknownAndIsReplacedWhenReady(t *testing.T) {
+	s := newTestStore(t)
+	unknown := add(t, s, "unknown", 10)
+	known, err := s.insertItem(QueueItem{
+		ID: "known", RoomID: "r1", Source: "netease", TrackID: "tknown",
+		Title: "Known", AddedByUserID: "u1", SortOrder: 20, DurationMS: 180000,
+	})
+	if err != nil {
+		t.Fatalf("insert known: %v", err)
+	}
+	for _, item := range []*QueueItem{unknown, known} {
+		if err := s.setStatus(item.ID, StatusDownloading); err != nil {
+			t.Fatalf("set %s downloading: %v", item.ID, err)
+		}
+		if err := s.setProvisionalDuration(item.ID, 251904); err != nil {
+			t.Fatalf("provisional %s: %v", item.ID, err)
+		}
+	}
+	duration := func(id string) int64 {
+		t.Helper()
+		item, err := s.getItem(id)
+		if err != nil {
+			t.Fatalf("get %s: %v", id, err)
+		}
+		return item.DurationMS
+	}
+	if got := duration("unknown"); got != 251904 {
+		t.Fatalf("unknown duration = %d, want provisional 251904", got)
+	}
+	if got := duration("known"); got != 180000 {
+		t.Fatalf("known duration = %d, want 180000 kept", got)
+	}
+	if err := s.markReady("unknown", "/tmp/unknown.ogg", 10, 249500); err != nil {
+		t.Fatalf("mark ready: %v", err)
+	}
+	if got := duration("unknown"); got != 249500 {
+		t.Fatalf("ready duration = %d, want measured 249500", got)
+	}
+}

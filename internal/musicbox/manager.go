@@ -124,7 +124,14 @@ type Manager struct {
 	cacheMu        sync.Mutex
 	cacheLeases    map[string]int
 	cacheCleanupMu sync.Mutex
-	obs            observabilityCounters
+
+	// streams are in-flight transcodes keyed by their final cache path. A
+	// downloading row whose stream has written its first audio page can be
+	// played before the transcode finishes.
+	streamsMu sync.Mutex
+	streams   map[string]*mediaStream
+
+	obs observabilityCounters
 }
 
 const previewCacheMaxBytes int64 = 512 << 20
@@ -155,6 +162,7 @@ func NewManager(db *sql.DB, cfg Config, tokenFn TokenFunc, onRoomChanged func(st
 		emptyRoomTimers:      map[string]*time.Timer{},
 		emptyRoomGenerations: map[string]uint64{},
 		cacheLeases:          map[string]int{},
+		streams:              map[string]*mediaStream{},
 	}
 	m.search = newSearchCoordinator(m.searchUpstream)
 	// A restart preserves queues and prepared media, but resets every room to a
@@ -268,22 +276,52 @@ func (m *Manager) searchUpstream(ctx context.Context, source, keyword string, co
 	return out, nil
 }
 
-// resolveURL resolves a playable source URL for a queue item by source. The
-// tencent source resolves a fresh OGG_192 link via the QQ音乐 service at this
-// moment (vkey is short-lived, so we resolve just before transcoding); other
-// sources use the GD API.
-func (m *Manager) resolveURL(ctx context.Context, item *QueueItem) (string, error) {
+// resolvedTrack is an upstream audio URL plus what the resolver reported
+// about the file behind it.
+type resolvedTrack struct {
+	URL string
+	// EstimatedDurationMS is derived from the upstream file size and bitrate;
+	// 0 when the source doesn't report them.
+	EstimatedDurationMS int64
+}
+
+// resolveTrack resolves a playable source URL for a queue item by source.
+// The tencent source resolves a fresh OGG_192 link via the QQ音乐 service at
+// this moment (vkey is short-lived, so we resolve just before transcoding);
+// other sources use the GD API.
+func (m *Manager) resolveTrack(ctx context.Context, item *QueueItem) (resolvedTrack, error) {
 	if item.Source == SourceTencent {
 		if m.qq == nil {
-			return "", fmt.Errorf("musicbox: QQ音乐 source is not configured")
+			return resolvedTrack{}, fmt.Errorf("musicbox: QQ音乐 source is not configured")
 		}
-		return m.qq.TrackURL(ctx, item.TrackID)
+		url, err := m.qq.TrackURL(ctx, item.TrackID)
+		return resolvedTrack{URL: url}, err
 	}
 	resolved, err := m.gd.TrackURL(ctx, item.Source, item.TrackID, m.cfg.DownloadBitrate)
 	if err != nil {
-		return "", err
+		return resolvedTrack{}, err
 	}
-	return resolved.URL, nil
+	return resolvedTrack{
+		URL:                 resolved.URL,
+		EstimatedDurationMS: estimateDurationMS(resolved.SizeKB, resolved.Bitrate),
+	}, nil
+}
+
+func (m *Manager) resolveURL(ctx context.Context, item *QueueItem) (string, error) {
+	resolved, err := m.resolveTrack(ctx, item)
+	return resolved.URL, err
+}
+
+// estimateDurationMS converts GD's reported file size (KiB) and bitrate
+// (kbps) into a track length. It is close for constant-bitrate files and a
+// rough guess otherwise, so it is only shown until ffprobe measures the
+// transcoded file.
+func estimateDurationMS(sizeKB int64, bitrateKbps int) int64 {
+	if sizeKB <= 0 || bitrateKbps <= 0 {
+		return 0
+	}
+	// bits / (kbit/s) = milliseconds
+	return sizeKB * 1024 * 8 / int64(bitrateKbps)
 }
 
 // PreparePreview resolves and transcodes a track into the shared preview
@@ -795,6 +833,9 @@ func (m *Manager) process(itemID string) {
 			musicBoxPrepareErrorKind(err),
 		)
 		_ = m.store.markFailed(itemID, err.Error())
+		// A player streaming this transcode reads the failure from the stream
+		// itself, logs it, and advances; the row is failed by now.
+		m.retireStream(m.broadcastCachePath(item), item.ID)
 		m.bumpRevision(item.RoomID)
 		go m.pumpRoom(item.RoomID)
 		return
@@ -806,14 +847,21 @@ func (m *Manager) process(itemID string) {
 	// up to ~cap + one track. The cap simply prevents the *next* download from
 	// starting until space frees up (for example, an operator removes a stored
 	// queue item or a playlist snapshot is replaced).
-	if err := m.store.markReady(itemID, dst, res.SizeBytes, res.DurationMS); err != nil {
+	// markReady also replaces a provisional streaming duration with the
+	// measured one.
+	err = m.store.markReady(itemID, dst, res.SizeBytes, res.DurationMS)
+	// Only now that the row says ready may the finished stream be forgotten;
+	// until then it is what keeps the downloading row playable.
+	m.retireStream(dst, item.ID)
+	if err != nil {
 		go m.pumpRoom(item.RoomID)
 		return
 	}
 	m.recordTrackDuration(item.Source, item.TrackID, res.DurationMS)
 	m.cleanupBroadcastCache(dst)
 	m.bumpRevision(item.RoomID)
-	// A track is ready: make sure the room is playing it (no-op if already).
+	// A track is ready: make sure the room is playing it (no-op if already;
+	// usually streaming already started it).
 	m.ensurePlaying(item.RoomID)
 	// Try the next pending track (no-op if now at the cap).
 	go m.pumpRoom(item.RoomID)
@@ -1027,10 +1075,11 @@ func (m *Manager) clearTemporaryQueue(roomID string) error {
 	return nil
 }
 
-// playNow atomically replaces the current item with another ready item from
-// the active queue. While the request queue is actively playing, the selected
-// row moves directly after the interrupted row before playback switches. Saved
-// playlist snapshots keep their persisted order.
+// playNow atomically replaces the current item with another playable item
+// (ready, or streaming from an in-progress transcode) from the active queue.
+// While the request queue is actively playing, the selected row moves
+// directly after the interrupted row before playback switches. Saved playlist
+// snapshots keep their persisted order.
 // ApplyItemControl already holds the room control lock while this runs.
 func (m *Manager) playNow(roomID, itemID string) error {
 	st, err := m.store.getState(roomID)
@@ -1049,7 +1098,7 @@ func (m *Manager) playNow(roomID, itemID string) error {
 		(scope == QueueScopeSavedPlaylistSnapshot && item.SnapshotID != snapshotID) {
 		return ErrQueueItemNotFound
 	}
-	if item.Status != StatusReady {
+	if !m.ItemPlayable(item) {
 		return ErrQueueItemNotReady
 	}
 
@@ -1115,7 +1164,7 @@ func (m *Manager) play(roomID string, resumeOnly bool) error {
 }
 
 // ensurePlaying starts a player for the room if one isn't running and there's
-// at least one ready track. Safe to call repeatedly.
+// at least one playable track. Safe to call repeatedly.
 func (m *Manager) ensurePlaying(roomID string) error {
 	return m.ensurePlayingItem(roomID, nil)
 }
@@ -1154,6 +1203,7 @@ func (m *Manager) ensurePlayingItem(roomID string, preferred *QueueItem) error {
 			m.cursorAfter(roomID, scope, snapshotID),
 			scope,
 			snapshotID,
+			m.streamable,
 		)
 	}
 	if err != nil || first == nil {
@@ -1170,7 +1220,7 @@ func (m *Manager) ensurePlayingItem(roomID string, preferred *QueueItem) error {
 		func() { m.persistAndNotify(roomID) },
 		func() { m.persistAndNotifyForced(roomID) },
 		func() { m.heartbeat(roomID) },
-		func(item *QueueItem) func() { return m.acquireMediaLease(item) },
+		m.openBroadcastMedia,
 	)
 	m.mu.Lock()
 	m.players[roomID] = pl
@@ -1220,7 +1270,7 @@ func (m *Manager) nextItem(
 	scope, snapshotID := playbackScope(st)
 	if prev == nil {
 		if st != nil && st.CurrentItemID != "" {
-			if current, _ := m.store.getRoomItem(roomID, st.CurrentItemID); current != nil && current.Status == StatusReady {
+			if current, _ := m.store.getRoomItem(roomID, st.CurrentItemID); m.ItemPlayable(current) {
 				return current
 			}
 		}
@@ -1229,6 +1279,7 @@ func (m *Manager) nextItem(
 			m.cursorAfter(roomID, scope, snapshotID),
 			scope,
 			snapshotID,
+			m.streamable,
 		)
 		return item
 	}
@@ -1242,7 +1293,7 @@ func (m *Manager) nextItem(
 		}
 		ready := make([]*QueueItem, 0, len(items))
 		for _, item := range items {
-			if item.Status == StatusReady {
+			if m.ItemPlayable(item) {
 				ready = append(ready, item)
 			}
 		}
@@ -1271,6 +1322,7 @@ func (m *Manager) nextItem(
 			prev.SortOrder,
 			scope,
 			snapshotID,
+			m.streamable,
 		); item != nil {
 			return item
 		}
@@ -1284,13 +1336,14 @@ func (m *Manager) nextItem(
 		prev.SortOrder,
 		scope,
 		snapshotID,
+		m.streamable,
 	)
 	if err != nil {
 		return nil
 	}
 	if item == nil && mode == ModeRepeatAll {
 		m.setCursor(roomID, scope, snapshotID, -1)
-		item, _ = m.store.firstPlayableInScope(roomID, -1, scope, snapshotID)
+		item, _ = m.store.firstPlayableInScope(roomID, -1, scope, snapshotID, m.streamable)
 	} else if mode != ModeShuffle {
 		m.setCursor(roomID, scope, snapshotID, prev.SortOrder)
 		if scope == QueueScopeTemporary {
@@ -1531,7 +1584,7 @@ func (m *Manager) ActivatePlaylist(
 		if item == nil || item.QueueScope != QueueScopeTemporary {
 			return ErrQueueItemNotFound
 		}
-		if item.Status != StatusReady {
+		if !m.ItemPlayable(item) {
 			return ErrQueueItemNotReady
 		}
 		preferredTemporaryItem = item

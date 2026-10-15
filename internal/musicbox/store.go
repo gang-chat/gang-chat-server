@@ -471,6 +471,22 @@ func (s *store) markReady(id, filePath string, sizeBytes, durationMS int64) erro
 	return err
 }
 
+// setProvisionalDuration gives a downloading row an estimated length while it
+// streams. A known duration is kept, and markReady replaces the estimate with
+// the measured one.
+func (s *store) setProvisionalDuration(id string, durationMS int64) error {
+	if durationMS <= 0 {
+		return nil
+	}
+	_, err := s.db.Exec(
+		`UPDATE room_music_box_queue
+		 SET duration_ms = ?, updated_at = ?
+		 WHERE id = ? AND status = 'downloading'
+		   AND (duration_ms IS NULL OR duration_ms <= 0)`,
+		durationMS, nowMillis(), id)
+	return err
+}
+
 func (s *store) markFailed(id, errMsg string) error {
 	_, err := s.db.Exec(
 		`UPDATE room_music_box_queue SET status = 'failed', error = ?, updated_at = ? WHERE id = ?`,
@@ -790,8 +806,53 @@ func (s *store) clearAllQueues() error {
 	return err
 }
 
-// firstReadyAfter returns the first ready item at or after the given sort
-// order boundary, used to choose the next track. If afterSort is negative it
+// streamingFilter reports whether a downloading row can already be played
+// from its in-progress transcode. The store can't know that itself: streams
+// live in the manager's memory. A nil filter makes only ready rows playable.
+type streamingFilter func(item *QueueItem) bool
+
+func playableStatusClause(streaming streamingFilter) string {
+	if streaming == nil {
+		return `status = 'ready'`
+	}
+	return `status IN ('ready', 'downloading')`
+}
+
+// playableLimitClause bounds a candidate query. Without a filter every
+// candidate is ready, so the first row is the answer.
+func playableLimitClause(streaming streamingFilter) string {
+	if streaming == nil {
+		return ` LIMIT 1`
+	}
+	return ``
+}
+
+// firstPlayableRow returns the first row of an ordered candidate query that
+// is ready or, with a filter, still downloading but already streamable.
+func (s *store) firstPlayableRow(
+	query string,
+	args []any,
+	streaming streamingFilter,
+) (*QueueItem, error) {
+	rows, err := s.db.Query(query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		item, err := scanItem(rows)
+		if err != nil {
+			return nil, err
+		}
+		if item.Status == StatusReady || (streaming != nil && streaming(item)) {
+			return item, nil
+		}
+	}
+	return nil, rows.Err()
+}
+
+// firstPlayable returns the first ready item after the given sort order
+// boundary, used to choose the next track. If afterSort is negative it
 // returns the first ready item in the room.
 func (s *store) firstPlayable(roomID string, afterSort int64) (*QueueItem, error) {
 	return s.firstPlayableInScope(
@@ -799,6 +860,7 @@ func (s *store) firstPlayable(roomID string, afterSort int64) (*QueueItem, error
 		afterSort,
 		QueueScopeTemporary,
 		"",
+		nil,
 	)
 }
 
@@ -807,25 +869,18 @@ func (s *store) firstPlayableInScope(
 	afterSort int64,
 	scope QueueScope,
 	snapshotID string,
+	streaming streamingFilter,
 ) (*QueueItem, error) {
 	query := `SELECT ` + itemColumns + ` FROM room_music_box_queue
-		 WHERE room_id = ? AND status = 'ready' AND sort_order > ?
+		 WHERE room_id = ? AND ` + playableStatusClause(streaming) + ` AND sort_order > ?
 		   AND queue_scope = ?`
 	args := []any{roomID, afterSort, string(scope)}
 	if scope == QueueScopeSavedPlaylistSnapshot {
 		query += ` AND snapshot_id = ?`
 		args = append(args, snapshotID)
 	}
-	query += ` ORDER BY sort_order ASC, created_at ASC LIMIT 1`
-	row := s.db.QueryRow(
-		query,
-		args...,
-	)
-	it, err := scanItem(row)
-	if err == sql.ErrNoRows {
-		return nil, nil
-	}
-	return it, err
+	query += ` ORDER BY sort_order ASC, created_at ASC` + playableLimitClause(streaming)
+	return s.firstPlayableRow(query, args, streaming)
 }
 
 func (s *store) lastPlayableBefore(
@@ -833,22 +888,18 @@ func (s *store) lastPlayableBefore(
 	beforeSort int64,
 	scope QueueScope,
 	snapshotID string,
+	streaming streamingFilter,
 ) (*QueueItem, error) {
 	query := `SELECT ` + itemColumns + ` FROM room_music_box_queue
-		 WHERE room_id = ? AND status = 'ready' AND sort_order < ?
+		 WHERE room_id = ? AND ` + playableStatusClause(streaming) + ` AND sort_order < ?
 		   AND queue_scope = ?`
 	args := []any{roomID, beforeSort, string(scope)}
 	if scope == QueueScopeSavedPlaylistSnapshot {
 		query += ` AND snapshot_id = ?`
 		args = append(args, snapshotID)
 	}
-	query += ` ORDER BY sort_order DESC, created_at DESC LIMIT 1`
-	row := s.db.QueryRow(query, args...)
-	it, err := scanItem(row)
-	if err == sql.ErrNoRows {
-		return nil, nil
-	}
-	return it, err
+	query += ` ORDER BY sort_order DESC, created_at DESC` + playableLimitClause(streaming)
+	return s.firstPlayableRow(query, args, streaming)
 }
 
 func (s *store) lastPlayable(roomID string) (*QueueItem, error) {

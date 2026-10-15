@@ -44,6 +44,10 @@ func (m *Manager) broadcastCachePath(item *QueueItem) string {
 // prepareBroadcastMedia serializes preparation by cache key across rooms,
 // publishes through an atomic rename, and attaches the shared artifact to the
 // queue row. A cache hit does not resolve a fresh upstream URL.
+//
+// While ffmpeg runs, the temporary file is registered as a stream for the
+// final path so players can start the track before it finishes. The caller
+// retires the stream once the row's status records the outcome.
 func (m *Manager) prepareBroadcastMedia(
 	ctx context.Context,
 	item *QueueItem,
@@ -68,24 +72,45 @@ func (m *Manager) prepareBroadcastMedia(
 	if err := os.MkdirAll(m.broadcastCacheDir(), 0o755); err != nil {
 		return nil, "", fmt.Errorf("prepare broadcast cache dir: %w", err)
 	}
-	resolvedURL, err := m.resolveURL(ctx, item)
+	resolved, err := m.resolveTrack(ctx, item)
 	if err != nil {
 		return nil, "", fmt.Errorf("resolve url: %w", err)
 	}
+	if resolved.EstimatedDurationMS > 0 && item.DurationMS <= 0 && item.ID != "" {
+		// Listeners see a length while the track streams; markReady replaces
+		// it with the measured duration.
+		if err := m.store.setProvisionalDuration(item.ID, resolved.EstimatedDurationMS); err != nil {
+			log.Printf("musicbox: queue item %s provisional duration: %v", item.ID, err)
+		}
+	}
 	tmp := dst + ".tmp-" + randomID()
-	result, err := m.tc.transcode(ctx, item.Source, resolvedURL, tmp)
+	stream := m.beginStream(tmp, dst, item.ID)
+	watchCtx, stopWatching := context.WithCancel(ctx)
+	go m.watchStream(watchCtx, stream, item.RoomID)
+	result, err := m.tc.transcode(ctx, item.Source, resolved.URL, tmp)
+	stopWatching()
 	if err != nil {
+		stream.fail(err)
 		_ = os.Remove(tmp)
 		return nil, "", err
 	}
-	if err := os.Rename(tmp, dst); err != nil {
+	err = stream.publish(func() error {
+		renameErr := os.Rename(tmp, dst)
+		if renameErr == nil {
+			return nil
+		}
 		// Another process may have won the deterministic publish race. Reuse its
 		// complete artifact instead of replacing it or failing this queue item.
+		// A reader of this stream keeps the removed temporary file's inode, which
+		// holds the same complete track.
 		if info, statErr := os.Stat(dst); statErr == nil && info.Size() > 0 {
 			_ = os.Remove(tmp)
 			result.SizeBytes = info.Size()
-			return result, dst, nil
+			return nil
 		}
+		return renameErr
+	})
+	if err != nil {
 		_ = os.Remove(tmp)
 		return nil, "", fmt.Errorf("publish broadcast cache: %w", err)
 	}

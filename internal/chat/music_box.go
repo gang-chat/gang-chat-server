@@ -612,6 +612,10 @@ func (h *Handler) musicBoxStatePayload(roomID, actorID string) gin.H {
 	queuePayload := func(source []*musicbox.QueueItem, active bool) []gin.H {
 		queue := make([]gin.H, 0, len(source))
 		for _, it := range source {
+			// A downloading row whose transcode has started streaming is already
+			// playable. Its status stays "downloading" so older clients keep
+			// rendering it as in progress; they enable play-now only for "ready".
+			playable := h.MusicBox.ItemPlayable(it)
 			payload := gin.H{
 				"id":               it.ID,
 				"source":           it.Source,
@@ -625,7 +629,8 @@ func (h *Handler) musicBoxStatePayload(roomID, actorID string) gin.H {
 				"added_by_user_id": it.AddedByUserID,
 				"created_at":       formatMillis(it.CreatedAt),
 				"can_remove":       h.musicBoxCanRemoveItem(actorID, it, capabilities),
-				"can_play_now":     active && capabilities.CanPlayNow && it.Status == musicbox.StatusReady,
+				"playable":         playable,
+				"can_play_now":     active && capabilities.CanPlayNow && playable,
 			}
 			if requester := requesters[it.AddedByUserID]; requester != nil {
 				payload["requested_by"] = requester

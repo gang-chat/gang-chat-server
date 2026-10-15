@@ -1,6 +1,7 @@
 package musicbox
 
 import (
+	"context"
 	"errors"
 	"io"
 	"log"
@@ -50,7 +51,10 @@ type player struct {
 	onState         func()
 	onPriorityState func()
 	onHeartbeat     func()
-	acquireLease    func(item *QueueItem) func()
+	// openMedia opens an item's Ogg/Opus audio: a ready cache file, or an
+	// in-progress transcode whose reader waits for more bytes. Closing the
+	// reader releases the media lease. nil opens item.FilePath directly.
+	openMedia func(ctx context.Context, item *QueueItem) (io.ReadCloser, error)
 }
 
 type commandKind int
@@ -93,7 +97,7 @@ func newPlayer(
 	onState func(),
 	onPriorityState func(),
 	onHeartbeat func(),
-	acquireLease func(item *QueueItem) func(),
+	openMedia func(ctx context.Context, item *QueueItem) (io.ReadCloser, error),
 ) *player {
 	return &player{
 		roomID:          roomID,
@@ -105,7 +109,7 @@ func newPlayer(
 		onState:         onState,
 		onPriorityState: onPriorityState,
 		onHeartbeat:     onHeartbeat,
-		acquireLease:    acquireLease,
+		openMedia:       openMedia,
 	}
 }
 
@@ -250,23 +254,39 @@ func (p *player) isPlaying() bool {
 	return !p.stopped && !p.paused && p.current != nil
 }
 
-// pause/resume/skip/stop. Returns true if the player should stop entirely.
-func (p *player) playFile(item *QueueItem) playResult {
-	releaseLease := func() {}
-	if p.acquireLease != nil {
-		releaseLease = p.acquireLease(item)
-	}
-	defer releaseLease()
-	f, err := os.Open(item.FilePath)
-	if err != nil {
-		return playResult{transition: transitionNatural} // skip a vanished file
-	}
-	defer f.Close()
+const (
+	// packetReadAhead bounds how many Opus packets the reader goroutine
+	// decodes ahead of the real-time write loop.
+	packetReadAhead = 16
+	// maxPacingLag is how far the write loop may fall behind its schedule
+	// before it resynchronizes. A stream that briefly outruns its transcode
+	// resumes at real time instead of bursting the backlog to listeners.
+	maxPacingLag = 200 * time.Millisecond
+)
 
-	ogg, _, err := oggreader.NewOggReader(f)
-	if err != nil {
-		return playResult{transition: transitionNatural}
-	}
+// oggPacket is one read from the reader goroutine: a payload or the error
+// that ended the track.
+type oggPacket struct {
+	payload []byte
+	err     error
+}
+
+// playFile streams one item into the LiveKit track until it ends or a
+// command interrupts it (pause/resume/skip/previous/play-now/stop).
+//
+// Reading happens on its own goroutine because an item may still be
+// transcoding: its reader can block waiting for ffmpeg, and controls must
+// stay responsive meanwhile.
+func (p *player) playFile(item *QueueItem) playResult {
+	ctx, cancel := context.WithCancel(context.Background())
+	packets := make(chan oggPacket, packetReadAhead)
+	readerDone := make(chan struct{})
+	go p.readPackets(ctx, item, packets, readerDone)
+	// The reader owns the file and its lease; wait for it to close both.
+	defer func() {
+		cancel()
+		<-readerDone
+	}()
 
 	// Keep the existing pause state across previous/next. A paused listener who
 	// changes tracks must remain paused until an explicit resume command.
@@ -277,72 +297,43 @@ func (p *player) playFile(item *QueueItem) playResult {
 		// Drain any pending control commands without blocking.
 		select {
 		case c := <-p.cmd:
-			switch c.kind {
-			case cmdStop:
-				return playResult{stop: true, positionMS: elapsed.Milliseconds(), ack: c.ack}
-			case cmdSkip:
-				return playResult{transition: transitionNext, positionMS: elapsed.Milliseconds(), ack: c.ack}
-			case cmdPrevious:
-				return playResult{transition: transitionPrevious, positionMS: elapsed.Milliseconds(), ack: c.ack}
-			case cmdPlayNow:
-				if c.item != nil {
-					return playResult{priority: c.item, positionMS: elapsed.Milliseconds(), ack: c.ack}
-				}
-				acknowledge(c.ack)
-			case cmdPause:
-				p.setPaused(true)
-				acknowledge(c.ack)
-			case cmdResume:
-				p.setPaused(false)
-				nextWrite = time.Now() // resync clock; don't burst-catch-up
-				acknowledge(c.ack)
-			case cmdWake:
-				acknowledge(c.ack)
+			if result, done := p.handlePlaybackCommand(c, elapsed, &nextWrite); done {
+				return result
 			}
+			continue
 		default:
 		}
 
 		if p.isPaused() {
 			// Block until a command arrives, then re-evaluate. While paused we
 			// write nothing, so RTP simply stops — listeners hear silence.
-			c := <-p.cmd
-			switch c.kind {
-			case cmdStop:
-				return playResult{stop: true, positionMS: elapsed.Milliseconds(), ack: c.ack}
-			case cmdSkip:
-				return playResult{transition: transitionNext, positionMS: elapsed.Milliseconds(), ack: c.ack}
-			case cmdPrevious:
-				return playResult{transition: transitionPrevious, positionMS: elapsed.Milliseconds(), ack: c.ack}
-			case cmdPlayNow:
-				if c.item != nil {
-					return playResult{priority: c.item, positionMS: elapsed.Milliseconds(), ack: c.ack}
-				}
-				acknowledge(c.ack)
-			case cmdResume:
-				p.setPaused(false)
-				nextWrite = time.Now()
-				acknowledge(c.ack)
-			case cmdPause:
-				// already paused
-				acknowledge(c.ack)
-			case cmdWake:
-				acknowledge(c.ack)
+			if result, done := p.handlePlaybackCommand(<-p.cmd, elapsed, &nextWrite); done {
+				return result
 			}
 			continue
 		}
 
-		payload, err := ogg.ReadPacket()
-		if err != nil {
-			if errors.Is(err, io.EOF) {
+		var packet oggPacket
+		select {
+		case packet = <-packets:
+		case c := <-p.cmd:
+			if result, done := p.handlePlaybackCommand(c, elapsed, &nextWrite); done {
+				return result
+			}
+			continue
+		}
+		if packet.err != nil {
+			if errors.Is(packet.err, io.EOF) {
 				return playResult{transition: transitionNatural, positionMS: elapsed.Milliseconds()}
 			}
-			// A non-EOF read error means a corrupt/truncated Opus file. Don't
-			// silently vanish it — log so the failure is diagnosable, then
-			// advance to the next track.
-			log.Printf("musicbox: room %s track %q read error, skipping: %v", p.roomID, item.ID, err)
+			// A missing file, a corrupt/truncated Opus file, or a transcode that
+			// failed mid-stream. Don't silently vanish it — log so the failure is
+			// diagnosable, then advance to the next track. A failed transcode has
+			// already marked its row failed.
+			log.Printf("musicbox: room %s track %q read error, skipping: %v", p.roomID, item.ID, packet.err)
 			return playResult{transition: transitionNatural, positionMS: elapsed.Milliseconds()}
 		}
-		dur, err := oggreader.ParsePacketDuration(payload)
+		dur, err := oggreader.ParsePacketDuration(packet.payload)
 		if err != nil || dur <= 0 {
 			dur = 20 * time.Millisecond
 		}
@@ -353,7 +344,12 @@ func (p *player) playFile(item *QueueItem) playResult {
 		if track == nil {
 			return playResult{stop: true, positionMS: elapsed.Milliseconds()}
 		}
-		if err := track.WriteSample(media.Sample{Data: payload, Duration: dur}, nil); err != nil {
+		// Waiting on a stream (or the first packet) puts the schedule in the
+		// past; start again from now instead of catching up in a burst.
+		if now := time.Now(); now.Sub(nextWrite) > maxPacingLag {
+			nextWrite = now
+		}
+		if err := track.WriteSample(media.Sample{Data: packet.payload, Duration: dur}, nil); err != nil {
 			return playResult{transition: transitionNatural, positionMS: elapsed.Milliseconds()}
 		}
 
@@ -367,6 +363,82 @@ func (p *player) playFile(item *QueueItem) playResult {
 			time.Sleep(sleep)
 		}
 	}
+}
+
+// handlePlaybackCommand applies a control command received mid-track. It
+// reports done with the result that ends the track, or false to keep playing.
+func (p *player) handlePlaybackCommand(
+	c command,
+	elapsed time.Duration,
+	nextWrite *time.Time,
+) (playResult, bool) {
+	switch c.kind {
+	case cmdStop:
+		return playResult{stop: true, positionMS: elapsed.Milliseconds(), ack: c.ack}, true
+	case cmdSkip:
+		return playResult{transition: transitionNext, positionMS: elapsed.Milliseconds(), ack: c.ack}, true
+	case cmdPrevious:
+		return playResult{transition: transitionPrevious, positionMS: elapsed.Milliseconds(), ack: c.ack}, true
+	case cmdPlayNow:
+		if c.item != nil {
+			return playResult{priority: c.item, positionMS: elapsed.Milliseconds(), ack: c.ack}, true
+		}
+	case cmdPause:
+		p.setPaused(true)
+	case cmdResume:
+		p.setPaused(false)
+		*nextWrite = time.Now() // resync clock; don't burst-catch-up
+	case cmdWake:
+	}
+	acknowledge(c.ack)
+	return playResult{}, false
+}
+
+// readPackets opens item and feeds its Opus packets to out until the track
+// ends, the read fails, or ctx is cancelled. The final packet carries the
+// error (io.EOF at a normal end). It closes the media before closing done.
+func (p *player) readPackets(
+	ctx context.Context,
+	item *QueueItem,
+	out chan<- oggPacket,
+	done chan<- struct{},
+) {
+	defer close(done)
+	send := func(packet oggPacket) bool {
+		select {
+		case out <- packet:
+			return true
+		case <-ctx.Done():
+			return false
+		}
+	}
+	media, err := p.open(ctx, item)
+	if err != nil {
+		send(oggPacket{err: err})
+		return
+	}
+	defer media.Close()
+
+	// For a stream still being written this blocks until both Ogg header pages
+	// exist: NewOggReader silently skips a comment page it can't read whole.
+	ogg, _, err := oggreader.NewOggReader(media)
+	if err != nil {
+		send(oggPacket{err: err})
+		return
+	}
+	for {
+		payload, err := ogg.ReadPacket()
+		if !send(oggPacket{payload: payload, err: err}) || err != nil {
+			return
+		}
+	}
+}
+
+func (p *player) open(ctx context.Context, item *QueueItem) (io.ReadCloser, error) {
+	if p.openMedia != nil {
+		return p.openMedia(ctx, item)
+	}
+	return os.Open(item.FilePath)
 }
 
 // Control commands (non-blocking; the loop drains them) -----------------------

@@ -23,6 +23,8 @@ type ObservabilitySnapshot struct {
 	PrepareSuccesses      int64 `json:"prepare_successes"`
 	PrepareFailures       int64 `json:"prepare_failures"`
 	PrepareDurationMS     int64 `json:"prepare_duration_ms"`
+	StreamStarts          int64 `json:"stream_starts"`
+	StreamStartDurationMS int64 `json:"stream_start_duration_ms"`
 	ControlAttempts       int64 `json:"control_attempts"`
 	ControlSuccesses      int64 `json:"control_successes"`
 	ControlFailures       int64 `json:"control_failures"`
@@ -44,6 +46,8 @@ type observabilityCounters struct {
 	prepareSuccesses      atomic.Int64
 	prepareFailures       atomic.Int64
 	prepareDurationMS     atomic.Int64
+	streamStarts          atomic.Int64
+	streamStartDurationMS atomic.Int64
 	controlAttempts       atomic.Int64
 	controlSuccesses      atomic.Int64
 	controlFailures       atomic.Int64
@@ -76,6 +80,8 @@ func (m *Manager) ObservabilitySnapshot() ObservabilitySnapshot {
 		PrepareSuccesses:      m.obs.prepareSuccesses.Load(),
 		PrepareFailures:       m.obs.prepareFailures.Load(),
 		PrepareDurationMS:     m.obs.prepareDurationMS.Load(),
+		StreamStarts:          m.obs.streamStarts.Load(),
+		StreamStartDurationMS: m.obs.streamStartDurationMS.Load(),
 		ControlAttempts:       m.obs.controlAttempts.Load(),
 		ControlSuccesses:      m.obs.controlSuccesses.Load(),
 		ControlFailures:       m.obs.controlFailures.Load(),
@@ -130,10 +136,11 @@ func (m *Manager) RunObservabilityLog(ctx context.Context, interval time.Duratio
 		case <-ticker.C:
 			s := m.ObservabilitySnapshot()
 			log.Printf(
-				"musicbox metrics active_players=%d cache_files=%d cache_bytes=%d cache_hits=%d cache_misses=%d cache_evictions=%d cache_evicted_bytes=%d prepare_successes=%d prepare_failures=%d prepare_duration_ms=%d control_attempts=%d control_successes=%d control_failures=%d revision_conflicts=%d control_duration_ms=%d empty_timers_started=%d empty_timers_cancelled=%d empty_rooms_expired=%d empty_cleanup_retries=%d full_snapshot_events=%d compact_progress_events=%d",
+				"musicbox metrics active_players=%d cache_files=%d cache_bytes=%d cache_hits=%d cache_misses=%d cache_evictions=%d cache_evicted_bytes=%d prepare_successes=%d prepare_failures=%d prepare_duration_ms=%d stream_starts=%d stream_start_duration_ms=%d control_attempts=%d control_successes=%d control_failures=%d revision_conflicts=%d control_duration_ms=%d empty_timers_started=%d empty_timers_cancelled=%d empty_rooms_expired=%d empty_cleanup_retries=%d full_snapshot_events=%d compact_progress_events=%d",
 				s.ActivePlayers, s.BroadcastCacheFiles, s.BroadcastCacheBytes,
 				s.CacheHits, s.CacheMisses, s.CacheEvictions, s.CacheEvictedBytes,
 				s.PrepareSuccesses, s.PrepareFailures, s.PrepareDurationMS,
+				s.StreamStarts, s.StreamStartDurationMS,
 				s.ControlAttempts, s.ControlSuccesses, s.ControlFailures,
 				s.RevisionConflicts, s.ControlDurationMS,
 				s.EmptyTimersStarted, s.EmptyTimersCancelled,

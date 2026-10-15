@@ -40,10 +40,18 @@ type transcodeResult struct {
 // Ogg/Opus file to dstPath. It blocks on a worker slot first, so callers run
 // it from their own goroutine. ctx cancellation kills the ffmpeg process.
 //
+// dstPath is readable while ffmpeg writes it: pages are flushed as they are
+// muxed, so a player can stream the track before the transcode finishes.
+func (t *transcoder) transcode(ctx context.Context, source, sourceURL, dstPath string) (*transcodeResult, error) {
+	return t.run(ctx, broadcastTranscodeArgs(source, sourceURL, dstPath, t.opusBitrate), dstPath)
+}
+
+// broadcastTranscodeArgs builds the ffmpeg command line for a broadcast file.
+//
 // source is the GD music source the URL came from; some sources hand back a
 // CDN URL that enforces hotlink protection (bilibili's *.bilivideo.com checks
 // Referer), so we set the matching request headers for those.
-func (t *transcoder) transcode(ctx context.Context, source, sourceURL, dstPath string) (*transcodeResult, error) {
+func broadcastTranscodeArgs(source, sourceURL, dstPath, opusBitrate string) []string {
 	// ffmpeg reads the (possibly remote) input and produces Opus in an Ogg
 	// container — the exact format LiveKit's reader track consumes. -vn drops
 	// any embedded cover art video stream. 48kHz stereo matches WebRTC Opus.
@@ -57,7 +65,7 @@ func (t *transcoder) transcode(ctx context.Context, source, sourceURL, dstPath s
 		"-i", sourceURL,
 		"-vn",
 		"-c:a", "libopus",
-		"-b:a", t.opusBitrate,
+		"-b:a", opusBitrate,
 		// In-band FEC embeds a low-bitrate copy of the previous frame in each
 		// packet so listeners recover isolated packet loss without a retransmit
 		// — the main stability win for the broadcast. packet_loss tells the
@@ -67,10 +75,14 @@ func (t *transcoder) transcode(ctx context.Context, source, sourceURL, dstPath s
 		"-packet_loss", "10",
 		"-ar", "48000",
 		"-ac", "2",
+		// Write each muxed page through to the file instead of in 32 KiB I/O
+		// buffer chunks, so the headers and first audio reach a streaming
+		// reader immediately.
+		"-flush_packets", "1",
 		"-f", "ogg",
 		dstPath,
 	)
-	return t.run(ctx, args, dstPath)
+	return args
 }
 
 // transcodePreview produces AAC-LC in an M4A container instead of Ogg/Opus.

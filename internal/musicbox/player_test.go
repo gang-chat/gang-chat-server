@@ -1,10 +1,16 @@
 package musicbox
 
 import (
+	"errors"
+	"os"
+	"path/filepath"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
+
+	lksdk "github.com/livekit/server-sdk-go/v2"
+	"github.com/pion/webrtc/v4"
 )
 
 // newTestPlayer builds a player wired only with the fields the compact
@@ -189,5 +195,145 @@ func TestPlayNowWaitsForBestEffortWakePressure(t *testing.T) {
 	state, currentID, _ := p.snapshot()
 	if state != StatePlaying || currentID != targetItem.ID {
 		t.Fatalf("snapshot = (%q, %q), want playing/%s", state, currentID, targetItem.ID)
+	}
+}
+
+// newStreamingTestPlayer can run playFile without LiveKit: an unpublished
+// sample track drops what it is given, while the player still paces packets
+// in real time.
+func newStreamingTestPlayer(t *testing.T, m *Manager) *player {
+	t.Helper()
+	track, err := lksdk.NewLocalSampleTrack(webrtc.RTPCodecCapability{
+		MimeType:  webrtc.MimeTypeOpus,
+		ClockRate: 48000,
+		Channels:  2,
+	})
+	if err != nil {
+		t.Fatalf("new sample track: %v", err)
+	}
+	p := newTestPlayer(nil)
+	p.opusTrack = track
+	if m != nil {
+		p.openMedia = m.openBroadcastMedia
+	}
+	return p
+}
+
+// playAsync runs playFile and, like runFrom, acknowledges the command that
+// ended the track.
+func playAsync(p *player, item *QueueItem) <-chan playResult {
+	results := make(chan playResult, 1)
+	go func() {
+		result := p.playFile(item)
+		acknowledge(result.ack)
+		results <- result
+	}()
+	return results
+}
+
+func waitPlayResult(t *testing.T, results <-chan playResult) playResult {
+	t.Helper()
+	select {
+	case result := <-results:
+		return result
+	case <-time.After(2 * time.Second):
+		t.Fatal("playFile did not return")
+		return playResult{}
+	}
+}
+
+func playerPosition(p *player) int64 {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.positionMS
+}
+
+func TestPlayFilePlaysReadyFileToEnd(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "ready.ogg")
+	data := append(testOpusHeaders(), testAudioPage(2, 4)...)
+	data = append(data, testAudioPage(3, 4)...)
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatalf("write ready file: %v", err)
+	}
+	p := newStreamingTestPlayer(t, nil)
+	result := waitPlayResult(t, playAsync(p, &QueueItem{ID: "ready", Status: StatusReady, FilePath: path}))
+	want := (8 * testAudioPacketDuration).Milliseconds()
+	if result.stop || result.transition != transitionNatural || result.positionMS != want {
+		t.Fatalf("result = %+v, want natural end at %dms", result, want)
+	}
+}
+
+func TestPlayFileStreamsTrackStillTranscodingWithoutStoppingEarly(t *testing.T) {
+	m := newStreamingTestManager(t)
+	item := &QueueItem{ID: "streaming", RoomID: "r1", Source: "netease", TrackID: "t1", Status: StatusDownloading}
+	stream := startTestStream(t, m, item, append(testOpusHeaders(), testAudioPage(2, 4)...))
+	stream.markPlayable()
+	final := m.broadcastCachePath(item)
+	p := newStreamingTestPlayer(t, m)
+
+	results := playAsync(p, item)
+	// Everything written so far plays in 10ms. The player must then wait for
+	// ffmpeg instead of treating the current end of the file as the track's.
+	select {
+	case result := <-results:
+		t.Fatalf("playback ended at the transcode's current end: %+v", result)
+	case <-time.After(150 * time.Millisecond):
+	}
+	if got, want := playerPosition(p), (4 * testAudioPacketDuration).Milliseconds(); got != want {
+		t.Fatalf("position while waiting = %dms, want %dms", got, want)
+	}
+	if !m.mediaPathLeased(final) {
+		t.Fatal("streaming playback holds no lease on the final cache path")
+	}
+
+	appendFile(t, stream.tmpPath, testAudioPage(3, 4))
+	if err := stream.publish(func() error { return os.Rename(stream.tmpPath, final) }); err != nil {
+		t.Fatalf("publish: %v", err)
+	}
+	result := waitPlayResult(t, results)
+	want := (8 * testAudioPacketDuration).Milliseconds()
+	if result.stop || result.transition != transitionNatural || result.positionMS != want {
+		t.Fatalf("result = %+v, want natural end at %dms", result, want)
+	}
+	if m.mediaPathLeased(final) {
+		t.Fatal("lease outlived playback")
+	}
+}
+
+func TestPlayFileHandlesSkipWhileWaitingForStream(t *testing.T) {
+	m := newStreamingTestManager(t)
+	item := &QueueItem{ID: "streaming", RoomID: "r1", Source: "netease", TrackID: "t1", Status: StatusDownloading}
+	// Only the headers exist: the reader blocks before the first packet.
+	startTestStream(t, m, item, testOpusHeaders()).markPlayable()
+	p := newStreamingTestPlayer(t, m)
+
+	results := playAsync(p, item)
+	time.Sleep(5 * streamPollInterval)
+	if err := p.skip(); err != nil {
+		t.Fatalf("skip while waiting for stream data: %v", err)
+	}
+	if result := waitPlayResult(t, results); result.transition != transitionNext || result.stop {
+		t.Fatalf("result = %+v, want skip to next", result)
+	}
+	if m.mediaPathLeased(m.broadcastCachePath(item)) {
+		t.Fatal("lease outlived skipped playback")
+	}
+}
+
+func TestPlayFileAdvancesWhenTranscodeFailsMidStream(t *testing.T) {
+	m := newStreamingTestManager(t)
+	item := &QueueItem{ID: "streaming", RoomID: "r1", Source: "netease", TrackID: "t1", Status: StatusDownloading}
+	stream := startTestStream(t, m, item, append(testOpusHeaders(), testAudioPage(2, 4)...))
+	stream.markPlayable()
+	p := newStreamingTestPlayer(t, m)
+
+	results := playAsync(p, item)
+	time.Sleep(5 * streamPollInterval)
+	stream.fail(errors.New("ffmpeg: upstream closed the connection"))
+	_ = os.Remove(stream.tmpPath)
+	result := waitPlayResult(t, results)
+	want := (4 * testAudioPacketDuration).Milliseconds()
+	if result.stop || result.transition != transitionNatural || result.positionMS != want {
+		t.Fatalf("result = %+v, want advance after the %dms that were written", result, want)
 	}
 }
