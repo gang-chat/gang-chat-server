@@ -107,6 +107,9 @@ func RegisterRoutes(g *gin.RouterGroup, db *sql.DB, cfg *config.Config, bus *eve
 		if err := mb.BackfillActivePlaylistCreatedAt(); err != nil {
 			log.Printf("chat: backfill active playlist creation time: %v", err)
 		}
+		if err := mb.BackfillTrackDurations(); err != nil {
+			log.Printf("chat: backfill music track durations: %v", err)
+		}
 	}
 
 	// The music box fans out a fresh snapshot whenever a room's queue or

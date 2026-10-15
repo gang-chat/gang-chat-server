@@ -976,3 +976,42 @@ func (s *store) backfillActivePlaylistCreatedAt() error {
 	)
 	return err
 }
+
+// recordTrackDuration fills in a saved-playlist track's catalogue duration
+// from a length measured while preparing its audio. Search results carry no
+// duration, so tracks saved straight from search have none until the music
+// box has transcoded them. A duration the catalogue already knows is kept.
+func (s *store) recordTrackDuration(source, trackID string, durationMS int64) error {
+	if durationMS <= 0 || trackID == "" {
+		return nil
+	}
+	_, err := s.db.Exec(
+		`UPDATE music_tracks
+		 SET duration_ms = ?, updated_at = ?
+		 WHERE source = ? AND external_track_id = ?
+		   AND (duration_ms IS NULL OR duration_ms <= 0)`,
+		durationMS, nowMillis(), source, trackID,
+	)
+	return err
+}
+
+// backfillTrackDurations applies recordTrackDuration retroactively, using the
+// lengths already measured for queue rows that were prepared before durations
+// were written through to the catalogue.
+func (s *store) backfillTrackDurations() error {
+	_, err := s.db.Exec(
+		`UPDATE music_tracks AS track
+		 JOIN (
+		   SELECT source, track_id, MAX(duration_ms) AS duration_ms
+		   FROM room_music_box_queue
+		   WHERE status = 'ready' AND duration_ms > 0
+		   GROUP BY source, track_id
+		 ) AS measured
+		   ON measured.source = track.source
+		  AND measured.track_id = track.external_track_id
+		 SET track.duration_ms = measured.duration_ms, track.updated_at = ?
+		 WHERE track.duration_ms IS NULL OR track.duration_ms <= 0`,
+		nowMillis(),
+	)
+	return err
+}

@@ -11,8 +11,8 @@ import (
 )
 
 // newTestStore uses a MySQL test database with just the schema the store needs
-// (users, rooms, playlists, and the two music box tables), avoiding a dependency on the
-// full production schema.
+// (users, rooms, playlists, tracks, and the two music box tables), avoiding a
+// dependency on the full production schema.
 func newTestStore(t *testing.T) *store {
 	t.Helper()
 	dsn := os.Getenv("GANG_TEST_MUSICBOX_MYSQL_DSN")
@@ -34,6 +34,7 @@ func newTestStore(t *testing.T) *store {
 		`DROP TABLE IF EXISTS room_music_box_queue`,
 		`DROP TABLE IF EXISTS room_music_box_state`,
 		`DROP TABLE IF EXISTS music_playlists`,
+		`DROP TABLE IF EXISTS music_tracks`,
 		`DROP TABLE IF EXISTS rooms`,
 		`DROP TABLE IF EXISTS users`,
 	}
@@ -49,6 +50,12 @@ func newTestStore(t *testing.T) *store {
 		`CREATE TABLE music_playlists (
 			id VARCHAR(128) PRIMARY KEY NOT NULL,
 			created_at BIGINT NOT NULL) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
+		`CREATE TABLE music_tracks (
+			id VARCHAR(128) PRIMARY KEY NOT NULL,
+			source VARCHAR(32) NOT NULL, external_track_id VARCHAR(256) NOT NULL,
+			duration_ms BIGINT NULL, updated_at BIGINT NOT NULL DEFAULT 0,
+			UNIQUE KEY uq_music_tracks_source_external (source, external_track_id)
+		) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
 		`CREATE TABLE room_music_box_queue (
 			id VARCHAR(128) PRIMARY KEY NOT NULL, room_id VARCHAR(128) NOT NULL,
 			source VARCHAR(64) NOT NULL DEFAULT 'netease', track_id VARCHAR(255) NOT NULL,
@@ -369,6 +376,107 @@ func TestBackfillActivePlaylistCreatedAt(t *testing.T) {
 	}
 	if got.ActivePlaylistCreatedAt != 1775444645000 {
 		t.Fatalf("created at = %d, want 1775444645000", got.ActivePlaylistCreatedAt)
+	}
+}
+
+func insertCatalogTrack(t *testing.T, s *store, id, source, trackID string, durationMS any) {
+	t.Helper()
+	if _, err := s.db.Exec(
+		`INSERT INTO music_tracks (id, source, external_track_id, duration_ms)
+		 VALUES (?, ?, ?, ?)`,
+		id, source, trackID, durationMS,
+	); err != nil {
+		t.Fatalf("insert track %s: %v", id, err)
+	}
+}
+
+func catalogTrackDuration(t *testing.T, s *store, id string) int64 {
+	t.Helper()
+	var duration sql.NullInt64
+	if err := s.db.QueryRow(
+		`SELECT duration_ms FROM music_tracks WHERE id = ?`, id,
+	).Scan(&duration); err != nil {
+		t.Fatalf("read track %s: %v", id, err)
+	}
+	return duration.Int64
+}
+
+func TestRecordTrackDurationFillsOnlyUnknownCatalogDurations(t *testing.T) {
+	s := newTestStore(t)
+	insertCatalogTrack(t, s, "unknown", "netease", "111", nil)
+	insertCatalogTrack(t, s, "zero", "netease", "222", 0)
+	insertCatalogTrack(t, s, "known", "netease", "333", 180000)
+	insertCatalogTrack(t, s, "other-source", "bilibili", "111", nil)
+
+	for _, track := range []struct {
+		trackID    string
+		durationMS int64
+	}{
+		{"111", 201000},
+		{"222", 95000},
+		{"333", 30000},
+	} {
+		if err := s.recordTrackDuration("netease", track.trackID, track.durationMS); err != nil {
+			t.Fatalf("recordTrackDuration %s: %v", track.trackID, err)
+		}
+	}
+	if err := s.recordTrackDuration("bilibili", "111", 0); err != nil {
+		t.Fatalf("recordTrackDuration without a measurement: %v", err)
+	}
+
+	for id, want := range map[string]int64{
+		"unknown":      201000,
+		"zero":         95000,
+		"known":        180000,
+		"other-source": 0,
+	} {
+		if got := catalogTrackDuration(t, s, id); got != want {
+			t.Errorf("%s duration = %d, want %d", id, got, want)
+		}
+	}
+}
+
+func TestBackfillTrackDurationsUsesMeasuredQueueLengths(t *testing.T) {
+	s := newTestStore(t)
+	insertCatalogTrack(t, s, "measured", "netease", "111", nil)
+	insertCatalogTrack(t, s, "known", "netease", "222", 180000)
+	insertCatalogTrack(t, s, "pending-only", "netease", "333", nil)
+
+	for _, row := range []struct {
+		id, trackID string
+		durationMS  int64
+		ready       bool
+	}{
+		{"short", "111", 30000, true},
+		{"full", "111", 201000, true},
+		{"remeasured", "222", 1000, true},
+		{"pending", "333", 99000, false},
+	} {
+		if _, err := s.insertItem(QueueItem{
+			ID: row.id, RoomID: "r1", Source: "netease", TrackID: row.trackID,
+			Title: row.id, AddedByUserID: "u1", DurationMS: row.durationMS,
+		}); err != nil {
+			t.Fatalf("insert %s: %v", row.id, err)
+		}
+		if row.ready {
+			if err := s.markReady(row.id, "/tmp/"+row.id+".ogg", 1, row.durationMS); err != nil {
+				t.Fatalf("markReady %s: %v", row.id, err)
+			}
+		}
+	}
+
+	if err := s.backfillTrackDurations(); err != nil {
+		t.Fatalf("backfillTrackDurations: %v", err)
+	}
+
+	for id, want := range map[string]int64{
+		"measured":     201000,
+		"known":        180000,
+		"pending-only": 0,
+	} {
+		if got := catalogTrackDuration(t, s, id); got != want {
+			t.Errorf("%s duration = %d, want %d", id, got, want)
+		}
 	}
 }
 
