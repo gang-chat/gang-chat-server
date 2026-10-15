@@ -196,6 +196,27 @@ func (m *Manager) BackfillActivePlaylistCreatedAt() error {
 	return m.store.backfillActivePlaylistCreatedAt()
 }
 
+// BackfillTrackDurations gives saved-playlist tracks the durations the music
+// box measured before those were written through to the track catalogue.
+// Like the other backfills it needs the playlist schema to exist first.
+func (m *Manager) BackfillTrackDurations() error {
+	if !m.Enabled() {
+		return nil
+	}
+	return m.store.backfillTrackDurations()
+}
+
+// recordTrackDuration writes a measured length through to the track catalogue.
+// Playback and previews don't depend on it, so a failure is only logged.
+func (m *Manager) recordTrackDuration(source, trackID string, durationMS int64) {
+	if err := m.store.recordTrackDuration(source, trackID, durationMS); err != nil {
+		log.Printf(
+			"musicbox record track duration failed source=%q track_id=%q error=%v",
+			source, trackID, err,
+		)
+	}
+}
+
 // GD exposes the underlying GD API client (used for album art lookups).
 func (m *Manager) GD() *gdmusic.Client { return m.gd }
 
@@ -305,7 +326,8 @@ func (m *Manager) PreparePreview(ctx context.Context, source, trackID string) (s
 		return "", fmt.Errorf("resolve preview url: %w", err)
 	}
 	tmp := dst + ".tmp-" + randomID()
-	if _, err := m.tc.transcodePreview(ctx, source, resolvedURL, tmp); err != nil {
+	res, err := m.tc.transcodePreview(ctx, source, resolvedURL, tmp)
+	if err != nil {
 		_ = os.Remove(tmp)
 		return "", err
 	}
@@ -313,6 +335,8 @@ func (m *Manager) PreparePreview(ctx context.Context, source, trackID string) (s
 		_ = os.Remove(tmp)
 		return "", fmt.Errorf("publish preview cache: %w", err)
 	}
+	// Previews transcode the whole track, so their length is the track's.
+	m.recordTrackDuration(source, trackID, res.DurationMS)
 	m.cleanupPreviewCache(dst)
 	return dst, nil
 }
@@ -786,6 +810,7 @@ func (m *Manager) process(itemID string) {
 		go m.pumpRoom(item.RoomID)
 		return
 	}
+	m.recordTrackDuration(item.Source, item.TrackID, res.DurationMS)
 	m.cleanupBroadcastCache(dst)
 	m.bumpRevision(item.RoomID)
 	// A track is ready: make sure the room is playing it (no-op if already).
