@@ -1,6 +1,7 @@
 package musicbox
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -303,5 +304,169 @@ func TestReleaseQueueMediaKeepsSharedCacheAndRemovesUnreferencedLegacyFile(t *te
 	}
 	if _, err := os.Stat(legacyPath); !os.IsNotExist(err) {
 		t.Fatalf("unreferenced legacy file was not removed: %v", err)
+	}
+}
+
+func TestPrefetchWindowSkipsFailedRows(t *testing.T) {
+	items := []*QueueItem{
+		{ID: "f1", SortOrder: 10, Status: StatusFailed},
+		{ID: "f2", SortOrder: 20, Status: StatusFailed},
+		{ID: "f3", SortOrder: 30, Status: StatusFailed},
+		{ID: "p4", SortOrder: 40, Status: StatusPending},
+		{ID: "p5", SortOrder: 50, Status: StatusPending},
+		{ID: "f6", SortOrder: 60, Status: StatusFailed},
+		{ID: "p7", SortOrder: 70, Status: StatusPending},
+		{ID: "p8", SortOrder: 80, Status: StatusPending},
+	}
+	// A playlist whose first songs all failed must still download the rest.
+	window := prefetchWindow(items, "", -1, ModeSequential, "room", 3)
+	if got := queueItemIDs(window); !equalQueueOrder(got, []string{"p4", "p5", "p7"}) {
+		t.Fatalf("window after failed head = %v, want p4/p5/p7", got)
+	}
+	if next := firstPendingItem(window); next == nil || next.ID != "p4" {
+		t.Fatalf("next download = %+v, want p4", next)
+	}
+	// A failed current row doesn't take a slot either.
+	window = prefetchWindow(items, "f6", -1, ModeSequential, "room", 3)
+	if got := queueItemIDs(window); !equalQueueOrder(got, []string{"p7", "p8"}) {
+		t.Fatalf("window from failed current = %v, want p7/p8", got)
+	}
+	window = prefetchWindow(items, "p8", -1, ModeRepeatAll, "room", 3)
+	if got := queueItemIDs(window); !equalQueueOrder(got, []string{"p8", "p4", "p5"}) {
+		t.Fatalf("repeat-all window over failures = %v, want p8/p4/p5", got)
+	}
+	allFailed := []*QueueItem{items[0], items[1], items[2]}
+	if window := prefetchWindow(allFailed, "", -1, ModeRepeatAll, "room", 3); len(window) != 0 {
+		t.Fatalf("all-failed window = %v, want empty", queueItemIDs(window))
+	}
+}
+
+func TestPreparedBytesCountsOnlySongsStillToPlay(t *testing.T) {
+	const songBytes = 4 << 20
+	const capBytes = 200 << 20
+	// A long session: 60 songs already played (240 MB, over the cap) and two
+	// still waiting. Played songs must not stop the next download.
+	items := make([]*QueueItem, 0, 62)
+	for index := 1; index <= 60; index++ {
+		items = append(items, &QueueItem{
+			ID: fmt.Sprintf("played-%d", index), SortOrder: int64(index * 10),
+			Status: StatusReady, FileSizeBytes: songBytes,
+		})
+	}
+	items = append(items,
+		&QueueItem{ID: "next-1", SortOrder: 610, Status: StatusPending},
+		&QueueItem{ID: "next-2", SortOrder: 620, Status: StatusPending},
+	)
+	window := prefetchWindow(items, "", 600, ModeSequential, "room", broadcastPrefetchWindow)
+	if used := preparedBytes(window); used != 0 {
+		t.Fatalf("prepared bytes after the cursor = %d, want 0", used)
+	}
+	if next := firstPendingItem(window); next == nil || next.ID != "next-1" {
+		t.Fatalf("next download = %+v, want next-1", next)
+	}
+
+	// While a song plays, its audio and the songs prepared after it count.
+	window = prefetchWindow(items, "played-59", -1, ModeSequential, "room", broadcastPrefetchWindow)
+	if used := preparedBytes(window); used != 2*songBytes || used >= capBytes {
+		t.Fatalf("prepared bytes while playing = %d, want %d", used, 2*songBytes)
+	}
+	if next := firstPendingItem(window); next == nil || next.ID != "next-1" {
+		t.Fatalf("next download while playing = %+v, want next-1", next)
+	}
+}
+
+func TestRemoveStaleTempFilesKeepsFreshAndFinishedFiles(t *testing.T) {
+	dir := t.TempDir()
+	now := time.Now()
+	write := func(name string, age time.Duration) string {
+		t.Helper()
+		path := filepath.Join(dir, name)
+		if err := os.WriteFile(path, []byte("x"), 0o600); err != nil {
+			t.Fatalf("write %s: %v", name, err)
+		}
+		modified := now.Add(-age)
+		if err := os.Chtimes(path, modified, modified); err != nil {
+			t.Fatalf("age %s: %v", name, err)
+		}
+		return path
+	}
+	abandoned := write("abc.ogg.tmp-1111", time.Hour)
+	abandonedPreview := write("abc.m4a.tmp-2222", time.Hour)
+	inFlight := write("def.ogg.tmp-3333", time.Minute)
+	finished := write("abc.ogg", time.Hour)
+
+	if removed := removeStaleTempFiles(dir, staleTempFileAge, now); removed != 2 {
+		t.Fatalf("removed = %d, want 2", removed)
+	}
+	for _, path := range []string{abandoned, abandonedPreview} {
+		if _, err := os.Stat(path); !os.IsNotExist(err) {
+			t.Fatalf("abandoned temp file %s still exists: %v", filepath.Base(path), err)
+		}
+	}
+	for _, path := range []string{inFlight, finished} {
+		if _, err := os.Stat(path); err != nil {
+			t.Fatalf("%s was removed: %v", filepath.Base(path), err)
+		}
+	}
+	if removed := removeStaleTempFiles(filepath.Join(dir, "missing"), staleTempFileAge, now); removed != 0 {
+		t.Fatalf("missing dir removed = %d, want 0", removed)
+	}
+}
+
+func TestPlayCursorMatchesOnlyItsQueue(t *testing.T) {
+	manager := &Manager{playCursors: map[string]playCursor{}}
+	manager.setCursor("r1", QueueScopeSavedPlaylistSnapshot, "snapshot-1", 50)
+	if got := manager.cursorAfter("r1", QueueScopeSavedPlaylistSnapshot, "snapshot-1"); got != 50 {
+		t.Fatalf("cursor = %d, want 50", got)
+	}
+	for _, tc := range []struct {
+		room     string
+		scope    QueueScope
+		snapshot string
+	}{
+		{room: "r1", scope: QueueScopeSavedPlaylistSnapshot, snapshot: "snapshot-2"},
+		{room: "r1", scope: QueueScopeTemporary},
+		{room: "r2", scope: QueueScopeSavedPlaylistSnapshot, snapshot: "snapshot-1"},
+	} {
+		if got := manager.cursorAfter(tc.room, tc.scope, tc.snapshot); got != -1 {
+			t.Fatalf("cursor for %+v = %d, want -1", tc, got)
+		}
+	}
+}
+
+func TestPlayCursorSurvivesRestartAndFullStateSaves(t *testing.T) {
+	store := newTestStore(t)
+	state, err := store.ensureState("r1")
+	if err != nil {
+		t.Fatalf("ensure state: %v", err)
+	}
+	before := &Manager{store: store, playCursors: map[string]playCursor{}}
+	before.setCursor("r1", QueueScopeTemporary, "", 230)
+	// Other code saves the whole state row from copies read earlier; that
+	// must not revert the cursor.
+	state.Revision++
+	if err := store.saveState(*state); err != nil {
+		t.Fatalf("save state: %v", err)
+	}
+
+	restarted := &Manager{store: store, playCursors: map[string]playCursor{}}
+	if got := restarted.cursorAfter("r1", QueueScopeTemporary, ""); got != 230 {
+		t.Fatalf("cursor after restart = %d, want 230", got)
+	}
+	if got := restarted.cursorAfter("r1", QueueScopeSavedPlaylistSnapshot, "s1"); got != -1 {
+		t.Fatalf("cursor for another queue = %d, want -1", got)
+	}
+	if got := restarted.cursorAfter("no-such-room", QueueScopeTemporary, ""); got != -1 {
+		t.Fatalf("cursor for a room without state = %d, want -1", got)
+	}
+
+	// An emptied room's expiry clears its queue and its position with it.
+	add(t, store, "queued", 240)
+	if _, changed, err := store.expireRoomPlayback("r1"); err != nil || !changed {
+		t.Fatalf("expire room = (%v, %v), want changed", changed, err)
+	}
+	afterExpiry := &Manager{store: store, playCursors: map[string]playCursor{}}
+	if got := afterExpiry.cursorAfter("r1", QueueScopeTemporary, ""); got != -1 {
+		t.Fatalf("cursor after the room expired = %d, want -1", got)
 	}
 }

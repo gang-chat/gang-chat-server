@@ -724,3 +724,52 @@ func TestTransportControlIgnoresStaleClientRevision(t *testing.T) {
 		t.Fatalf("stale structural control error = %v, want ErrRevisionConflict", err)
 	}
 }
+
+func TestEnqueueJoinsAfterPlaybackPositionWhenPlayedRowsWereCleared(t *testing.T) {
+	store := newTestStore(t)
+	if _, err := store.ensureState("r1"); err != nil {
+		t.Fatalf("ensure state: %v", err)
+	}
+	// A download in flight elsewhere keeps the enqueue's pump from starting a
+	// real download in this test.
+	if _, err := store.insertItem(QueueItem{
+		ID: "in-flight", RoomID: "r1", Source: "netease", TrackID: "in-flight",
+		Title: "In flight", Status: StatusDownloading, AddedByUserID: "u1",
+		QueueScope: QueueScopeSavedPlaylistSnapshot, SnapshotID: "old-snapshot",
+		SortOrder: 10,
+	}); err != nil {
+		t.Fatalf("insert in-flight row: %v", err)
+	}
+	manager := &Manager{
+		cfg:          Config{Enabled: true},
+		store:        store,
+		players:      map[string]*player{},
+		seenCommands: map[string]map[string]int64{},
+		playCursors:  map[string]playCursor{},
+	}
+	// The request queue played up to sort order 230 and was then cleared, so
+	// the highest remaining sort order no longer reflects the position.
+	manager.setCursor("r1", QueueScopeTemporary, "", 230)
+
+	item, err := manager.Enqueue(context.Background(), EnqueueParams{
+		RoomID: "r1", Source: "netease", TrackID: "new-request",
+		Title: "New request", AddedByUserID: "u1",
+	})
+	if err != nil {
+		t.Fatalf("enqueue: %v", err)
+	}
+	if item.SortOrder <= 230 {
+		t.Fatalf("new request sort order = %d, want after the cursor at 230", item.SortOrder)
+	}
+	st, err := store.getState("r1")
+	if err != nil {
+		t.Fatalf("get state: %v", err)
+	}
+	upcoming, err := manager.loadUpcomingItems("r1", st)
+	if err != nil {
+		t.Fatalf("upcoming items: %v", err)
+	}
+	if next := firstPendingItem(upcoming); next == nil || next.ID != item.ID {
+		t.Fatalf("next download = %+v, want the new request", next)
+	}
+}
