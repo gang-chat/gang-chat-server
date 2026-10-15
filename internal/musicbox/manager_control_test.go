@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 )
@@ -722,6 +724,92 @@ func TestTransportControlIgnoresStaleClientRevision(t *testing.T) {
 		&staleRevision,
 	); !errors.Is(err, ErrRevisionConflict) {
 		t.Fatalf("stale structural control error = %v, want ErrRevisionConflict", err)
+	}
+}
+
+func TestPlayNowAcceptsRowThatIsStreaming(t *testing.T) {
+	store := newTestStore(t)
+	if _, err := store.ensureState("r1"); err != nil {
+		t.Fatalf("ensure state: %v", err)
+	}
+	item := add(t, store, "streaming", 10)
+	if err := store.setStatus(item.ID, StatusDownloading); err != nil {
+		t.Fatalf("set downloading: %v", err)
+	}
+	item.Status = StatusDownloading
+	manager := &Manager{
+		cfg:          Config{Enabled: true, Dir: t.TempDir(), OpusBitrate: "128k"},
+		store:        store,
+		players:      map[string]*player{},
+		seenCommands: map[string]map[string]int64{},
+		playCursors:  map[string]playCursor{},
+		streams:      map[string]*mediaStream{},
+		tokenFn: func(_, _ string) (string, error) {
+			return "", errors.New("token generation stopped for test")
+		},
+	}
+
+	if err := manager.ApplyItemControl(
+		"r1", "play_now", item.ID, "", "", nil,
+	); !errors.Is(err, ErrQueueItemNotReady) {
+		t.Fatalf("downloading row without a stream: error = %v, want ErrQueueItemNotReady", err)
+	}
+	stream := startTestStream(t, manager, item, testOpusHeaders())
+	if err := manager.ApplyItemControl(
+		"r1", "play_now", item.ID, "", "", nil,
+	); !errors.Is(err, ErrQueueItemNotReady) {
+		t.Fatalf("stream without audio yet: error = %v, want ErrQueueItemNotReady", err)
+	}
+	stream.markPlayable()
+	// The row passes the playable check and reaches player startup, which
+	// this test stops at token generation.
+	if err := manager.ApplyItemControl(
+		"r1", "play_now", item.ID, "", "", nil,
+	); err == nil || errors.Is(err, ErrQueueItemNotReady) {
+		t.Fatalf("streaming row: error = %v, want startup to be attempted", err)
+	}
+	if first, err := store.firstPlayableInScope(
+		"r1", -1, QueueScopeTemporary, "", manager.streamable,
+	); err != nil || first == nil || first.ID != item.ID {
+		t.Fatalf("first playable = (%+v, %v), want the streaming row", first, err)
+	}
+}
+
+func TestOpenBroadcastMediaRefreshesStaleStreamingRow(t *testing.T) {
+	store := newTestStore(t)
+	item := add(t, store, "replayed", 10)
+	if err := store.setStatus(item.ID, StatusDownloading); err != nil {
+		t.Fatalf("set downloading: %v", err)
+	}
+	// The player's copy is the row as it was while streaming.
+	stale := *item
+	stale.Status = StatusDownloading
+	manager := &Manager{
+		cfg:         Config{Dir: t.TempDir(), OpusBitrate: "128k"},
+		store:       store,
+		cacheLeases: map[string]int{},
+		streams:     map[string]*mediaStream{},
+	}
+
+	if _, err := manager.openBroadcastMedia(t.Context(), &stale); !errors.Is(err, ErrQueueItemNotReady) {
+		t.Fatalf("open without stream or file: error = %v, want ErrQueueItemNotReady", err)
+	}
+	// Repeat-one and previous replay the same copy after the transcode has
+	// finished and the row was marked ready.
+	path := filepath.Join(t.TempDir(), "replayed.ogg")
+	if err := os.WriteFile(path, []byte("opus"), 0o600); err != nil {
+		t.Fatalf("write file: %v", err)
+	}
+	if err := store.markReady(item.ID, path, 4, 1000); err != nil {
+		t.Fatalf("mark ready: %v", err)
+	}
+	media, err := manager.openBroadcastMedia(t.Context(), &stale)
+	if err != nil {
+		t.Fatalf("open after ready: %v", err)
+	}
+	defer media.Close()
+	if !manager.mediaPathLeased(path) {
+		t.Fatal("ready file opened without a lease")
 	}
 }
 
