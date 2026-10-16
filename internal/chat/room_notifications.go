@@ -67,7 +67,12 @@ func (h *Handler) appendRoomNotificationTx(tx *sql.Tx, spec roomNotificationSpec
 	var actorUID, actorUsername, actorDisplayName, actorAvatarURL, actorDefaultAvatar sql.NullString
 	var actorRoomDisplayName, actorRoomRole sql.NullString
 	actorDefaultAvatarValue := "blue-3"
-	if spec.ActorID != "" {
+	if spec.ActorID == gangBotSenderID {
+		// gang-bot has no users row; snapshot its fixed identity instead.
+		actorUsername = sql.NullString{String: gangBotUsername, Valid: true}
+		actorDisplayName = sql.NullString{String: gangBotDisplayName, Valid: true}
+		actorDefaultAvatarValue = gangBotAvatarKey
+	} else if spec.ActorID != "" {
 		if err := tx.QueryRow(
 			`SELECT u.uid, u.username, u.display_name, u.avatar_url,
 			        u.default_avatar_key, rm.room_display_name, rm.role
@@ -490,7 +495,9 @@ func (h *Handler) roomEventNotificationPayload(notificationID, viewerID string) 
 
 	var actor any
 	actorExists := true
-	if actorRefID.Valid && actorRefID.String != "" {
+	if actorRefID.Valid && actorRefID.String == gangBotSenderID {
+		actor = gangBotSummary()
+	} else if actorRefID.Valid && actorRefID.String != "" {
 		actorExists = actorID.Valid && actorUsername.Valid
 		if actorExists {
 			summary := summaryFromUserFields(

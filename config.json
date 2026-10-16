@@ -38,5 +38,8 @@
   "email_from": "",
 
   "fcm_project_id": "",
-  "fcm_service_account_file": ""
+  "fcm_service_account_file": "",
+  "gang_bot_api_url": "",
+  "gang_bot_api_key": "",
+  "gang_bot_model": ""
 }

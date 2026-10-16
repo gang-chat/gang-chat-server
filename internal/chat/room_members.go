@@ -292,6 +292,10 @@ func (h *Handler) updateRoomSettings(c *gin.Context) {
 		sets = append(sets, "join_policy = ?")
 		args = append(args, joinPolicy)
 	}
+	if req.GangBotEnabled != nil {
+		sets = append(sets, "gang_bot_enabled = ?")
+		args = append(args, boolToInt(*req.GangBotEnabled))
+	}
 	aiVoiceAnnounceEnabled := req.AIVoiceAnnounceEnabled
 	if req.AIVoiceAnnouncementsEnabled != nil {
 		aiVoiceAnnounceEnabled = req.AIVoiceAnnouncementsEnabled

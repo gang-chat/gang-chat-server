@@ -47,7 +47,10 @@ Run them on the **server**, from the deploy directory:
      "livekit_api_secret": "<secret>",
      "resend_api_base_url": "https://api.resend.com",
      "resend_api_key": "<Resend API key>",
-     "email_from": "Gang Chat <no-reply@your-verified-domain.example>"
+     "email_from": "Gang Chat <no-reply@your-verified-domain.example>",
+     "gang_bot_api_url": "https://api.anthropic.com",
+     "gang_bot_api_key": "<Anthropic API key>",
+     "gang_bot_model": "claude-opus-5-5"
    }
    ```
 4. Asset uploads always go to S3-compatible storage. Asset reads pass through
@@ -62,6 +65,16 @@ Run them on the **server**, from the deploy directory:
    Password-reset email is enabled only when both `resend_api_key` and
    `email_from` are configured. Keep the API key only in the server-side
    deployment config; `email_from` must use a sender/domain accepted by Resend.
+   gang-bot (an AI member of every room) turns on only when
+   `gang_bot_api_url`, `gang_bot_api_key` and `gang_bot_model` are all set;
+   leave all three empty to keep it off, and the server refuses to start with
+   only some of them. The URL is the root of an Anthropic Messages API
+   endpoint (the official API or a compatible proxy). gang-bot is not a user
+   account or a room member: clients show its messages with an AI badge and
+   offer it in the @ picker. It joins in after every 3-5 messages and answers
+   @gang-bot right away, reading only each room's last 10 messages. Room
+   admins turn it off per room with the gang-bot switch in room settings
+   (`gang_bot_enabled`, on by default).
 5. (Optional) `deploy.env` for path overrides — see `deploy.env.example`.
 6. First boot: `./start.sh all`.
 

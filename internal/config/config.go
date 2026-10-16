@@ -52,6 +52,14 @@ type Config struct {
 	MusicBoxCompactProgressOnly        bool     `json:"music_box_compact_progress_only"`
 	MusicBoxEmptyRoomGraceSeconds      int64    `json:"music_box_empty_room_grace_seconds"`
 
+	// gang-bot, the LLM member of every room, calls an Anthropic Messages API
+	// endpoint. All three are required to turn it on: leave them all empty to
+	// keep the bot off. The URL is the API root, e.g. https://api.anthropic.com
+	// or a compatible proxy.
+	GangBotAPIURL string `json:"gang_bot_api_url"`
+	GangBotAPIKey string `json:"gang_bot_api_key"`
+	GangBotModel  string `json:"gang_bot_model"`
+
 	ResendAPIBaseURL string `json:"resend_api_base_url"`
 	ResendAPIKey     string `json:"resend_api_key"`
 	EmailFrom        string `json:"email_from"`
@@ -116,6 +124,9 @@ func Load() *Config {
 	flag.StringVar(&cfg.MusicBoxDownloadBitrate, "music-box-download-bitrate", cfg.MusicBoxDownloadBitrate, "GD download quality (128/192/320/740/999)")
 	flag.BoolVar(&cfg.MusicBoxCompactProgressOnly, "music-box-compact-progress-only", cfg.MusicBoxCompactProgressOnly, "publish compact music progress heartbeats without legacy full snapshots")
 	flag.Int64Var(&cfg.MusicBoxEmptyRoomGraceSeconds, "music-box-empty-room-grace-seconds", cfg.MusicBoxEmptyRoomGraceSeconds, "seconds an empty voice room keeps its temporary music state")
+	flag.StringVar(&cfg.GangBotAPIURL, "gang-bot-api-url", cfg.GangBotAPIURL, "Anthropic Messages API root for gang-bot")
+	flag.StringVar(&cfg.GangBotAPIKey, "gang-bot-api-key", cfg.GangBotAPIKey, "API key for gang-bot")
+	flag.StringVar(&cfg.GangBotModel, "gang-bot-model", cfg.GangBotModel, "model name for gang-bot")
 	flag.StringVar(&cfg.ResendAPIBaseURL, "resend-api-base-url", cfg.ResendAPIBaseURL, "Resend API base URL")
 	flag.StringVar(&cfg.ResendAPIKey, "resend-api-key", cfg.ResendAPIKey, "Resend API key")
 	flag.StringVar(&cfg.EmailFrom, "email-from", cfg.EmailFrom, "sender used for account emails")
@@ -143,8 +154,31 @@ func Load() *Config {
 	if cfg.JWTSecret == "" {
 		panic("jwt_secret is required in config.json")
 	}
+	if missing := cfg.GangBotMissingSettings(); len(missing) > 0 && len(missing) < 3 {
+		panic("gang-bot needs all of gang_bot_api_url, gang_bot_api_key and gang_bot_model; missing: " + strings.Join(missing, ", "))
+	}
 
 	return &cfg
+}
+
+// GangBotEnabled reports whether every gang-bot setting is filled in.
+func (c *Config) GangBotEnabled() bool {
+	return len(c.GangBotMissingSettings()) == 0
+}
+
+// GangBotMissingSettings lists the empty gang-bot settings by config key.
+func (c *Config) GangBotMissingSettings() []string {
+	var missing []string
+	for _, setting := range []struct{ key, value string }{
+		{"gang_bot_api_url", c.GangBotAPIURL},
+		{"gang_bot_api_key", c.GangBotAPIKey},
+		{"gang_bot_model", c.GangBotModel},
+	} {
+		if strings.TrimSpace(setting.value) == "" {
+			missing = append(missing, setting.key)
+		}
+	}
+	return missing
 }
 
 func configPathFromArgs(args []string) string {

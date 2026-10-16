@@ -60,6 +60,8 @@ type roomSnapshot struct {
 	CreatedAt                   string              `json:"created_at"`
 	UpdatedAt                   string              `json:"updated_at"`
 	UpdateReason                string              `json:"update_reason,omitempty"`
+
+	gangBotRoomFields
 }
 
 // buildRoomSnapshot rebuilds the full public snapshot for roomID from the DB.
@@ -118,6 +120,7 @@ func (h *Handler) buildRoomSnapshot(roomID string) (roomSnapshot, error) {
 		LastMessage:                 lastMessage,
 		CreatedAt:                   formatMillis(rec.CreatedAt),
 		UpdatedAt:                   formatMillis(rec.UpdatedAt),
+		gangBotRoomFields:           h.gangBotRoomState(rec.ID),
 	}, nil
 }
 

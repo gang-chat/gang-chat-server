@@ -48,6 +48,9 @@ type userSummary struct {
 	CommonRooms       []userCommonRoom `json:"common_rooms,omitempty"`
 	IsDeleted         bool             `json:"is_deleted,omitempty"`
 	IsSuspended       bool             `json:"is_suspended,omitempty"`
+
+	// IsBot marks gang-bot, which is not a user account.
+	IsBot bool `json:"is_bot,omitempty"`
 }
 
 type userCommonRoom struct {
@@ -102,6 +105,8 @@ type roomCard struct {
 	UnreadMentionCount          int                 `json:"unread_mention_count"`
 	HasPendingJoinRequests      bool                `json:"has_pending_join_requests"`
 	UpdatedAt                   string              `json:"updated_at"`
+
+	gangBotRoomFields
 }
 
 type publicRoom struct {
@@ -174,6 +179,8 @@ type roomDetail struct {
 	Live                        liveState           `json:"live"`
 	CreatedAt                   string              `json:"created_at"`
 	UpdatedAt                   string              `json:"updated_at"`
+
+	gangBotRoomFields
 }
 
 type message struct {
@@ -622,6 +629,11 @@ func scanMessage(rows *sql.Rows) (message, error) {
 	msg.Sender = summaryFromUserFields(senderID, senderUID, senderUsername, senderDisplayName, senderAvatarURL, senderDefaultAvatar)
 	msg.Sender.IsSuperuser = senderIsSuperuser != 0
 	msg.Sender.IsDeleted = senderIsDeleted != 0
+	if senderID == gangBotSenderID {
+		// gang-bot has no account row; it is not a deleted user.
+		msg.Sender.IsDeleted = false
+		msg.Sender.IsBot = true
+	}
 	msg.Sender.RoomDisplayName = nullableString(senderRoomDisplayName)
 	if senderRoomRole.Valid && senderRoomRole.String != "" {
 		msg.Sender.RoomRole = senderRoomRole.String

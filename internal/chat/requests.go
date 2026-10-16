@@ -11,6 +11,7 @@ type roomSettingsRequest struct {
 	AIVoiceAnnouncementsEnabled *bool   `json:"ai_voice_announcements_enabled"`
 	MessageRecallPolicy         *string `json:"message_recall_policy"`
 	MessageRecallWindowSeconds  *int64  `json:"message_recall_window_seconds"`
+	GangBotEnabled              *bool   `json:"gang_bot_enabled"`
 }
 
 type myRoomSettingsRequest struct {

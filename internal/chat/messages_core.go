@@ -274,6 +274,7 @@ func (h *Handler) sendMessage(c *gin.Context) {
 			}
 		}
 	}
+	h.observeMessageForGangBot(roomID, userID, messageID, body, req.Mentions)
 	h.idempotentJSON(c, http.StatusCreated, rawBody, gin.H{"message": msg})
 }
 

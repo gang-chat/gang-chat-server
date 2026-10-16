@@ -45,6 +45,8 @@ type Handler struct {
 	MusicBox  *musicbox.Manager
 	Playlists *musicbox.PlaylistStore
 	Push      *push.Dispatcher
+	// Bot is gang-bot, nil when it isn't configured.
+	Bot *gangBot
 
 	stickerPackLocks    keyedMutexes
 	assetLifecycleLocks keyedMutexes
@@ -101,6 +103,10 @@ func RegisterRoutes(g *gin.RouterGroup, db *sql.DB, cfg *config.Config, bus *eve
 	if err := h.ensureStickerAssetLifecycleSchema(); err != nil {
 		log.Printf("chat: ensure sticker asset lifecycle schema: %v", err)
 	}
+	if err := model.EnsureGangBotSchema(db); err != nil {
+		log.Printf("chat: ensure gang-bot schema: %v", err)
+	}
+	h.setupGangBot()
 	if err := h.Playlists.EnsureSchema(); err != nil {
 		log.Printf("chat: ensure music playlist schema: %v", err)
 	} else if mb != nil {

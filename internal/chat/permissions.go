@@ -68,7 +68,7 @@ func (h *Handler) validateMentions(c *gin.Context, roomID string, mentions []any
 			return false
 		}
 		kind, _ := m["type"].(string)
-		if kind == "all" || kind == "admins" {
+		if kind == "all" || kind == "admins" || kind == "bot" {
 			continue
 		}
 		if kind != "user" {
