@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"math/rand/v2"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -306,7 +307,7 @@ func gangBotPrompt(roomName string, recent []message, mention *message) string {
 	}
 	b.WriteString("</messages>\n\n")
 	if mention != nil {
-		fmt.Fprintf(&b, "%s @ 了你，他说的是：「%s」。直接回复他。", gangBotSenderName(*mention), oneLine(mention.Body, 300))
+		fmt.Fprintf(&b, "%s @ 了你，他说的是：「%s」。直接回复他，开头不用再 @ 他，系统会自动 @。", gangBotSenderName(*mention), oneLine(mention.Body, 300))
 	} else {
 		b.WriteString("没有人 @ 你。像群里的普通成员一样，接着最近的话题自然地说一句。")
 	}
@@ -401,6 +402,57 @@ func cleanGangBotReply(reply string) string {
 	return truncateRunes(reply, gangBotMaxReplyRunes)
 }
 
+// gangBotMentionReply puts exactly one @ of the asker in front of the reply.
+// Models like to open with "@name" themselves, which used to double it.
+func gangBotMentionReply(asker message, reply string) string {
+	name := gangBotSenderName(asker)
+	names := []string{name, asker.Sender.DisplayName, asker.Sender.Username}
+	reply = withoutLeadingMentions(reply, append(names, gangBotUsername)...)
+	reply = withoutMentionsOf(reply, names...)
+	if reply == "" {
+		return "@" + name
+	}
+	return "@" + name + " " + reply
+}
+
+// withoutLeadingMentions drops any "@name" (ignoring case) at the start of
+// text, with the spaces or punctuation after it.
+func withoutLeadingMentions(text string, names ...string) string {
+	text = strings.TrimSpace(text)
+	for {
+		stripped := false
+		for _, name := range names {
+			prefix := "@" + strings.TrimSpace(name)
+			if len(prefix) == 1 || len(text) < len(prefix) || !strings.EqualFold(text[:len(prefix)], prefix) {
+				continue
+			}
+			text = strings.TrimLeft(text[len(prefix):], " \t,，:：")
+			stripped = true
+			break
+		}
+		if !stripped {
+			return strings.TrimSpace(text)
+		}
+	}
+}
+
+// withoutMentionsOf removes "@name" wherever it stands on its own (followed
+// by a space, punctuation or the end), so "@Logan" doesn't eat "@Loganx".
+func withoutMentionsOf(text string, names ...string) string {
+	for _, name := range names {
+		name = strings.TrimSpace(name)
+		if name == "" {
+			continue
+		}
+		pattern := regexp.MustCompile(`(?i)[ \t]?@` + regexp.QuoteMeta(name) + `([\s,，:：!！?？。.、]|$)`)
+		text = pattern.ReplaceAllString(text, "$1")
+	}
+	text = repeatedSpaces.ReplaceAllString(text, " ")
+	return strings.TrimSpace(strings.TrimLeft(text, " ,，:："))
+}
+
+var repeatedSpaces = regexp.MustCompile(`[ \t]{2,}`)
+
 // postGangBotMessage sends text as the bot. A reply to a mention quotes that
 // message and @-mentions its sender back, so they get notified.
 func (h *Handler) postGangBotMessage(roomID, body string, replyTo *message) error {
@@ -408,7 +460,7 @@ func (h *Handler) postGangBotMessage(roomID, body string, replyTo *message) erro
 	var quoteJSON any
 	if replyTo != nil {
 		mentions = append(mentions, map[string]any{"type": "user", "user_id": replyTo.Sender.ID})
-		body = "@" + gangBotSenderName(*replyTo) + " " + body
+		body = gangBotMentionReply(*replyTo, body)
 		quoteJSON = mustJSON([]messageQuote{{
 			MessageID:         replyTo.ID,
 			SenderDisplayName: quotedMessageSenderName(*replyTo),

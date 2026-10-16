@@ -175,6 +175,36 @@ func TestGangBotIsNotAUser(t *testing.T) {
 	}
 }
 
+func TestGangBotMentionsTheAskerOnce(t *testing.T) {
+	asker := message{Sender: userSummary{ID: "u1", Username: "logan", DisplayName: "Logan"}}
+	cases := map[string]string{
+		"好啊，八点见":              "@Logan 好啊，八点见",
+		"@Logan 好啊":           "@Logan 好啊",
+		"@logan，好啊":           "@Logan 好啊",
+		"@Logan @Logan 好啊":    "@Logan 好啊",
+		"@gang-bot @Logan: 好": "@Logan 好",
+		"好啊 @Logan":           "@Logan 好啊",
+		"好啊 @Logan！八点见":       "@Logan 好啊！八点见",
+		"问问 @Loganx 吧":        "@Logan 问问 @Loganx 吧",
+		"@Bob 和 @Logan 一起":    "@Logan @Bob 和 一起",
+		"@Logan":              "@Logan",
+	}
+	for reply, want := range cases {
+		if got := gangBotMentionReply(asker, reply); got != want {
+			t.Errorf("gangBotMentionReply(%q) = %q, want %q", reply, got, want)
+		}
+	}
+	nicknamed := message{Sender: userSummary{ID: "u2", Username: "wang", DisplayName: "Wang", RoomDisplayName: ptr("小王")}}
+	if got := gangBotMentionReply(nicknamed, "@小王 收到"); got != "@小王 收到" {
+		t.Errorf("room nickname: got %q", got)
+	}
+	if got := gangBotMentionReply(nicknamed, "@Wang 收到"); got != "@小王 收到" {
+		t.Errorf("global name: got %q", got)
+	}
+}
+
+func ptr[T any](value T) *T { return &value }
+
 func TestCleanGangBotReply(t *testing.T) {
 	cases := map[string]string{
 		"  好啊，八点见  ":                  "好啊，八点见",
