@@ -69,6 +69,10 @@ func (m *anthropicGangBotModel) Reply(ctx context.Context, system, prompt string
 			text.WriteString(b.Text)
 		}
 	}
+	// It ran out of tokens mid-reply: say so rather than end abruptly.
+	if resp.StopReason == anthropic.BetaStopReasonMaxTokens && text.Len() > 0 {
+		text.WriteString("\n（太长了，没写完）")
+	}
 	return text.String(), nil
 }
 

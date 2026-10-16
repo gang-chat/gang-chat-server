@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/zhuangkaiyi/gang-chat/server/internal/config"
 )
@@ -219,8 +220,19 @@ func TestCleanGangBotReply(t *testing.T) {
 			t.Errorf("cleanGangBotReply(%q) = %q, want %q", in, got, want)
 		}
 	}
-	if got := cleanGangBotReply(strings.Repeat("长", 2000)); len([]rune(got)) != gangBotMaxReplyRunes+1 {
-		t.Errorf("long replies should be cut to %d runes plus an ellipsis, got %d", gangBotMaxReplyRunes, len([]rune(got)))
+	// Long replies (code, say) come through whole.
+	long := strings.Repeat("<div class=\"card\">长长的一行</div>\n", 200)
+	if got := cleanGangBotReply(long); got != strings.TrimSpace(long) {
+		t.Errorf("a %d-byte reply was changed", len(long))
+	}
+	// Only a reply too big for the database is cut, at a whole line.
+	huge := strings.Repeat("第一行很长很长很长很长很长\n", 5000)
+	got := cleanGangBotReply(huge)
+	if len(got) > gangBotMaxReplyBytes || !utf8.ValidString(got) {
+		t.Fatalf("capped reply is %d bytes (valid UTF-8: %v)", len(got), utf8.ValidString(got))
+	}
+	if !strings.HasSuffix(got, "第一行很长很长很长很长很长\n（太长了，后面省略）") {
+		t.Errorf("reply should end on a whole line plus a note, ends with %q", got[len(got)-60:])
 	}
 }
 

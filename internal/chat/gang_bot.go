@@ -32,9 +32,11 @@ const (
 	gangBotContextMessages = 10
 	gangBotMinGap          = 3
 	gangBotMaxGap          = 5
-	gangBotMaxReplyRunes   = 1000
-	gangBotMaxConcurrent   = 4
-	gangBotReplyTimeout    = 2 * time.Minute
+	// Replies aren't capped: the model's own max_tokens bounds them. This
+	// only keeps a reply inside messages.body, a MySQL TEXT (64 KB).
+	gangBotMaxReplyBytes = 60_000
+	gangBotMaxConcurrent = 4
+	gangBotReplyTimeout  = 2 * time.Minute
 )
 
 const gangBotSystemPrompt = `你是 gang-bot，Gang Chat 群聊里的一个成员，是个 AI。
@@ -399,7 +401,24 @@ func cleanGangBotReply(reply string) string {
 	for strings.Contains(reply, "\n\n\n") {
 		reply = strings.ReplaceAll(reply, "\n\n\n", "\n\n")
 	}
-	return truncateRunes(reply, gangBotMaxReplyRunes)
+	return capReplyBytes(reply, gangBotMaxReplyBytes)
+}
+
+// capReplyBytes cuts a reply that wouldn't fit the database at the last
+// whole line, and says so, instead of chopping it mid-line.
+func capReplyBytes(reply string, max int) string {
+	if len(reply) <= max {
+		return reply
+	}
+	const note = "\n（太长了，后面省略）"
+	cut := reply[:max-len(note)]
+	for !utf8.ValidString(cut) {
+		cut = cut[:len(cut)-1]
+	}
+	if line := strings.LastIndex(cut, "\n"); line > 0 {
+		cut = cut[:line]
+	}
+	return strings.TrimRight(cut, " \n") + note
 }
 
 // gangBotMentionReply puts exactly one @ of the asker in front of the reply.
