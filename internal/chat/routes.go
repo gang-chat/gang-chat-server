@@ -47,6 +47,8 @@ type Handler struct {
 	Push      *push.Dispatcher
 	// Bot is gang-bot, nil when it isn't configured.
 	Bot *gangBot
+	// gamesKey signs gang-games tickets; loaded on first use.
+	gamesKey gamesTicketKey
 
 	stickerPackLocks    keyedMutexes
 	assetLifecycleLocks keyedMutexes
@@ -227,6 +229,7 @@ func RegisterRoutes(g *gin.RouterGroup, db *sql.DB, cfg *config.Config, bus *eve
 
 	g.GET("/rooms/:room_id/live", h.getLiveState)
 	g.POST("/rooms/:room_id/live/join", h.joinLive)
+	g.POST("/rooms/:room_id/games/ticket", h.issueGamesTicket)
 	g.PATCH("/rooms/:room_id/live/me", h.updateMyLiveState)
 	g.PATCH("/rooms/:room_id/live/me/screen-view", h.updateMyLiveScreenView)
 	g.GET("/rooms/:room_id/live/me/member-volumes", h.listMyLiveMemberVolumes)

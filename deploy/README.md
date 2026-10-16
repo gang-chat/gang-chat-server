@@ -50,7 +50,8 @@ Run them on the **server**, from the deploy directory:
      "email_from": "Gang Chat <no-reply@your-verified-domain.example>",
      "gang_bot_api_url": "https://api.anthropic.com",
      "gang_bot_api_key": "<Anthropic API key>",
-     "gang_bot_model": "claude-opus-5-5"
+     "gang_bot_model": "claude-opus-5-5",
+     "games_ticket_private_key_file": "/opt/gang-chat/keys/ticket-private.pem"
    }
    ```
 4. Asset uploads always go to S3-compatible storage. Asset reads pass through
@@ -75,6 +76,11 @@ Run them on the **server**, from the deploy directory:
    @gang-bot right away, reading only each room's last 10 messages. Room
    admins turn it off per room with the gang-bot switch in room settings
    (`gang_bot_enabled`, on by default).
+   Mini-games: `games_ticket_private_key_file` is the Ed25519 private key that
+   signs tickets for `POST /rooms/:room_id/games/ticket`, which the client uses
+   to open the gang-games-server lobby. The games server holds the matching
+   public key (`TICKET_PUBLIC_KEY_FILE`); `npm run keys -- <dir>` in
+   gang-games-server makes the pair. Without it the endpoint answers 503.
 5. (Optional) `deploy.env` for path overrides — see `deploy.env.example`.
 6. First boot: `./start.sh all`.
 
