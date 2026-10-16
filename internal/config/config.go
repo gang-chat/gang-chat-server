@@ -71,11 +71,6 @@ type Config struct {
 	// persistence or online-presence semantics.
 	FCMProjectID          string `json:"fcm_project_id"`
 	FCMServiceAccountFile string `json:"fcm_service_account_file"`
-
-	// GamesTicketPrivateKeyFile is the Ed25519 private key (PKCS#8 PEM) that
-	// signs tickets for gang-games-server, which holds the public key.
-	// Empty turns the games ticket endpoint off.
-	GamesTicketPrivateKeyFile string `json:"games_ticket_private_key_file"`
 }
 
 func parseList(value string) []string {
