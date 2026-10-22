@@ -31,7 +31,7 @@ Run them on the **server**, from the deploy directory:
    ```json
    {
      "bind": "0.0.0.0:21116",
-     "database_url": "gang_chat:password@tcp(data.ky-z.com:26157)/gang_chat?parseTime=true&charset=utf8mb4&loc=Local",
+     "database_url": "gang_chat:password@tcp(127.0.0.1:3306)/gang_chat?parseTime=true&charset=utf8mb4&loc=Local",
      "jwt_secret": "<long random>",
      "s3_endpoint": "https://data.ky-z.com:9000",
      "s3_bucket": "gang-chat",
