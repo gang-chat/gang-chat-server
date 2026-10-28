@@ -31,15 +31,9 @@ Run them on the **server**, from the deploy directory:
    ```json
    {
      "bind": "0.0.0.0:21116",
-     "database_url": "gang_chat:password@tcp(127.0.0.1:3306)/gang_chat?parseTime=true&charset=utf8mb4&loc=Local",
+     "database_path": "/opt/gang-chat/data/gang-chat.db",
      "jwt_secret": "<long random>",
-     "s3_endpoint": "https://data.ky-z.com:9000",
-     "s3_bucket": "gang-chat",
-     "s3_region": "us-east-1",
-     "s3_access_key_id": "gang-chat",
-     "s3_secret_access_key": "<secret key>",
-     "s3_session_token": "",
-     "s3_force_path_style": true,
+     "storage_path": "/opt/gang-chat/storage",
      "sticker_asset_orphan_ttl_seconds": 2592000,
      "sticker_asset_cleanup_interval_seconds": 3600,
      "livekit_host": "http://localhost:7880",
@@ -50,18 +44,30 @@ Run them on the **server**, from the deploy directory:
      "email_from": "Gang Chat <no-reply@your-verified-domain.example>",
      "gang_bot_api_url": "https://api.anthropic.com",
      "gang_bot_api_key": "<Anthropic API key>",
-     "gang_bot_model": "claude-opus-5-5"
+     "gang_bot_model": "claude-opus-5-5",
+     "admin_username": "ops",
+     "admin_password": "<14+ chars: lower, upper, digit, symbol>",
+     "release_sync_repository_url": "https://github.com/gang-chat/gang-chat-client",
+     "release_sync_asset_prefix": "GangChat",
+     "release_sync_github_token": "",
+     "release_download_base_url": "https://ky-z.com/gang-chat/assets/releases"
    }
    ```
-4. Asset uploads always go to S3-compatible storage. Asset reads pass through
-   the backend using server-side credentials. Object keys are fixed as
-   `assets/<asset_id>/<filename>`, and asset responses include fixed
-   `Cache-Control`, `Expires`, `ETag`, and `Last-Modified` headers.
+   The database is one SQLite file. The server creates it, and its schema, on
+   first start; keep it on a local disk (not NFS), since SQLite's locking
+   needs one. `gang-chat.db-wal` and `gang-chat.db-shm` next to it belong
+   to it. To back it up while the server runs, take a consistent copy with
+   `sqlite3 /opt/gang-chat/data/gang-chat.db ".backup /path/to/backup.db"`
+   rather than copying the files.
+4. Uploaded files live under `storage_path`, which the server creates: each
+   asset at `assets/<asset_id>/<filename>`, served at
+   `/assets/<asset_id>/<filename>` with fixed `Cache-Control`, `Expires`,
+   `ETag`, and `Last-Modified` headers. Back the directory up with the
+   database; the database says which file belongs to which message.
    Sticker uploads are reference-aware: assets used by a message or sticker
    pack are retained, while unreferenced sticker assets are deleted after
-   `sticker_asset_orphan_ttl_seconds` (30 days above). Do not configure a
-   bucket-wide S3 lifecycle rule that expires `assets/` earlier than the app;
-   it cannot see database references and would break historical messages.
+   `sticker_asset_orphan_ttl_seconds` (30 days above). Don't delete files
+   under `assets/` by hand; that would break historical messages.
    Password-reset email is enabled only when both `resend_api_key` and
    `email_from` are configured. Keep the API key only in the server-side
    deployment config; `email_from` must use a sender/domain accepted by Resend.
@@ -75,8 +81,30 @@ Run them on the **server**, from the deploy directory:
    @gang-bot right away, reading only each room's last 10 messages. Room
    admins turn it off per room with the gang-bot switch in room settings
    (`gang_bot_enabled`, on by default).
-5. (Optional) `deploy.env` for path overrides — see `deploy.env.example`.
-6. First boot: `./start.sh all`.
+5. The admin console (gang-chat-admin) is a static page that calls
+   `/api/v1/admin/*` on this server. It stays off until `admin_username` and
+   a strong `admin_password` are set; the log says why at startup. The
+   password needs 14+ characters with a lowercase and an uppercase letter, a
+   digit and a symbol, and must not contain the username, `admin` or
+   `password`.
+   Release sync copies a GitHub release of the client into
+   `storage_path/assets/releases/`, which the server serves at
+   `/assets/releases/<file>`: the installers `<release_sync_asset_prefix>_<tag>`
+   `.dmg`/`.exe`/`.apk`, the `.exe`'s blockmap, and the update feeds
+   `appcast.xml` and `latest.yml` that installed clients poll. Every five
+   minutes the server checks the repository's latest release and syncs it
+   once the release workflow (`.github/workflows/release.yml`) run on its
+   tag has succeeded, so a release reaches the homepage and the update feeds
+   by itself; the console can also sync a tag by hand. A tag synced once, by
+   either, is not synced again by the check, so a version deleted or rolled
+   back in the console stays that way. `release_download_base_url` is where
+   `/assets/releases` is public, for the homepage's download links and the
+   check that `appcast.xml` downloads this release's `.dmg`. Leave
+   `release_sync_repository_url` empty to turn release sync off. The
+   homepage reads the releases the console maintains from
+   `GET /api/v1/releases`.
+6. (Optional) `deploy.env` for path overrides — see `deploy.env.example`.
+7. First boot: `./start.sh all`.
 
 After that, every push to `master` rebuilds and `./restart.sh gang`
 automatically. livekit is left running across deploys; restart it manually

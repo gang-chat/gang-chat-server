@@ -50,7 +50,7 @@ func (h *Handler) recallMessage(c *gin.Context) {
 		_, _ = h.DB.Exec(
 			`INSERT INTO message_recall_requests (id, room_id, message_id, requested_by_user_id, status, created_at, updated_at)
 			 VALUES (?, ?, ?, ?, 'pending', ?, ?)
-			 ON DUPLICATE KEY UPDATE updated_at = VALUES(updated_at)`,
+			 ON CONFLICT DO UPDATE SET updated_at = excluded.updated_at`,
 			requestID, roomID, messageID, userID, now, now,
 		)
 		c.JSON(http.StatusAccepted, gin.H{"recall_request": gin.H{"id": requestID, "message_id": messageID, "room_id": roomID, "status": "pending", "created_at": formatMillis(now)}})

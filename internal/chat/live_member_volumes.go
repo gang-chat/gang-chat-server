@@ -77,9 +77,9 @@ func (h *Handler) updateMyLiveMemberVolume(c *gin.Context) {
 	_, err := h.DB.Exec(
 		`INSERT INTO live_member_volumes (room_id, listener_user_id, target_user_id, volume, updated_at)
 		 VALUES (?, ?, ?, ?, ?)
-		 ON DUPLICATE KEY UPDATE
-		   volume = VALUES(volume),
-		   updated_at = VALUES(updated_at)`,
+		 ON CONFLICT DO UPDATE SET
+		   volume = excluded.volume,
+		   updated_at = excluded.updated_at`,
 		roomID, listenerID, targetID, *req.Volume, now,
 	)
 	if err != nil {

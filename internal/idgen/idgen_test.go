@@ -2,90 +2,31 @@ package idgen
 
 import (
 	"database/sql"
-	"fmt"
-	"os"
-	"strings"
+	"path/filepath"
 	"sync"
 	"testing"
 
-	_ "github.com/go-sql-driver/mysql"
+	gangdb "github.com/zhuangkaiyi/gang-chat/server/internal/db"
 )
 
 func newSeqDB(t *testing.T) *sql.DB {
 	t.Helper()
-	dsn := os.Getenv("GANG_TEST_IDGEN_MYSQL_DSN")
-	if dsn == "" {
-		t.Skip("GANG_TEST_IDGEN_MYSQL_DSN is required for MySQL-backed idgen tests")
-	}
-	db, err := sql.Open("mysql", dsn)
+	pool, err := sql.Open("sqlite", gangdb.DSN(filepath.Join(t.TempDir(), "idgen.db")))
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
-	// Match the production pool limit so the concurrency test exercises row
-	// locking instead of exhausting the MySQL server's global connection cap.
-	db.SetMaxOpenConns(25)
-	db.SetMaxIdleConns(10)
-	t.Cleanup(func() { _ = db.Close() })
-	if err := requireIsolatedIDGenTestDatabase(db); err != nil {
-		t.Fatal(err)
+	pool.SetMaxOpenConns(16)
+	t.Cleanup(func() { _ = pool.Close() })
+	for _, statement := range []string{
+		`CREATE TABLE id_sequences (name TEXT PRIMARY KEY NOT NULL, next_value INTEGER NOT NULL)`,
+		`CREATE TABLE users (uid TEXT)`,
+		`CREATE TABLE rooms (rid TEXT)`,
+	} {
+		if _, err := pool.Exec(statement); err != nil {
+			t.Fatalf("create schema: %v", err)
+		}
 	}
-	if _, err := db.Exec(`CREATE TABLE IF NOT EXISTS id_sequences (name VARCHAR(64) PRIMARY KEY NOT NULL, next_value BIGINT NOT NULL)`); err != nil {
-		t.Fatalf("create: %v", err)
-	}
-	if _, err := db.Exec(`CREATE TABLE IF NOT EXISTS users (uid VARCHAR(128))`); err != nil {
-		t.Fatalf("create users: %v", err)
-	}
-	if _, err := db.Exec(`CREATE TABLE IF NOT EXISTS rooms (rid VARCHAR(128))`); err != nil {
-		t.Fatalf("create rooms: %v", err)
-	}
-	if _, err := db.Exec(`DELETE FROM id_sequences`); err != nil {
-		t.Fatalf("clear: %v", err)
-	}
-	if _, err := db.Exec(`DELETE FROM users`); err != nil {
-		t.Fatalf("clear users: %v", err)
-	}
-	if _, err := db.Exec(`DELETE FROM rooms`); err != nil {
-		t.Fatalf("clear rooms: %v", err)
-	}
-	return db
-}
-
-func requireIsolatedIDGenTestDatabase(db *sql.DB) error {
-	var name string
-	if err := db.QueryRow(`SELECT DATABASE()`).Scan(&name); err != nil {
-		return fmt.Errorf("read idgen test database name: %w", err)
-	}
-	if !isSafeIDGenTestDatabaseName(name) {
-		return fmt.Errorf("refusing to modify non-test idgen database %q", name)
-	}
-	return nil
-}
-
-func isSafeIDGenTestDatabaseName(name string) bool {
-	name = strings.ToLower(strings.TrimSpace(name))
-	return name != "" && (strings.HasSuffix(name, "_test") || strings.Contains(name, "_test_"))
-}
-
-func TestSafeIDGenTestDatabaseName(t *testing.T) {
-	t.Parallel()
-	tests := map[string]bool{
-		"gang_chat_idgen_test": true,
-		"idgen_test_parallel":  true,
-		" GANG_TEST ":          true,
-		"gang_chat":            false,
-		"contest":              false,
-		"test":                 false,
-		"":                     false,
-	}
-	for name, want := range tests {
-		name, want := name, want
-		t.Run(name, func(t *testing.T) {
-			t.Parallel()
-			if got := isSafeIDGenTestDatabaseName(name); got != want {
-				t.Fatalf("isSafeIDGenTestDatabaseName(%q) = %v, want %v", name, got, want)
-			}
-		})
-	}
+	return pool
 }
 
 func TestNextSeqMonotonicStart(t *testing.T) {
@@ -201,7 +142,7 @@ func TestNextUserUIDSkipsReservedAndOccupiedHighValues(t *testing.T) {
 }
 
 func TestNextSeqReturnsDatabaseErrorsInsteadOfDuplicateFallbacks(t *testing.T) {
-	db, err := sql.Open("mysql", "")
+	db, err := sql.Open("sqlite", gangdb.DSN(filepath.Join(t.TempDir(), "closed.db")))
 	if err != nil {
 		t.Fatalf("open closed test database: %v", err)
 	}

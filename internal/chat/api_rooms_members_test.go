@@ -3,56 +3,24 @@ package chat
 import (
 	"fmt"
 	"github.com/zhuangkaiyi/gang-chat/server/internal/idgen"
-	"github.com/zhuangkaiyi/gang-chat/server/internal/model"
 	"net/http"
 	"testing"
 )
 
-func TestRoomAIVoicePreferenceMigrationAndNewMemberDefault(t *testing.T) {
+func TestRoomAIVoicePreferenceNewMemberDefault(t *testing.T) {
 	api := newAPIHarness(t)
-	owner := api.register("voice_migration_owner")
-	member := api.register("voice_migration_member")
-	lateMember := api.register("voice_migration_late")
+	owner := api.register("voice_default_owner")
+	member := api.register("voice_default_member")
 	room := api.createRoom(owner.Token, map[string]any{
-		"name":        "Voice Migration",
+		"name":        "Voice Default",
 		"join_policy": "open",
 	})
 	roomID := room["id"].(string)
+
 	status, response := api.request(http.MethodPost, "/rooms/"+roomID+"/join", member.Token, nil)
 	api.requireStatus(status, http.StatusOK, response)
-
-	if _, err := api.db.Exec(`DELETE FROM room_ai_voice_preferences WHERE room_id = ?`, roomID); err != nil {
-		t.Fatalf("clear new preferences before migration: %v", err)
-	}
-	if _, err := api.db.Exec(`UPDATE rooms SET ai_voice_announce_enabled = 1 WHERE id = ?`, roomID); err != nil {
-		t.Fatalf("seed legacy room preference: %v", err)
-	}
-	if err := model.EnsureRoomAIVoicePreferencesSchema(api.db); err != nil {
-		t.Fatalf("migrate room AI voice preferences: %v", err)
-	}
-
-	for _, user := range []testSession{owner, member} {
-		var enabled int
-		if err := api.db.QueryRow(
-			`SELECT enabled FROM room_ai_voice_preferences WHERE room_id = ? AND user_id = ?`,
-			roomID,
-			user.User["id"],
-		).Scan(&enabled); err != nil || enabled != 1 {
-			t.Fatalf("existing member should inherit the legacy enabled value: enabled=%d err=%v", enabled, err)
-		}
-	}
-	var legacyEnabled int
-	if err := api.db.QueryRow(`SELECT ai_voice_announce_enabled FROM rooms WHERE id = ?`, roomID).Scan(&legacyEnabled); err != nil {
-		t.Fatalf("read normalized legacy preference: %v", err)
-	}
-	if legacyEnabled != 0 {
-		t.Fatalf("legacy room preference should be normalized after migration: %d", legacyEnabled)
-	}
-
-	status, response = api.request(http.MethodPost, "/rooms/"+roomID+"/join", lateMember.Token, nil)
-	api.requireStatus(status, http.StatusOK, response)
 	if response["room"].(map[string]any)["ai_voice_announcements_enabled"] != false {
-		t.Fatalf("members joining after migration should use the disabled default: %v", response)
+		t.Fatalf("new members should start with AI voice announcements off: %v", response)
 	}
 }
 

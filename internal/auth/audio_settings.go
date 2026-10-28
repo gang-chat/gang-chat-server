@@ -73,7 +73,7 @@ func (h *Handler) updateAudioSettings(c *gin.Context) {
 func (h *Handler) ensureAudioSettings(userID string) (audioSettingsRecord, error) {
 	now := time.Now().UTC().UnixMilli()
 	_, err := h.DB.Exec(
-		`INSERT IGNORE INTO user_audio_settings (
+		`INSERT OR IGNORE INTO user_audio_settings (
 		   user_id, default_audio_input_volume, default_audio_output_volume,
 		   live_mic_input_volume, live_voice_output_volume,
 		   live_screen_share_output_volume, live_music_output_volume, updated_at

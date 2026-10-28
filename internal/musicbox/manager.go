@@ -156,12 +156,7 @@ func NewManager(db *sql.DB, cfg Config, tokenFn TokenFunc, onRoomChanged func(st
 	// A restart preserves queues and prepared media, but resets every room to a
 	// silent stopped state. Playback resumes only after an explicit command.
 	if cfg.Enabled {
-		if err := m.store.ensureNextGenerationSchema(); err != nil {
-			log.Printf("musicbox: next-generation schema unavailable: %v", err)
-			m.cfg.Enabled = false
-		} else {
-			m.resetOnStartup()
-		}
+		m.resetOnStartup()
 	}
 	return m
 }

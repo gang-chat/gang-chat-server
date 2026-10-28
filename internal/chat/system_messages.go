@@ -27,12 +27,9 @@ func visibleMessageSQL(alias string) string {
 	return `NOT (` + prefix + `type = 'system'
 		AND EXISTS (
 			SELECT 1
-			FROM JSON_TABLE(` + prefix + `attachments_json, '$[*]' COLUMNS (
-				attachment_type VARCHAR(64) PATH '$.type' NULL ON EMPTY,
-				attachment_event VARCHAR(64) PATH '$.event' NULL ON EMPTY
-			)) attachment
-			WHERE lower(COALESCE(attachment.attachment_type, '')) = 'system'
-			  AND lower(COALESCE(attachment.attachment_event, '')) IN ('live_joined', 'live_left')
+			FROM json_each(` + prefix + `attachments_json) attachment
+			WHERE lower(COALESCE(` + jsonObjectField("attachment", "$.type") + `, '')) = 'system'
+			  AND lower(COALESCE(` + jsonObjectField("attachment", "$.event") + `, '')) IN ('live_joined', 'live_left')
 		)
 	)`
 }

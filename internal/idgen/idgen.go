@@ -32,25 +32,13 @@ func NextRoomRID(db *sql.DB) (string, error) {
 }
 
 // nextSeq atomically allocates and returns the next value for the named
-// sequence. The row is locked with SELECT ... FOR UPDATE, so concurrent callers
-// cannot receive the same id. It also repairs older deployments where the
-// sequence table or row is missing by seeding from already-visible numeric ids.
+// sequence. The transaction holds the database's write lock (it begins
+// IMMEDIATE), so concurrent callers cannot receive the same id. It also repairs
+// sequences whose row is missing by seeding from already-visible numeric ids.
 func nextSeq(db *sql.DB, name string, start int64) (string, error) {
 	if db == nil {
 		return "", fmt.Errorf("allocate %s: database is nil", name)
 	}
-	// MySQL implicitly commits around DDL. Creating the compatibility table
-	// inside the allocation transaction would therefore release the row lock
-	// used below and allow concurrent callers to receive the same value.
-	if _, err := db.Exec(
-		`CREATE TABLE IF NOT EXISTS id_sequences (
-			name VARCHAR(64) PRIMARY KEY NOT NULL,
-			next_value BIGINT NOT NULL
-		) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
-	); err != nil {
-		return "", fmt.Errorf("ensure sequence table %s: %w", name, err)
-	}
-
 	tx, err := db.Begin()
 	if err != nil {
 		return "", fmt.Errorf("begin sequence transaction %s: %w", name, err)
@@ -64,20 +52,20 @@ func nextSeq(db *sql.DB, name string, start int64) (string, error) {
 	if _, err := tx.Exec(
 		`INSERT INTO id_sequences (name, next_value)
 		 VALUES (?, ?)
-		 ON DUPLICATE KEY UPDATE next_value = GREATEST(next_value, VALUES(next_value))`,
+		 ON CONFLICT (name) DO UPDATE SET next_value = max(next_value, excluded.next_value)`,
 		name, seed,
 	); err != nil {
 		return "", fmt.Errorf("ensure sequence row %s seed=%d: %w", name, seed, err)
 	}
 
 	allocated := start
-	if err := tx.QueryRow(`SELECT next_value FROM id_sequences WHERE name = ? FOR UPDATE`, name).Scan(&allocated); err != nil {
-		return "", fmt.Errorf("lock sequence %s: %w", name, err)
+	if err := tx.QueryRow(`SELECT next_value FROM id_sequences WHERE name = ?`, name).Scan(&allocated); err != nil {
+		return "", fmt.Errorf("read sequence %s: %w", name, err)
 	}
 	if name == "user_uid" && allocated >= ReservedSuperUIDValue && seed < ReservedSuperUIDValue {
 		// Older deployments seeded this sequence from the reserved super-user
-		// UID. Repair the poisoned value while holding the sequence row lock so
-		// concurrent registration remains serialized without MySQL gap locks.
+		// UID. Repair the poisoned value inside the transaction so concurrent
+		// registration stays serialized.
 		allocated = seed
 	} else if allocated < seed {
 		allocated = seed
@@ -103,16 +91,16 @@ func sequenceSeedValue(tx *sql.Tx, name string, start int64) (int64, error) {
 	args := []any{start}
 	switch name {
 	case "user_uid":
-		query = `SELECT COALESCE(MAX(CAST(uid AS UNSIGNED)) + 1, ?)
+		query = `SELECT COALESCE(MAX(CAST(uid AS INTEGER)) + 1, ?)
 			FROM users
-			WHERE uid REGEXP '^[0-9]+$'
-			  AND CAST(uid AS UNSIGNED) >= ?
-			  AND CAST(uid AS UNSIGNED) < ?`
+			WHERE uid <> '' AND uid NOT GLOB '*[^0-9]*'
+			  AND CAST(uid AS INTEGER) >= ?
+			  AND CAST(uid AS INTEGER) < ?`
 		args = append(args, start, ReservedSuperUIDValue)
 	case "room_rid":
-		query = `SELECT COALESCE(MAX(CAST(rid AS UNSIGNED)) + 1, ?)
+		query = `SELECT COALESCE(MAX(CAST(rid AS INTEGER)) + 1, ?)
 			FROM rooms
-			WHERE rid REGEXP '^[0-9]+$'`
+			WHERE rid <> '' AND rid NOT GLOB '*[^0-9]*'`
 	default:
 		return start, nil
 	}

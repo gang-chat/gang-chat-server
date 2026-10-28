@@ -12,10 +12,10 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
-	"github.com/go-sql-driver/mysql"
 	"github.com/google/uuid"
 	"github.com/zhuangkaiyi/gang-chat/server/internal/apierrors"
 	"github.com/zhuangkaiyi/gang-chat/server/internal/config"
+	gangdb "github.com/zhuangkaiyi/gang-chat/server/internal/db"
 	"github.com/zhuangkaiyi/gang-chat/server/internal/eventbus"
 	"github.com/zhuangkaiyi/gang-chat/server/internal/idgen"
 	"github.com/zhuangkaiyi/gang-chat/server/internal/model"
@@ -52,12 +52,6 @@ func NewHandler(db *sql.DB, cfg *config.Config, bus *eventbus.Bus) *Handler {
 func RegisterRoutes(g *gin.RouterGroup, db *sql.DB, cfg *config.Config, bus *eventbus.Bus) *Handler {
 	h := NewHandler(db, cfg, bus)
 	if err := h.ensureSuperUser(); err != nil {
-		panic(err)
-	}
-	if err := h.ensurePasswordResetSchema(); err != nil {
-		panic(err)
-	}
-	if err := h.ensureEmailVerificationSchema(); err != nil {
 		panic(err)
 	}
 	auth := g.Group("/auth")
@@ -508,12 +502,7 @@ func isDuplicateEntryError(err error) bool {
 	if err == nil {
 		return false
 	}
-	var mysqlErr *mysql.MySQLError
-	if errors.As(err, &mysqlErr) && mysqlErr.Number == 1062 {
-		return true
-	}
-	message := err.Error()
-	return strings.Contains(message, "UNIQUE constraint failed") || strings.Contains(message, "Duplicate entry")
+	return gangdb.IsUniqueViolation(err)
 }
 
 func errorJSON(c *gin.Context, status int, code, message string) {

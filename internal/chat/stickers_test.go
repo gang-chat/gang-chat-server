@@ -3,8 +3,6 @@ package chat
 import (
 	"errors"
 	"testing"
-
-	mysqlDriver "github.com/go-sql-driver/mysql"
 )
 
 func TestNumberedNameChangesOnlyTheNewDuplicate(t *testing.T) {
@@ -23,10 +21,14 @@ func TestNumberedNameChangesOnlyTheNewDuplicate(t *testing.T) {
 	}
 }
 
-func TestStickerNameConflictRecognizesMySQLDuplicate(t *testing.T) {
-	err := &mysqlDriver.MySQLError{Number: 1062, Message: "Duplicate entry"}
+func TestStickerNameConflictRecognizesUniqueViolation(t *testing.T) {
+	pool := openTestDatabase(t)
+	if _, err := pool.Exec(`INSERT INTO id_sequences (name, next_value) VALUES ('dup', 1)`); err != nil {
+		t.Fatalf("seed row: %v", err)
+	}
+	_, err := pool.Exec(`INSERT INTO id_sequences (name, next_value) VALUES ('dup', 2)`)
 	if !isStickerNameConflict(err) {
-		t.Fatal("MySQL duplicate-key errors must be retried with a numbered name")
+		t.Fatalf("unique-constraint errors must be retried with a numbered name: %v", err)
 	}
 	if isStickerNameConflict(errors.New("connection closed")) {
 		t.Fatal("non-conflict database errors must not be swallowed")

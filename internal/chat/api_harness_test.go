@@ -18,6 +18,7 @@ import (
 	"net/http/httptest"
 	"net/textproto"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
@@ -99,6 +100,17 @@ type testSession struct {
 	User  map[string]any
 }
 
+// openTestDatabase opens a new, empty database in the test's temp directory.
+func openTestDatabase(t *testing.T) *sql.DB {
+	t.Helper()
+	pool, err := db.Open(filepath.Join(t.TempDir(), "gang-chat.db"))
+	if err != nil {
+		t.Fatalf("open test database: %v", err)
+	}
+	t.Cleanup(func() { _ = pool.Close() })
+	return pool
+}
+
 func newAPIHarness(t *testing.T) *apiHarness {
 	t.Helper()
 	gin.SetMode(gin.TestMode)
@@ -111,13 +123,7 @@ func newAPIHarness(t *testing.T) *apiHarness {
 		LoginWindowSeconds:     900,
 		LiveKitHost:            "http://localhost:7880",
 	}
-	dsn := os.Getenv("GANG_TEST_MYSQL_DSN")
-	if dsn == "" {
-		t.Skip("GANG_TEST_MYSQL_DSN is required for MySQL-backed chat API tests")
-	}
-	pool := db.Connect(dsn)
-	t.Cleanup(func() { _ = pool.Close() })
-	prepareChatMySQLTestDatabase(t, pool)
+	pool := openTestDatabase(t)
 
 	router := gin.New()
 	api := router.Group("/api/v1")
@@ -626,15 +632,8 @@ func parseNumericID(t *testing.T, value any) int64 {
 func assertRoomInvitesKeepDeletedRooms(t *testing.T, pool *sql.DB) {
 	t.Helper()
 	rows, err := pool.Query(`
-		SELECT kcu.REFERENCED_TABLE_NAME, kcu.COLUMN_NAME, rc.DELETE_RULE
-		FROM information_schema.KEY_COLUMN_USAGE kcu
-		JOIN information_schema.REFERENTIAL_CONSTRAINTS rc
-		  ON rc.CONSTRAINT_SCHEMA = kcu.CONSTRAINT_SCHEMA
-		 AND rc.CONSTRAINT_NAME = kcu.CONSTRAINT_NAME
-		 AND rc.TABLE_NAME = kcu.TABLE_NAME
-		WHERE kcu.TABLE_SCHEMA = DATABASE()
-		  AND kcu.TABLE_NAME = 'room_invites'
-		  AND kcu.REFERENCED_TABLE_NAME IS NOT NULL`)
+		SELECT "table", "from", on_delete
+		FROM pragma_foreign_key_list('room_invites')`)
 	if err != nil {
 		t.Fatalf("read room_invites foreign keys: %v", err)
 	}

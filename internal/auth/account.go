@@ -366,14 +366,8 @@ func (h *Handler) deleteAccount(c *gin.Context) {
 }
 
 func (h *Handler) deleteUserAccount(c *gin.Context, user *model.User) {
-	// Account deletion must fail closed if the retention migration cannot be
-	// applied; otherwise legacy CASCADE constraints could erase message history
-	// and the assets referenced by it.
-	if err := model.EnsureHistoricalMessageRetentionSchema(h.DB); err != nil {
-		log.Printf("auth: prepare historical message retention: %v", err)
-		errorJSON(c, http.StatusInternalServerError, "internal_error", "delete account failed")
-		return
-	}
+	// Messages keep their sender: the schema has no foreign key from
+	// messages.sender_user_id to users, and assets.owner_user_id is SET NULL.
 	tx, err := h.DB.Begin()
 	if err != nil {
 		errorJSON(c, http.StatusInternalServerError, "internal_error", "delete account failed")

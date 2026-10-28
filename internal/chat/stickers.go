@@ -5,7 +5,6 @@ import (
 	"bytes"
 	"context"
 	"database/sql"
-	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -16,7 +15,7 @@ import (
 	"sync"
 
 	"github.com/gin-gonic/gin"
-	mysqlDriver "github.com/go-sql-driver/mysql"
+	gangdb "github.com/zhuangkaiyi/gang-chat/server/internal/db"
 )
 
 const (
@@ -746,7 +745,7 @@ func (h *Handler) ensureDefaultStickerPack(scope, ownerUserID, roomID, name stri
 		err = tx.QueryRow(
 			`SELECT id FROM sticker_packs
 			 WHERE scope = 'personal' AND owner_user_id = ? AND name = ?
-			 ORDER BY created_at ASC LIMIT 1 FOR UPDATE`,
+			 ORDER BY created_at ASC LIMIT 1`,
 			ownerUserID, name,
 		).Scan(&id)
 		if err == nil {
@@ -775,7 +774,7 @@ func (h *Handler) ensureDefaultStickerPack(scope, ownerUserID, roomID, name stri
 	err = tx.QueryRow(
 		`SELECT id FROM sticker_packs
 		 WHERE scope = 'room' AND room_id = ? AND name = ?
-		 ORDER BY created_at ASC LIMIT 1 FOR UPDATE`,
+		 ORDER BY created_at ASC LIMIT 1`,
 		roomID, name,
 	).Scan(&id)
 	if err == nil {
@@ -814,9 +813,9 @@ func (h *Handler) packHasScope(packID, scope, roomID string) bool {
 func lockStickerPackNamespace(tx *sql.Tx, scope, ownerUserID, roomID string) error {
 	var id string
 	if scope == "room" {
-		return tx.QueryRow(`SELECT id FROM rooms WHERE id = ? FOR UPDATE`, roomID).Scan(&id)
+		return tx.QueryRow(`SELECT id FROM rooms WHERE id = ?`, roomID).Scan(&id)
 	}
-	return tx.QueryRow(`SELECT id FROM users WHERE id = ? FOR UPDATE`, ownerUserID).Scan(&id)
+	return tx.QueryRow(`SELECT id FROM users WHERE id = ?`, ownerUserID).Scan(&id)
 }
 
 func uniqueStickerPackNameTx(tx *sql.Tx, scope, ownerUserID, roomID, desired, excludePackID string) (string, error) {
@@ -832,14 +831,14 @@ func uniqueStickerPackNameTx(tx *sql.Tx, scope, ownerUserID, roomID, desired, ex
 			err = tx.QueryRow(
 				`SELECT name FROM sticker_packs
 				 WHERE scope = 'room' AND room_id = ? AND id <> ? AND name = ?
-				 LIMIT 1 FOR UPDATE`,
+				 LIMIT 1`,
 				roomID, excludePackID, candidate,
 			).Scan(&existing)
 		} else {
 			err = tx.QueryRow(
 				`SELECT name FROM sticker_packs
 				 WHERE scope = 'personal' AND owner_user_id = ? AND id <> ? AND name = ?
-				 LIMIT 1 FOR UPDATE`,
+				 LIMIT 1`,
 				ownerUserID, excludePackID, candidate,
 			).Scan(&existing)
 		}
@@ -891,7 +890,7 @@ func (h *Handler) addStickerToPack(packID, assetID, desiredName string, requeste
 	}
 	defer tx.Rollback()
 	var lockedPackID string
-	if err := tx.QueryRow(`SELECT id FROM sticker_packs WHERE id = ? FOR UPDATE`, packID).Scan(&lockedPackID); err != nil {
+	if err := tx.QueryRow(`SELECT id FROM sticker_packs WHERE id = ?`, packID).Scan(&lockedPackID); err != nil {
 		return "", err
 	}
 	sortOrder := 0
@@ -949,7 +948,7 @@ func (h *Handler) renameStickerInPack(packID, stickerID, desiredName string) err
 	}
 	defer tx.Rollback()
 	var lockedPackID string
-	if err := tx.QueryRow(`SELECT id FROM sticker_packs WHERE id = ? FOR UPDATE`, packID).Scan(&lockedPackID); err != nil {
+	if err := tx.QueryRow(`SELECT id FROM sticker_packs WHERE id = ?`, packID).Scan(&lockedPackID); err != nil {
 		return err
 	}
 	base := normalizeStickerName(desiredName)
@@ -977,7 +976,7 @@ func uniqueStickerNameTx(tx *sql.Tx, packID, desired, excludeStickerID string) (
 		err := tx.QueryRow(
 			`SELECT name FROM stickers
 			 WHERE pack_id = ? AND id <> ? AND name = ?
-			 LIMIT 1 FOR UPDATE`,
+			 LIMIT 1`,
 			packID, excludeStickerID, candidate,
 		).Scan(&existing)
 		if err == sql.ErrNoRows {
@@ -1001,14 +1000,7 @@ func isStickerNameConflict(err error) bool {
 	if err == nil {
 		return false
 	}
-	var mysqlErr *mysqlDriver.MySQLError
-	if errors.As(err, &mysqlErr) {
-		return mysqlErr.Number == 1062
-	}
-	message := err.Error()
-	return (strings.Contains(message, "UNIQUE constraint failed") &&
-		strings.Contains(message, "stickers")) ||
-		strings.Contains(message, "Duplicate entry")
+	return gangdb.IsUniqueViolation(err)
 }
 
 func (h *Handler) touchStickerPack(packID string) {

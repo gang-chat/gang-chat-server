@@ -88,7 +88,7 @@ func (s *PlaylistStore) mergePlaylists(
 		var lockedUserID string
 		err := tx.QueryRowContext(
 			ctx,
-			`SELECT id FROM users WHERE id = ? FOR UPDATE`,
+			`SELECT id FROM users WHERE id = ?`,
 			scope.ownerUserID,
 		).Scan(&lockedUserID)
 		if errors.Is(err, sql.ErrNoRows) {
@@ -116,8 +116,7 @@ func (s *PlaylistStore) mergePlaylists(
 			 FROM music_playlist_items i
 			 JOIN music_tracks t ON t.id = i.track_id
 			 WHERE i.playlist_id = ?
-			 ORDER BY i.sort_order ASC, i.created_at ASC, i.id ASC
-			 FOR UPDATE`,
+			 ORDER BY i.sort_order ASC, i.created_at ASC, i.id ASC`,
 			playlistID,
 		)
 		if err != nil {
@@ -394,7 +393,7 @@ func mergePlaylistNameConflicts(
 	rows, err := tx.QueryContext(
 		ctx,
 		`SELECT id FROM music_playlists
-		 WHERE `+where+` AND name = ? FOR UPDATE`,
+		 WHERE `+where+` AND name = ?`,
 		args...,
 	)
 	if err != nil {

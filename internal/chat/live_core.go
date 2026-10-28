@@ -74,10 +74,10 @@ func (h *Handler) joinLive(c *gin.Context) {
 		headphonesMuted = true
 	}
 	duplicateUpdates := []string{
-		"live_session_id = VALUES(live_session_id)",
-		"client_live_session_id = VALUES(client_live_session_id)",
-		"joined_at = VALUES(joined_at)",
-		"updated_at = VALUES(updated_at)",
+		"live_session_id = excluded.live_session_id",
+		"client_live_session_id = excluded.client_live_session_id",
+		"joined_at = excluded.joined_at",
+		"updated_at = excluded.updated_at",
 		"camera_on = 0",
 		"camera_mirrored = 0",
 		"screen_sharing = 0",
@@ -88,10 +88,10 @@ func (h *Handler) joinLive(c *gin.Context) {
 	// behavior. New clients send both choices and make the first join snapshot
 	// authoritative instead of publishing a temporary default audio state.
 	if req.MicMuted != nil {
-		duplicateUpdates = append(duplicateUpdates, "mic_muted = VALUES(mic_muted)")
+		duplicateUpdates = append(duplicateUpdates, "mic_muted = excluded.mic_muted")
 	}
 	if req.HeadphonesMuted != nil {
-		duplicateUpdates = append(duplicateUpdates, "headphones_muted = VALUES(headphones_muted)")
+		duplicateUpdates = append(duplicateUpdates, "headphones_muted = excluded.headphones_muted")
 	}
 	_, err := h.DB.Exec(
 		`INSERT INTO live_participants (
@@ -99,7 +99,7 @@ func (h *Handler) joinLive(c *gin.Context) {
 		   mic_muted, mic_blocked, headphones_muted, headphones_blocked,
 		   voice_blocked, camera_on, camera_mirrored, screen_sharing, watching_screen_user_id, connection_state
 		 ) VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, 0, 0, 0, 0, 0, NULL, 'joining')
-		 ON DUPLICATE KEY UPDATE `+strings.Join(duplicateUpdates, ", "),
+		 ON CONFLICT DO UPDATE SET `+strings.Join(duplicateUpdates, ", "),
 		liveSessionID, roomID, userID, req.ClientLiveSessionID, now, now,
 		boolToInt(micMuted), boolToInt(headphonesMuted),
 	)

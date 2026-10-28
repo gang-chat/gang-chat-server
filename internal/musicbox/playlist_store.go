@@ -251,72 +251,6 @@ func NewPlaylistStore(db *sql.DB) *PlaylistStore {
 	return &PlaylistStore{db: db}
 }
 
-func (s *PlaylistStore) EnsureSchema() error {
-	if s == nil || s.db == nil {
-		return errors.New("music playlist database is unavailable")
-	}
-	statements := []string{
-		`CREATE TABLE IF NOT EXISTS music_tracks (
-			id VARCHAR(128) NOT NULL,
-			source VARCHAR(32) NOT NULL,
-			external_track_id VARCHAR(256) NOT NULL,
-			title VARCHAR(512) NOT NULL,
-			artist VARCHAR(512) NOT NULL DEFAULT '',
-			artists_json JSON NOT NULL,
-			duration_ms BIGINT NULL,
-			created_at BIGINT NOT NULL,
-			updated_at BIGINT NOT NULL,
-			PRIMARY KEY (id),
-			UNIQUE KEY uq_music_tracks_source_external (source, external_track_id)
-		) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
-		`CREATE TABLE IF NOT EXISTS music_playlists (
-			id VARCHAR(128) NOT NULL,
-			scope_type VARCHAR(16) NOT NULL,
-			owner_user_id VARCHAR(128) NULL,
-			room_id VARCHAR(128) NULL,
-			name VARCHAR(64) NOT NULL,
-			description VARCHAR(512) NOT NULL DEFAULT '',
-			revision BIGINT NOT NULL DEFAULT 1,
-			sort_order BIGINT NOT NULL DEFAULT 0,
-			created_at BIGINT NOT NULL,
-			updated_at BIGINT NOT NULL,
-			PRIMARY KEY (id),
-			UNIQUE KEY uq_music_playlists_user_name (owner_user_id, name),
-			KEY idx_music_playlists_user_order (owner_user_id, sort_order, created_at),
-			KEY idx_music_playlists_room_order (room_id, sort_order, created_at),
-			CONSTRAINT fk_music_playlists_owner FOREIGN KEY (owner_user_id)
-				REFERENCES users (id) ON DELETE CASCADE,
-			CONSTRAINT fk_music_playlists_room FOREIGN KEY (room_id)
-				REFERENCES rooms (id) ON DELETE CASCADE
-		) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
-		`CREATE TABLE IF NOT EXISTS music_playlist_items (
-			id VARCHAR(128) NOT NULL,
-			playlist_id VARCHAR(128) NOT NULL,
-			track_id VARCHAR(128) NOT NULL,
-			added_by_user_id VARCHAR(128) NOT NULL,
-			sort_order BIGINT NOT NULL,
-			created_at BIGINT NOT NULL,
-			updated_at BIGINT NOT NULL,
-			PRIMARY KEY (id),
-			KEY idx_music_playlist_items_order (playlist_id, sort_order, created_at, id),
-			KEY idx_music_playlist_items_track (track_id),
-			KEY idx_music_playlist_items_adder (added_by_user_id),
-			CONSTRAINT fk_music_playlist_items_playlist FOREIGN KEY (playlist_id)
-				REFERENCES music_playlists (id) ON DELETE CASCADE,
-			CONSTRAINT fk_music_playlist_items_track FOREIGN KEY (track_id)
-				REFERENCES music_tracks (id) ON DELETE RESTRICT,
-			CONSTRAINT fk_music_playlist_items_adder FOREIGN KEY (added_by_user_id)
-				REFERENCES users (id) ON DELETE CASCADE
-		) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
-	}
-	for _, statement := range statements {
-		if _, err := s.db.Exec(statement); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
 func normalizePage(page, pageSize int) (int, int) {
 	if page < 1 {
 		page = 1
@@ -404,7 +338,7 @@ func (s *PlaylistStore) CreateUserPlaylist(
 	var lockedUserID string
 	if err := tx.QueryRowContext(
 		ctx,
-		`SELECT id FROM users WHERE id = ? FOR UPDATE`,
+		`SELECT id FROM users WHERE id = ?`,
 		ownerUserID,
 	).Scan(&lockedUserID); err != nil {
 		return PlaylistSummary{}, err
@@ -485,7 +419,7 @@ func (s *PlaylistStore) CloneSnapshotToUserPlaylist(
 	var lockedUserID string
 	if err := tx.QueryRowContext(
 		ctx,
-		`SELECT id FROM users WHERE id = ? FOR UPDATE`,
+		`SELECT id FROM users WHERE id = ?`,
 		ownerUserID,
 	).Scan(&lockedUserID); err != nil {
 		return PlaylistSummary{}, err
@@ -558,17 +492,17 @@ func (s *PlaylistStore) CloneSnapshotToUserPlaylist(
 			 (id, source, external_track_id, title, artist, artists_json,
 			  duration_ms, created_at, updated_at)
 			 VALUES (?, ?, ?, ?, ?, ?, NULLIF(?, 0), ?, ?)
-			 ON DUPLICATE KEY UPDATE
-			   title = VALUES(title), artist = VALUES(artist),
-			   artists_json = VALUES(artists_json),
-			   duration_ms = COALESCE(VALUES(duration_ms), duration_ms),
-			   updated_at = VALUES(updated_at)`,
+			 ON CONFLICT DO UPDATE SET
+			   title = excluded.title, artist = excluded.artist,
+			   artists_json = excluded.artists_json,
+			   duration_ms = COALESCE(excluded.duration_ms, duration_ms),
+			   updated_at = excluded.updated_at`,
 			trackID,
 			track.Source,
 			track.TrackID,
 			track.Title,
 			strings.Join(artists, "、"),
-			artistsJSON,
+			string(artistsJSON),
 			track.DurationMS,
 			now,
 			now,
@@ -758,7 +692,7 @@ func (s *PlaylistStore) PinUserPlaylists(
 	var lockedUserID string
 	if err := tx.QueryRowContext(
 		ctx,
-		`SELECT id FROM users WHERE id = ? FOR UPDATE`,
+		`SELECT id FROM users WHERE id = ?`,
 		ownerUserID,
 	).Scan(&lockedUserID); err != nil {
 		return err
@@ -767,8 +701,7 @@ func (s *PlaylistStore) PinUserPlaylists(
 		ctx,
 		`SELECT id FROM music_playlists
 		 WHERE scope_type = 'user' AND owner_user_id = ?
-		 ORDER BY sort_order ASC, created_at ASC, id ASC
-		 FOR UPDATE`,
+		 ORDER BY sort_order ASC, created_at ASC, id ASC`,
 		ownerUserID,
 	)
 	if err != nil {
@@ -844,7 +777,7 @@ func (s *PlaylistStore) MoveUserPlaylist(
 	var lockedUserID string
 	if err := tx.QueryRowContext(
 		ctx,
-		`SELECT id FROM users WHERE id = ? FOR UPDATE`,
+		`SELECT id FROM users WHERE id = ?`,
 		ownerUserID,
 	).Scan(&lockedUserID); err != nil {
 		return err
@@ -853,8 +786,7 @@ func (s *PlaylistStore) MoveUserPlaylist(
 		ctx,
 		`SELECT id FROM music_playlists
 		 WHERE scope_type = 'user' AND owner_user_id = ?
-		 ORDER BY sort_order ASC, created_at ASC, id ASC
-		 FOR UPDATE`,
+		 ORDER BY sort_order ASC, created_at ASC, id ASC`,
 		ownerUserID,
 	)
 	if err != nil {
@@ -1107,17 +1039,17 @@ func (s *PlaylistStore) addPlaylistItem(
 		 (id, source, external_track_id, title, artist, artists_json,
 		  duration_ms, created_at, updated_at)
 		 VALUES (?, ?, ?, ?, ?, ?, NULLIF(?, 0), ?, ?)
-		 ON DUPLICATE KEY UPDATE
-		   title = VALUES(title), artist = VALUES(artist),
-		   artists_json = VALUES(artists_json),
-		   duration_ms = COALESCE(VALUES(duration_ms), duration_ms),
-		   updated_at = VALUES(updated_at)`,
+		 ON CONFLICT DO UPDATE SET
+		   title = excluded.title, artist = excluded.artist,
+		   artists_json = excluded.artists_json,
+		   duration_ms = COALESCE(excluded.duration_ms, duration_ms),
+		   updated_at = excluded.updated_at`,
 		trackID,
 		params.Source,
 		params.ExternalTrackID,
 		params.Title,
 		strings.Join(params.Artists, "、"),
-		artistsJSON,
+		string(artistsJSON),
 		params.DurationMS,
 		now,
 		now,
@@ -1319,8 +1251,7 @@ func (s *PlaylistStore) reorderPlaylistItems(
 	rows, err := tx.QueryContext(
 		ctx,
 		`SELECT id FROM music_playlist_items
-		 WHERE playlist_id = ? ORDER BY sort_order ASC, created_at ASC, id ASC
-		 FOR UPDATE`,
+		 WHERE playlist_id = ? ORDER BY sort_order ASC, created_at ASC, id ASC`,
 		playlistID,
 	)
 	if err != nil {
@@ -1422,8 +1353,7 @@ func (s *PlaylistStore) movePlaylistItem(
 	rows, err := tx.QueryContext(
 		ctx,
 		`SELECT id FROM music_playlist_items
-		 WHERE playlist_id = ? ORDER BY sort_order ASC, created_at ASC, id ASC
-		 FOR UPDATE`,
+		 WHERE playlist_id = ? ORDER BY sort_order ASC, created_at ASC, id ASC`,
 		playlistID,
 	)
 	if err != nil {
@@ -1514,9 +1444,8 @@ func (s *PlaylistStore) playlistSummary(
 	                 p.created_at, p.updated_at
 	          FROM music_playlists p
 	          WHERE p.id = ? AND ` + where
-	if forUpdate {
-		query += " FOR UPDATE"
-	}
+	// forUpdate needs no row lock: transactions begin IMMEDIATE and hold the
+	// database's write lock until they finish.
 	args := append([]any{playlistID}, scopeArgs...)
 	var item PlaylistSummary
 	err := db.QueryRowContext(ctx, query, args...).Scan(

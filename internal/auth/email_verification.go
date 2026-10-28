@@ -34,33 +34,6 @@ type emailVerificationChallenge struct {
 	ConsumedAt        sql.NullInt64
 }
 
-func (h *Handler) ensureEmailVerificationSchema() error {
-	if _, err := h.DB.Exec(`CREATE TABLE IF NOT EXISTS email_verification_challenges (
-		id VARCHAR(36) PRIMARY KEY NOT NULL,
-		email VARCHAR(254) NOT NULL,
-		email_normalized VARCHAR(254) NOT NULL,
-		code_hash CHAR(64) NOT NULL,
-		expires_at BIGINT NOT NULL,
-		resend_available_at BIGINT NOT NULL,
-		attempts INT NOT NULL DEFAULT 0,
-		verified_at BIGINT NULL,
-		verification_token_hash CHAR(43) NULL,
-		verification_token_expires_at BIGINT NULL,
-		consumed_at BIGINT NULL,
-		created_at BIGINT NOT NULL,
-		updated_at BIGINT NOT NULL,
-		INDEX idx_email_verification_email_created (email_normalized, created_at),
-		UNIQUE INDEX idx_email_verification_token (verification_token_hash)
-	) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`); err != nil {
-		return err
-	}
-	_, err := h.DB.Exec(`CREATE TABLE IF NOT EXISTS email_verification_locks (
-		email_normalized VARCHAR(254) PRIMARY KEY NOT NULL,
-		updated_at BIGINT NOT NULL
-	) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`)
-	return err
-}
-
 func (h *Handler) inspectEmailVerification(c *gin.Context) {
 	_, normalized, ok := h.availableRegistrationEmail(c)
 	if !ok {
@@ -333,14 +306,14 @@ func (h *Handler) availableRegistrationEmail(c *gin.Context) (string, string, bo
 func lockEmailVerification(tx *sql.Tx, normalized string, now int64) error {
 	if _, err := tx.Exec(
 		`INSERT INTO email_verification_locks (email_normalized, updated_at) VALUES (?, ?)
-		 ON DUPLICATE KEY UPDATE updated_at = VALUES(updated_at)`,
+		 ON CONFLICT DO UPDATE SET updated_at = excluded.updated_at`,
 		normalized, now,
 	); err != nil {
 		return err
 	}
 	var locked string
 	return tx.QueryRow(
-		`SELECT email_normalized FROM email_verification_locks WHERE email_normalized = ? FOR UPDATE`,
+		`SELECT email_normalized FROM email_verification_locks WHERE email_normalized = ?`,
 		normalized,
 	).Scan(&locked)
 }
@@ -364,9 +337,8 @@ func emailVerificationByID(queryer passwordResetQueryer, id string, forUpdate bo
 	challenge := &emailVerificationChallenge{}
 	query := `SELECT id, email, email_normalized, code_hash, expires_at, resend_available_at, attempts, verified_at, consumed_at
 		 FROM email_verification_challenges WHERE id = ?`
-	if forUpdate {
-		query += " FOR UPDATE"
-	}
+	// forUpdate needs no row lock: transactions begin IMMEDIATE and hold the
+	// database's write lock until they finish.
 	err := queryer.QueryRow(query, id).Scan(
 		&challenge.ID, &challenge.Email, &challenge.EmailNormalized, &challenge.CodeHash,
 		&challenge.ExpiresAt, &challenge.ResendAvailableAt, &challenge.Attempts,
@@ -415,7 +387,7 @@ func consumeEmailVerification(tx *sql.Tx, emailNormalized, token string, now int
 	err := tx.QueryRow(
 		`SELECT id FROM email_verification_challenges
 		 WHERE email_normalized = ? AND verification_token_hash = ? AND verified_at IS NOT NULL
-		 AND consumed_at IS NULL AND verification_token_expires_at > ? FOR UPDATE`,
+		 AND consumed_at IS NULL AND verification_token_expires_at > ?`,
 		emailNormalized, hashResetToken(strings.TrimSpace(token)), now,
 	).Scan(&challengeID)
 	if err != nil {

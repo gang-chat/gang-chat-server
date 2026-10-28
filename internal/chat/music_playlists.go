@@ -9,7 +9,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/gin-gonic/gin"
-	mysqlDriver "github.com/go-sql-driver/mysql"
+	gangdb "github.com/zhuangkaiyi/gang-chat/server/internal/db"
 	"github.com/zhuangkaiyi/gang-chat/server/internal/musicbox"
 )
 
@@ -702,6 +702,5 @@ func uniqueMusicPlaylistStrings(values []string) []string {
 }
 
 func isDuplicateMusicPlaylistName(err error) bool {
-	var mysqlErr *mysqlDriver.MySQLError
-	return errors.As(err, &mysqlErr) && mysqlErr.Number == 1062
+	return gangdb.IsUniqueViolation(err)
 }

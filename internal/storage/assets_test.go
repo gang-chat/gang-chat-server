@@ -1,7 +1,11 @@
 package storage
 
 import (
+	"context"
+	"errors"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -9,19 +13,9 @@ import (
 	"github.com/zhuangkaiyi/gang-chat/server/internal/config"
 )
 
-func testS3Config() *config.Config {
-	return &config.Config{
-		S3Endpoint:        "https://os.ky-z.com:9000",
-		S3Bucket:          "gang-chat",
-		S3Region:          "us-east-1",
-		S3AccessKeyID:     "sid",
-		S3SecretAccessKey: "skey",
-		S3ForcePathStyle:  true,
-	}
-}
-
-func TestNewAssetStorageRequiresS3Config(t *testing.T) {
-	store, err := NewAssetStorage(testS3Config())
+func TestNewAssetStorageKeepsAssetsInTheStorageDirectory(t *testing.T) {
+	dir := t.TempDir()
+	store, err := NewAssetStorage(&config.Config{StoragePath: dir})
 	if err != nil {
 		t.Fatalf("NewAssetStorage returned error: %v", err)
 	}
@@ -33,18 +27,28 @@ func TestNewAssetStorageRequiresS3Config(t *testing.T) {
 	if got := store.PublicURL(key, "asset_1", "room.png"); got != "/assets/asset_1/room.png" {
 		t.Fatalf("unexpected asset URL: %q", got)
 	}
+	source := filepath.Join(t.TempDir(), "upload.png")
+	if err := os.WriteFile(source, []byte("png"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.PutFile(context.Background(), key, source, "image/png"); err != nil {
+		t.Fatal(err)
+	}
+	if raw, err := os.ReadFile(filepath.Join(dir, "assets", "asset_1", "room.png")); err != nil || string(raw) != "png" {
+		t.Fatalf("stored file: %q %v", raw, err)
+	}
+	if err := store.Delete(context.Background(), key); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Open(context.Background(), key, "asset_1", "room.png"); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("a deleted asset must read as missing: %v", err)
+	}
 }
 
-func TestNewAssetStorageReportsIncompleteS3Config(t *testing.T) {
-	_, err := NewAssetStorage(&config.Config{
-		S3Endpoint: "https://os.ky-z.com:9000",
-		S3Bucket:   "gang-chat",
-	})
-	if err == nil {
-		t.Fatalf("expected missing S3 credentials error")
-	}
-	if !strings.Contains(err.Error(), "s3_access_key_id") {
-		t.Fatalf("unexpected error: %v", err)
+func TestNewAssetStorageRequiresAStoragePath(t *testing.T) {
+	_, err := NewAssetStorage(&config.Config{})
+	if err == nil || !strings.Contains(err.Error(), "storage_path") {
+		t.Fatalf("expected a missing storage_path error, got %v", err)
 	}
 }
 

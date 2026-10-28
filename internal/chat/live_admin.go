@@ -70,10 +70,10 @@ func (h *Handler) moderateLiveParticipant(c *gin.Context) {
 			   mic_blocked, headphones_blocked
 			 )
 			 VALUES (?, ?, ?, ?, ?, 1, 0)
-			 ON DUPLICATE KEY UPDATE
-			   created_by_user_id = VALUES(created_by_user_id),
-			   reason = VALUES(reason),
-			   created_at = VALUES(created_at),
+			 ON CONFLICT DO UPDATE SET
+			   created_by_user_id = excluded.created_by_user_id,
+			   reason = excluded.reason,
+			   created_at = excluded.created_at,
 			   mic_blocked = 1`,
 			roomID, targetID, actorID, req.Reason, now,
 		)
@@ -100,10 +100,10 @@ func (h *Handler) moderateLiveParticipant(c *gin.Context) {
 			   mic_blocked, headphones_blocked
 			 )
 			 VALUES (?, ?, ?, ?, ?, 0, 1)
-			 ON DUPLICATE KEY UPDATE
-			   created_by_user_id = VALUES(created_by_user_id),
-			   reason = VALUES(reason),
-			   created_at = VALUES(created_at),
+			 ON CONFLICT DO UPDATE SET
+			   created_by_user_id = excluded.created_by_user_id,
+			   reason = excluded.reason,
+			   created_at = excluded.created_at,
 			   headphones_blocked = 1`,
 			roomID, targetID, actorID, req.Reason, now,
 		)

@@ -2,83 +2,58 @@ package musicbox
 
 import (
 	"database/sql"
-	"fmt"
-	"os"
-	"strings"
+	"path/filepath"
 	"testing"
 
-	_ "github.com/go-sql-driver/mysql"
+	gangdb "github.com/zhuangkaiyi/gang-chat/server/internal/db"
 )
 
-// newTestStore uses a MySQL test database with just the schema the store needs
+// newTestStore uses a new SQLite database with just the schema the store needs
 // (users, rooms, playlists, tracks, and the two music box tables), avoiding a
 // dependency on the full production schema.
 func newTestStore(t *testing.T) *store {
 	t.Helper()
-	dsn := os.Getenv("GANG_TEST_MUSICBOX_MYSQL_DSN")
-	if dsn == "" {
-		t.Skip("GANG_TEST_MUSICBOX_MYSQL_DSN is required for MySQL-backed musicbox tests")
-	}
-	db, err := sql.Open("mysql", dsn)
+	db, err := sql.Open("sqlite", gangdb.DSN(filepath.Join(t.TempDir(), "musicbox.db")))
 	if err != nil {
 		t.Fatalf("open db: %v", err)
 	}
 	db.SetMaxOpenConns(10)
-	db.SetMaxIdleConns(5)
 	t.Cleanup(func() { db.Close() })
-	if err := requireIsolatedMusicboxTestDatabase(db); err != nil {
-		t.Fatal(err)
-	}
-
-	cleanup := []string{
-		`DROP TABLE IF EXISTS room_music_box_queue`,
-		`DROP TABLE IF EXISTS room_music_box_state`,
-		`DROP TABLE IF EXISTS music_playlists`,
-		`DROP TABLE IF EXISTS music_tracks`,
-		`DROP TABLE IF EXISTS rooms`,
-		`DROP TABLE IF EXISTS users`,
-	}
-	for _, s := range cleanup {
-		if _, err := db.Exec(s); err != nil {
-			t.Fatalf("cleanup: %v", err)
-		}
-	}
 
 	stmts := []string{
-		`CREATE TABLE users (id VARCHAR(128) PRIMARY KEY) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
-		`CREATE TABLE rooms (id VARCHAR(128) PRIMARY KEY) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
+		`CREATE TABLE users (id TEXT PRIMARY KEY)`,
+		`CREATE TABLE rooms (id TEXT PRIMARY KEY)`,
 		`CREATE TABLE music_playlists (
-			id VARCHAR(128) PRIMARY KEY NOT NULL,
-			created_at BIGINT NOT NULL) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
+			id TEXT PRIMARY KEY NOT NULL,
+			created_at INTEGER NOT NULL)`,
 		`CREATE TABLE music_tracks (
-			id VARCHAR(128) PRIMARY KEY NOT NULL,
-			source VARCHAR(32) NOT NULL, external_track_id VARCHAR(256) NOT NULL,
-			duration_ms BIGINT NULL, updated_at BIGINT NOT NULL DEFAULT 0,
-			UNIQUE KEY uq_music_tracks_source_external (source, external_track_id)
-		) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
+			id TEXT PRIMARY KEY NOT NULL,
+			source TEXT NOT NULL, external_track_id TEXT NOT NULL,
+			duration_ms INTEGER NULL, updated_at INTEGER NOT NULL DEFAULT 0,
+			UNIQUE (source, external_track_id))`,
 		`CREATE TABLE room_music_box_queue (
-			id VARCHAR(128) PRIMARY KEY NOT NULL, room_id VARCHAR(128) NOT NULL,
-			source VARCHAR(64) NOT NULL DEFAULT 'netease', track_id VARCHAR(255) NOT NULL,
+			id TEXT PRIMARY KEY NOT NULL, room_id TEXT NOT NULL,
+			source TEXT NOT NULL DEFAULT 'netease', track_id TEXT NOT NULL,
 			title TEXT NOT NULL, artist TEXT NOT NULL,
-			duration_ms BIGINT, status VARCHAR(64) NOT NULL DEFAULT 'pending',
-			file_path TEXT, file_size_bytes BIGINT NOT NULL DEFAULT 0, error TEXT,
-			added_by_user_id VARCHAR(128) NOT NULL,
-			queue_scope VARCHAR(32) NOT NULL DEFAULT 'temporary', snapshot_id VARCHAR(128),
-			sort_order BIGINT NOT NULL DEFAULT 0,
-			created_at BIGINT NOT NULL, updated_at BIGINT NOT NULL) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
+			duration_ms INTEGER, status TEXT NOT NULL DEFAULT 'pending',
+			file_path TEXT, file_size_bytes INTEGER NOT NULL DEFAULT 0, error TEXT,
+			added_by_user_id TEXT NOT NULL,
+			queue_scope TEXT NOT NULL DEFAULT 'temporary', snapshot_id TEXT,
+			sort_order INTEGER NOT NULL DEFAULT 0,
+			created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL)`,
 		`CREATE TABLE room_music_box_state (
-			room_id VARCHAR(128) PRIMARY KEY NOT NULL, state VARCHAR(64) NOT NULL DEFAULT 'stopped',
-			current_item_id VARCHAR(128), position_ms BIGINT NOT NULL DEFAULT 0,
-			volume INT NOT NULL DEFAULT 100, revision BIGINT NOT NULL DEFAULT 0,
-			playback_mode VARCHAR(32) NOT NULL DEFAULT 'sequential',
-			active_source_type VARCHAR(32) NOT NULL DEFAULT 'temporary',
-			active_playlist_id VARCHAR(128), active_playlist_name TEXT,
-			active_playlist_owner_id VARCHAR(128),
-			active_playlist_created_at BIGINT NOT NULL DEFAULT 0,
-			active_snapshot_id VARCHAR(128),
-			play_cursor_scope VARCHAR(32), play_cursor_snapshot_id VARCHAR(128),
-			play_cursor_after_sort BIGINT NOT NULL DEFAULT -1,
-			updated_at BIGINT NOT NULL) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
+			room_id TEXT PRIMARY KEY NOT NULL, state TEXT NOT NULL DEFAULT 'stopped',
+			current_item_id TEXT, position_ms INTEGER NOT NULL DEFAULT 0,
+			volume INTEGER NOT NULL DEFAULT 100, revision INTEGER NOT NULL DEFAULT 0,
+			playback_mode TEXT NOT NULL DEFAULT 'sequential',
+			active_source_type TEXT NOT NULL DEFAULT 'temporary',
+			active_playlist_id TEXT, active_playlist_name TEXT,
+			active_playlist_owner_id TEXT,
+			active_playlist_created_at INTEGER NOT NULL DEFAULT 0,
+			active_snapshot_id TEXT,
+			play_cursor_scope TEXT, play_cursor_snapshot_id TEXT,
+			play_cursor_after_sort INTEGER NOT NULL DEFAULT -1,
+			updated_at INTEGER NOT NULL)`,
 		`INSERT INTO users (id) VALUES ('u1')`,
 		`INSERT INTO rooms (id) VALUES ('r1')`,
 	}
@@ -88,44 +63,6 @@ func newTestStore(t *testing.T) *store {
 		}
 	}
 	return &store{db: db}
-}
-
-func requireIsolatedMusicboxTestDatabase(db *sql.DB) error {
-	var name string
-	if err := db.QueryRow(`SELECT DATABASE()`).Scan(&name); err != nil {
-		return fmt.Errorf("read musicbox test database name: %w", err)
-	}
-	if !isSafeMusicboxTestDatabaseName(name) {
-		return fmt.Errorf("refusing to modify non-test musicbox database %q", name)
-	}
-	return nil
-}
-
-func isSafeMusicboxTestDatabaseName(name string) bool {
-	name = strings.ToLower(strings.TrimSpace(name))
-	return name != "" && (strings.HasSuffix(name, "_test") || strings.Contains(name, "_test_"))
-}
-
-func TestSafeMusicboxTestDatabaseName(t *testing.T) {
-	t.Parallel()
-	tests := map[string]bool{
-		"gang_chat_musicbox_test": true,
-		"musicbox_test_parallel":  true,
-		" GANG_TEST ":             true,
-		"gang_chat":               false,
-		"contest":                 false,
-		"test":                    false,
-		"":                        false,
-	}
-	for name, want := range tests {
-		name, want := name, want
-		t.Run(name, func(t *testing.T) {
-			t.Parallel()
-			if got := isSafeMusicboxTestDatabaseName(name); got != want {
-				t.Fatalf("isSafeMusicboxTestDatabaseName(%q) = %v, want %v", name, got, want)
-			}
-		})
-	}
 }
 
 func add(t *testing.T, s *store, id string, sort int64) *QueueItem {
