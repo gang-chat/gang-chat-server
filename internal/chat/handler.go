@@ -568,7 +568,7 @@ func (h *Handler) idempotentJSON(c *gin.Context, status int, rawBody []byte, pay
 	key := c.GetHeader("Idempotency-Key")
 	if key != "" {
 		_, err = h.DB.Exec(
-			`INSERT IGNORE INTO idempotency_keys (
+			`INSERT OR IGNORE INTO idempotency_keys (
 			   user_id, method, path, idempotency_key, request_hash, response_status, response_body, created_at
 			 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
 			currentUserID(c), c.Request.Method, c.Request.URL.Path, key, bodyHash(rawBody), status, string(data), nowMillis(),

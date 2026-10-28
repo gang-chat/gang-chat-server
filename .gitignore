@@ -4,6 +4,8 @@ gang-chat.db-shm
 .env
 assets/
 assets-cache/
+# Uploaded files and client releases (storage_path in config.json)
+/storage/
 
 # Build output (reproducible via `go build`)
 /.cache/

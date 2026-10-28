@@ -127,7 +127,7 @@ func (d *Dispatcher) targets(roomID, senderID string) ([]deliveryTarget, error) 
 		   AND pd.notifications_enabled = 1
 		   AND pd.platform = 'android'
 		   AND us.revoked_at IS NULL
-		   AND us.expires_at > UNIX_TIMESTAMP()
+		   AND us.expires_at > unixepoch()
 		   AND u.status = 'active'`,
 		roomID,
 		senderID,
@@ -181,12 +181,9 @@ func (d *Dispatcher) totalUnreadCount(userID string) int {
 		     m.type = 'system'
 		     AND EXISTS (
 		       SELECT 1
-		       FROM JSON_TABLE(m.attachments_json, '$[*]' COLUMNS (
-		         attachment_type VARCHAR(64) PATH '$.type' NULL ON EMPTY,
-		         attachment_event VARCHAR(64) PATH '$.event' NULL ON EMPTY
-		       )) attachment
-		       WHERE LOWER(COALESCE(attachment.attachment_type, '')) = 'system'
-		         AND LOWER(COALESCE(attachment.attachment_event, ''))
+		       FROM json_each(m.attachments_json) attachment
+		       WHERE LOWER(COALESCE(CASE WHEN attachment.type = 'object' THEN attachment.value ->> '$.type' END, '')) = 'system'
+		         AND LOWER(COALESCE(CASE WHEN attachment.type = 'object' THEN attachment.value ->> '$.event' END, ''))
 		           IN ('live_joined', 'live_left')
 		     )
 		   )

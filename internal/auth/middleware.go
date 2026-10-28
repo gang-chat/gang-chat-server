@@ -36,9 +36,9 @@ func (m *AuthMiddleware) Handle(c *gin.Context) {
 	// verify session is still active
 	var revokedAt, status string
 	err = m.DB.QueryRow(
-		`SELECT COALESCE(CAST(us.revoked_at AS CHAR), ''), u.status
+		`SELECT COALESCE(CAST(us.revoked_at AS TEXT), ''), u.status
 		 FROM user_sessions us JOIN users u ON u.id = us.user_id
-		 WHERE us.id = ? AND us.expires_at > UNIX_TIMESTAMP()`,
+		 WHERE us.id = ? AND us.expires_at > unixepoch()`,
 		claims.Sid,
 	).Scan(&revokedAt, &status)
 	if err != nil || revokedAt != "" || status != "active" {

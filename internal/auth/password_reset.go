@@ -46,38 +46,6 @@ type passwordResetQueryer interface {
 	QueryRow(query string, args ...any) *sql.Row
 }
 
-func (h *Handler) ensurePasswordResetSchema() error {
-	if _, err := h.DB.Exec(`CREATE TABLE IF NOT EXISTS password_reset_challenges (
-		id VARCHAR(36) PRIMARY KEY NOT NULL,
-		user_id VARCHAR(128) NOT NULL,
-		email VARCHAR(320) NOT NULL,
-		code_hash CHAR(64) NOT NULL,
-		expires_at BIGINT NOT NULL,
-		resend_available_at BIGINT NOT NULL,
-		attempts INT NOT NULL DEFAULT 0,
-		verified_at BIGINT NULL,
-		reset_token_hash CHAR(43) NULL,
-		reset_token_expires_at BIGINT NULL,
-		consumed_at BIGINT NULL,
-		created_at BIGINT NOT NULL,
-		updated_at BIGINT NOT NULL,
-		INDEX idx_password_reset_user_created (user_id, created_at),
-		UNIQUE INDEX idx_password_reset_token (reset_token_hash)
-	) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`); err != nil {
-		return err
-	}
-	_, err := h.DB.Exec(`CREATE TABLE IF NOT EXISTS password_reset_session_grants (
-		session_id VARCHAR(128) PRIMARY KEY NOT NULL,
-		user_id VARCHAR(128) NOT NULL,
-		email_normalized VARCHAR(320) NOT NULL,
-		expires_at BIGINT NOT NULL,
-		created_at BIGINT NOT NULL,
-		updated_at BIGINT NOT NULL,
-		INDEX idx_password_reset_grant_user (user_id)
-	) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`)
-	return err
-}
-
 func (h *Handler) passwordResetUser(c *gin.Context, login string) (*model.User, bool) {
 	user, err := model.GetUserByUsernameOrEmail(h.DB, strings.TrimSpace(login))
 	if errors.Is(err, sql.ErrNoRows) || (err == nil && (user.Status != "active" || user.DeletedAt.Valid)) {
@@ -164,7 +132,7 @@ func (h *Handler) startPasswordReset(c *gin.Context) {
 	var currentEmail, currentEmailNormalized, status string
 	var deletedAt sql.NullInt64
 	err = tx.QueryRow(
-		`SELECT email, email_normalized, status, deleted_at FROM users WHERE id = ? FOR UPDATE`,
+		`SELECT email, email_normalized, status, deleted_at FROM users WHERE id = ?`,
 		user.ID,
 	).Scan(&currentEmail, &currentEmailNormalized, &status, &deletedAt)
 	if errors.Is(err, sql.ErrNoRows) || (err == nil && (status != "active" || deletedAt.Valid)) {
@@ -258,7 +226,7 @@ func (h *Handler) resendPasswordResetCode(c *gin.Context) {
 	var currentEmail, status string
 	var deletedAt sql.NullInt64
 	if err := tx.QueryRow(
-		`SELECT email, status, deleted_at FROM users WHERE id = ? FOR UPDATE`, challenge.UserID,
+		`SELECT email, status, deleted_at FROM users WHERE id = ?`, challenge.UserID,
 	).Scan(&currentEmail, &status, &deletedAt); err != nil || status != "active" || deletedAt.Valid {
 		errorJSON(c, http.StatusGone, "challenge_expired", "验证码已失效，请重新发起密码重置")
 		return
@@ -396,7 +364,7 @@ func (h *Handler) completePasswordReset(c *gin.Context) {
 	var challengeID, userID string
 	err = tx.QueryRow(
 		`SELECT id, user_id FROM password_reset_challenges
-		 WHERE reset_token_hash = ? AND verified_at IS NOT NULL AND consumed_at IS NULL AND reset_token_expires_at > ? FOR UPDATE`,
+		 WHERE reset_token_hash = ? AND verified_at IS NOT NULL AND consumed_at IS NULL AND reset_token_expires_at > ?`,
 		hashResetToken(req.ResetToken), now,
 	).Scan(&challengeID, &userID)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -451,7 +419,7 @@ func (h *Handler) claimPasswordResetForSession(c *gin.Context) {
 	err = tx.QueryRow(
 		`SELECT id FROM password_reset_challenges
 		 WHERE reset_token_hash = ? AND user_id = ? AND verified_at IS NOT NULL
-		 AND consumed_at IS NULL AND reset_token_expires_at > ? FOR UPDATE`,
+		 AND consumed_at IS NULL AND reset_token_expires_at > ?`,
 		hashResetToken(req.ResetToken), userID, now,
 	).Scan(&challengeID)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -471,8 +439,8 @@ func (h *Handler) claimPasswordResetForSession(c *gin.Context) {
 		`INSERT INTO password_reset_session_grants
 		 (session_id, user_id, email_normalized, expires_at, created_at, updated_at)
 		 VALUES (?, ?, ?, ?, ?, ?)
-		 ON DUPLICATE KEY UPDATE user_id = VALUES(user_id), email_normalized = VALUES(email_normalized),
-		 expires_at = VALUES(expires_at), updated_at = VALUES(updated_at)`,
+		 ON CONFLICT DO UPDATE SET user_id = excluded.user_id, email_normalized = excluded.email_normalized,
+		 expires_at = excluded.expires_at, updated_at = excluded.updated_at`,
 		sessionID, userID, user.EmailNormalized, session.ExpiresAt, now, now,
 	)
 	if err != nil {

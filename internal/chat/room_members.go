@@ -639,16 +639,16 @@ func (h *Handler) inviteMember(c *gin.Context) {
 		        r.rid, r.name, r.avatar_url, r.default_avatar_key, r.visibility, r.join_policy
 		 FROM rooms r
 		 WHERE r.id = ?
-		 ON DUPLICATE KEY UPDATE
+		 ON CONFLICT DO UPDATE SET
 		   status = 'pending',
-		   created_at = VALUES(created_at),
-		   updated_at = VALUES(updated_at),
-		   room_rid = VALUES(room_rid),
-		   room_name = VALUES(room_name),
-		   room_avatar_url = VALUES(room_avatar_url),
-		   room_default_avatar_key = VALUES(room_default_avatar_key),
-		   room_visibility = VALUES(room_visibility),
-		   room_join_policy = VALUES(room_join_policy)`,
+		   created_at = excluded.created_at,
+		   updated_at = excluded.updated_at,
+		   room_rid = excluded.room_rid,
+		   room_name = excluded.room_name,
+		   room_avatar_url = excluded.room_avatar_url,
+		   room_default_avatar_key = excluded.room_default_avatar_key,
+		   room_visibility = excluded.room_visibility,
+		   room_join_policy = excluded.room_join_policy`,
 		id, inviterID, req.UserID, now, now, roomID,
 	)
 	if err != nil {
@@ -733,9 +733,9 @@ func (h *Handler) blockRoomUser(c *gin.Context) {
 	_, err := h.DB.Exec(
 		`INSERT INTO room_blacklist (room_id, user_id, blocked_by_user_id, created_at)
 		 VALUES (?, ?, ?, ?)
-		 ON DUPLICATE KEY UPDATE
-		   blocked_by_user_id = VALUES(blocked_by_user_id),
-		   created_at = VALUES(created_at)`,
+		 ON CONFLICT DO UPDATE SET
+		   blocked_by_user_id = excluded.blocked_by_user_id,
+		   created_at = excluded.created_at`,
 		roomID, req.UserID, actorID, now,
 	)
 	if err != nil {
@@ -999,11 +999,11 @@ func (h *Handler) reviewRoomInvite(c *gin.Context) {
 		if _, err := tx.Exec(
 			`INSERT INTO join_requests (id, room_id, user_id, status, reason, created_at, updated_at)
 			 VALUES (?, ?, ?, 'pending', ?, ?, ?)
-			 ON DUPLICATE KEY UPDATE
+			 ON CONFLICT DO UPDATE SET
 			   status = 'pending',
-			   reason = VALUES(reason),
-			   created_at = VALUES(created_at),
-			   updated_at = VALUES(updated_at),
+			   reason = excluded.reason,
+			   created_at = excluded.created_at,
+			   updated_at = excluded.updated_at,
 			   reviewer_user_id = NULL,
 			   reviewed_at = NULL`,
 			requestID, roomID, userID, reason, now, now,

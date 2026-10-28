@@ -7,18 +7,12 @@ rtc:
   port_range_start: 50000
   port_range_end: 50500
   use_external_ip: false
-  node_ip: 45.205.28.177
+  node_ip: 199.68.217.57
   stun_servers:
-    - 45.205.28.177:3478
+    - 199.68.217.57:3478
   congestion_control:
     enabled: true
     allow_pause: true
-    # Screen-share viewers used to start on the lowest simulcast layer and
-    # climb only as the downlink estimate grew from a cold start. Assume at
-    # least this much capacity so a fresh subscriber is put straight on the
-    # full layer; real congestion still steps it down. Ignored by
-    # livekit-server builds predating the option (non-strict config).
-    min_channel_capacity: 4000000
 audio:
   # Keep active-speaker highlighting responsive without changing the noise
   # threshold. LiveKit defaults to 500 ms updates smoothed over 4 intervals;

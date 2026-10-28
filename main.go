@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/zhuangkaiyi/gang-chat/server/internal/admin"
 	"github.com/zhuangkaiyi/gang-chat/server/internal/auth"
 	"github.com/zhuangkaiyi/gang-chat/server/internal/chat"
 	"github.com/zhuangkaiyi/gang-chat/server/internal/config"
@@ -16,6 +17,7 @@ import (
 	"github.com/zhuangkaiyi/gang-chat/server/internal/middleware"
 	"github.com/zhuangkaiyi/gang-chat/server/internal/musicbox"
 	"github.com/zhuangkaiyi/gang-chat/server/internal/push"
+	"github.com/zhuangkaiyi/gang-chat/server/internal/releases"
 	"github.com/zhuangkaiyi/gang-chat/server/internal/storage"
 
 	lksdk "github.com/livekit/server-sdk-go/v2"
@@ -24,11 +26,12 @@ import (
 func main() {
 	cfg := config.Load()
 
-	pool := db.Connect(cfg.DatabaseURL)
-	assetStore, err := storage.NewAssetStorage(cfg)
+	pool := db.Connect(cfg.DatabasePath)
+	files, err := storage.NewFiles(cfg.StoragePath)
 	if err != nil {
-		log.Fatalf("configure asset storage: %v", err)
+		log.Fatalf("configure storage: %v", err)
 	}
+	assetStore := storage.NewFileAssetStorage(files)
 
 	roomClient := lksdk.NewRoomServiceClient(
 		cfg.LiveKitHost,
@@ -84,6 +87,7 @@ func main() {
 	r.GET("/health", func(c *gin.Context) { c.String(200, "ok") })
 	r.GET("/healthz", func(c *gin.Context) { c.JSON(200, gin.H{"ok": true}) })
 	chat.RegisterAssetRoutes(r, pool, cfg, assetStore)
+	releases.RegisterFileRoutes(r, files)
 
 	api := r.Group("/api/v1")
 	auth.RegisterRoutes(api, pool, cfg, bus)
@@ -92,15 +96,25 @@ func main() {
 	chatGroup := api.Group("")
 	chatGroup.Use(authMW.Handle)
 	chatHandler := chat.RegisterRoutes(chatGroup, pool, cfg, bus, liveController, musicBox, assetStore)
-	pushHandler := push.RegisterRoutes(chatGroup, pool)
-	if err := pushHandler.Store.EnsureSchema(); err != nil {
-		log.Fatalf("push: ensure device schema: %v", err)
+	push.RegisterRoutes(chatGroup, pool)
+	releases.RegisterPublicRoutes(api, pool)
+	adminHandler, err := admin.RegisterRoutes(api, pool, cfg, files)
+	if err != nil {
+		log.Fatalf("admin: %v", err)
 	}
+	go adminHandler.RunReleaseWatch(context.Background())
 	fcmSender, err := push.NewFCMSender(cfg.FCMProjectID, cfg.FCMServiceAccountFile)
 	if err != nil {
 		log.Fatalf("push: configure FCM: %v", err)
 	}
-	pushDispatcher := push.NewDispatcher(pool, fcmSender)
+	// NewFCMSender returns a nil *FCMSender when FCM isn't configured; passing
+	// it through as a Sender would make a non-nil interface that panics on the
+	// first push.
+	var pushSenders []push.Sender
+	if fcmSender != nil {
+		pushSenders = append(pushSenders, fcmSender)
+	}
+	pushDispatcher := push.NewDispatcher(pool, pushSenders...)
 	chatHandler.Push = pushDispatcher
 	go pushDispatcher.Run(context.Background())
 	go chatHandler.RunStickerAssetCleanup(context.Background())

@@ -125,8 +125,7 @@ func (s *PlaylistStore) createRoomPlaylist(
 			ctx,
 			`SELECT track_id FROM music_playlist_items
 			 WHERE playlist_id = ?
-			 ORDER BY sort_order ASC, created_at ASC, id ASC
-			 FOR UPDATE`,
+			 ORDER BY sort_order ASC, created_at ASC, id ASC`,
 			sourcePlaylistID,
 		)
 		if err != nil {
@@ -412,7 +411,7 @@ func lockRoomPlaylistNamespace(
 	var lockedRoomID string
 	err := tx.QueryRowContext(
 		ctx,
-		`SELECT id FROM rooms WHERE id = ? FOR UPDATE`,
+		`SELECT id FROM rooms WHERE id = ?`,
 		roomID,
 	).Scan(&lockedRoomID)
 	if err == sql.ErrNoRows {
@@ -447,8 +446,7 @@ func lockedRoomPlaylistIDs(
 		ctx,
 		`SELECT id FROM music_playlists
 		 WHERE scope_type = 'room' AND room_id = ?
-		 ORDER BY sort_order ASC, created_at ASC, id ASC
-		 FOR UPDATE`,
+		 ORDER BY sort_order ASC, created_at ASC, id ASC`,
 		roomID,
 	)
 	if err != nil {

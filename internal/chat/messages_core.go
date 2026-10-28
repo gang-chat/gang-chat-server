@@ -726,14 +726,14 @@ func (h *Handler) markRead(c *gin.Context) {
 
 	now := nowMillis()
 	// Ensure the per-account cursor exists first, then conditionally advance it.
-	// The UPDATE predicate is evaluated while MySQL holds the room_reads row
-	// lock, so concurrent devices can race safely: an older cursor can never
+	// The UPDATE predicate is evaluated while SQLite holds the write lock, so
+	// concurrent devices can race safely: an older cursor can never
 	// overwrite a newer one. The message id is the deterministic tie-breaker
 	// used everywhere messages share the same millisecond timestamp.
 	_, err := h.DB.Exec(
 		`INSERT INTO room_reads (room_id, user_id, last_read_message_id, updated_at)
 		 VALUES (?, ?, ?, ?)
-		 ON DUPLICATE KEY UPDATE updated_at = updated_at`,
+		 ON CONFLICT DO UPDATE SET updated_at = updated_at`,
 		roomID, userID, req.LastReadMessageID, now,
 	)
 	if err != nil {
@@ -741,14 +741,16 @@ func (h *Handler) markRead(c *gin.Context) {
 		return
 	}
 	_, err = h.DB.Exec(
-		`UPDATE room_reads rr
-		 LEFT JOIN messages current_message ON current_message.id = rr.last_read_message_id
-		 SET rr.last_read_message_id = ?, rr.updated_at = ?
+		`UPDATE room_reads AS rr
+		 SET last_read_message_id = ?, updated_at = ?
 		 WHERE rr.room_id = ? AND rr.user_id = ?
-		   AND (
-		     current_message.id IS NULL
-		     OR current_message.created_at < ?
-		     OR (current_message.created_at = ? AND current_message.id < ?)
+		   AND NOT EXISTS (
+		     SELECT 1 FROM messages current_message
+		     WHERE current_message.id = rr.last_read_message_id
+		       AND NOT (
+		         current_message.created_at < ?
+		         OR (current_message.created_at = ? AND current_message.id < ?)
+		       )
 		   )`,
 		req.LastReadMessageID,
 		now,

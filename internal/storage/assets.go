@@ -4,10 +4,8 @@ import (
 	"bytes"
 	"context"
 	"errors"
-	"fmt"
 	"io"
 	"net/http"
-	"net/url"
 	"os"
 	"path"
 	"strconv"
@@ -15,9 +13,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/aws/aws-sdk-go-v2/aws"
-	"github.com/aws/aws-sdk-go-v2/credentials"
-	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/zhuangkaiyi/gang-chat/server/internal/config"
 )
 
@@ -30,17 +25,23 @@ type AssetStorage struct {
 }
 
 type remoteStore interface {
-	PutFile(ctx context.Context, key, filePath, mimeType, cacheControl string) error
-	Get(ctx context.Context, key string) (io.ReadCloser, error)
-	Delete(ctx context.Context, key string) error
+	Put(key string, body io.Reader) error
+	Get(key string) (io.ReadCloser, error)
+	Delete(key string) error
 }
 
+// NewAssetStorage keeps assets in the storage directory, storage_path.
 func NewAssetStorage(cfg *config.Config) (*AssetStorage, error) {
-	remote, err := newS3Remote(cfg)
+	files, err := NewFiles(cfg.StoragePath)
 	if err != nil {
 		return nil, err
 	}
-	return &AssetStorage{remote: remote}, nil
+	return NewFileAssetStorage(files), nil
+}
+
+// NewFileAssetStorage keeps assets in files.
+func NewFileAssetStorage(files *Files) *AssetStorage {
+	return &AssetStorage{remote: fileRemote{files}}
 }
 
 func (s *AssetStorage) CacheControl() string {
@@ -83,142 +84,82 @@ func (s *AssetStorage) PublicURL(key, assetID, filename string) string {
 
 func (s *AssetStorage) PutFile(ctx context.Context, key, filePath, mimeType string) error {
 	if s == nil || s.remote == nil {
-		return errors.New("S3 storage is not configured")
+		return errors.New("asset storage is not configured")
 	}
-	return s.remote.PutFile(ctx, cleanObjectKey(key), filePath, mimeType, s.CacheControl())
-}
-
-func (s *AssetStorage) Delete(ctx context.Context, key string) error {
-	if s == nil || s.remote == nil {
-		return errors.New("S3 storage is not configured")
-	}
-	return s.remote.Delete(ctx, cleanObjectKey(key))
-}
-
-func (s *AssetStorage) Open(ctx context.Context, key, assetID, filename string) (io.ReadCloser, error) {
-	if s == nil || s.remote == nil {
-		return nil, errors.New("S3 storage is not configured")
-	}
-	return s.remote.Get(ctx, cleanObjectKey(key))
-}
-
-type s3Remote struct {
-	client *s3.Client
-	bucket string
-}
-
-func newS3Remote(cfg *config.Config) (*s3Remote, error) {
-	if cfg == nil {
-		return nil, errors.New("S3 storage requires config")
-	}
-	if strings.TrimSpace(cfg.S3Endpoint) == "" {
-		return nil, errors.New("S3 storage requires s3_endpoint")
-	}
-	if strings.TrimSpace(cfg.S3Bucket) == "" {
-		return nil, errors.New("S3 storage requires s3_bucket")
-	}
-	if strings.TrimSpace(cfg.S3AccessKeyID) == "" || strings.TrimSpace(cfg.S3SecretAccessKey) == "" {
-		return nil, errors.New("S3 storage requires s3_access_key_id and s3_secret_access_key")
-	}
-	endpoint := strings.TrimRight(strings.TrimSpace(cfg.S3Endpoint), "/")
-	if _, err := url.ParseRequestURI(endpoint); err != nil {
-		return nil, fmt.Errorf("parse S3 endpoint: %w", err)
-	}
-	region := strings.TrimSpace(cfg.S3Region)
-	if region == "" {
-		region = "us-east-1"
-	}
-	client := s3.New(s3.Options{
-		Region:       region,
-		BaseEndpoint: aws.String(endpoint),
-		Credentials: aws.NewCredentialsCache(credentials.NewStaticCredentialsProvider(
-			strings.TrimSpace(cfg.S3AccessKeyID),
-			strings.TrimSpace(cfg.S3SecretAccessKey),
-			strings.TrimSpace(cfg.S3SessionToken),
-		)),
-		UsePathStyle: cfg.S3ForcePathStyle,
-	})
-	return &s3Remote{
-		client: client,
-		bucket: strings.TrimSpace(cfg.S3Bucket),
-	}, nil
-}
-
-func (r *s3Remote) PutFile(ctx context.Context, key, filePath, mimeType, cacheControl string) error {
 	file, err := os.Open(filePath)
 	if err != nil {
 		return err
 	}
 	defer file.Close()
-	input := &s3.PutObjectInput{
-		Bucket: aws.String(r.bucket),
-		Key:    aws.String(key),
-		Body:   file,
-	}
-	if mimeType != "" {
-		input.ContentType = aws.String(mimeType)
-	}
-	if cacheControl != "" {
-		input.CacheControl = aws.String(cacheControl)
-	}
-	_, err = r.client.PutObject(ctx, input)
-	return err
+	return s.remote.Put(cleanObjectKey(key), file)
 }
 
-func (r *s3Remote) Get(ctx context.Context, key string) (io.ReadCloser, error) {
-	resp, err := r.client.GetObject(ctx, &s3.GetObjectInput{
-		Bucket: aws.String(r.bucket),
-		Key:    aws.String(key),
-	})
+func (s *AssetStorage) Delete(ctx context.Context, key string) error {
+	if s == nil || s.remote == nil {
+		return errors.New("asset storage is not configured")
+	}
+	return s.remote.Delete(cleanObjectKey(key))
+}
+
+// Open reads an asset; a missing one is os.ErrNotExist.
+func (s *AssetStorage) Open(ctx context.Context, key, assetID, filename string) (io.ReadCloser, error) {
+	if s == nil || s.remote == nil {
+		return nil, errors.New("asset storage is not configured")
+	}
+	return s.remote.Get(cleanObjectKey(key))
+}
+
+type fileRemote struct {
+	files *Files
+}
+
+func (r fileRemote) Put(key string, body io.Reader) error { return r.files.Put(key, body) }
+
+func (r fileRemote) Get(key string) (io.ReadCloser, error) {
+	file, _, err := r.files.Open(key)
 	if err != nil {
 		return nil, err
 	}
-	return resp.Body, nil
+	return file, nil
 }
 
-func (r *s3Remote) Delete(ctx context.Context, key string) error {
-	_, err := r.client.DeleteObject(ctx, &s3.DeleteObjectInput{
-		Bucket: aws.String(r.bucket),
-		Key:    aws.String(key),
-	})
-	return err
-}
+func (r fileRemote) Delete(key string) error { return r.files.Delete(key) }
 
 type memoryRemote struct {
 	mu    sync.Mutex
 	files map[string][]byte
 }
 
-// NewMemoryAssetStorage builds an in-memory S3-like store for tests.
+// NewMemoryAssetStorage builds an in-memory store for tests.
 func NewMemoryAssetStorage() *AssetStorage {
 	return &AssetStorage{remote: &memoryRemote{files: map[string][]byte{}}}
 }
 
-func (r *memoryRemote) PutFile(ctx context.Context, key, filePath, mimeType, cacheControl string) error {
-	raw, err := os.ReadFile(filePath)
+func (r *memoryRemote) Put(key string, body io.Reader) error {
+	raw, err := io.ReadAll(body)
 	if err != nil {
 		return err
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.files[cleanObjectKey(key)] = append([]byte(nil), raw...)
+	r.files[key] = raw
 	return nil
 }
 
-func (r *memoryRemote) Get(ctx context.Context, key string) (io.ReadCloser, error) {
+func (r *memoryRemote) Get(key string) (io.ReadCloser, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	raw, ok := r.files[cleanObjectKey(key)]
+	raw, ok := r.files[key]
 	if !ok {
 		return nil, os.ErrNotExist
 	}
 	return io.NopCloser(bytes.NewReader(append([]byte(nil), raw...))), nil
 }
 
-func (r *memoryRemote) Delete(ctx context.Context, key string) error {
+func (r *memoryRemote) Delete(key string) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	delete(r.files, cleanObjectKey(key))
+	delete(r.files, key)
 	return nil
 }
 

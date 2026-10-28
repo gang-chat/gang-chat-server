@@ -244,46 +244,6 @@ func (h *Handler) roomNotificationAllowedTx(tx *sql.Tx, spec roomNotificationSpe
 	return level == "all"
 }
 
-func (h *Handler) ensureRoomNotificationSchema() error {
-	if _, err := h.DB.Exec(
-		`CREATE TABLE IF NOT EXISTS room_notification_deletions (
-			user_id VARCHAR(128) NOT NULL,
-			notification_type VARCHAR(32) NOT NULL,
-			notification_id VARCHAR(128) NOT NULL,
-			created_at BIGINT NOT NULL,
-			PRIMARY KEY (user_id, notification_type, notification_id)
-		)`,
-	); err != nil {
-		return err
-	}
-	if err := h.ensureRoomNotificationColumn("message_id", "VARCHAR(128) NULL"); err != nil {
-		return err
-	}
-	if err := h.ensureRoomNotificationColumn("message_body_preview", "TEXT NULL"); err != nil {
-		return err
-	}
-	return nil
-}
-
-func (h *Handler) ensureRoomNotificationColumn(name, definition string) error {
-	var count int
-	if err := h.DB.QueryRow(
-		`SELECT COUNT(*)
-		 FROM information_schema.COLUMNS
-		 WHERE TABLE_SCHEMA = DATABASE()
-		   AND TABLE_NAME = 'room_notifications'
-		   AND COLUMN_NAME = ?`,
-		name,
-	).Scan(&count); err != nil {
-		return err
-	}
-	if count > 0 {
-		return nil
-	}
-	_, err := h.DB.Exec(`ALTER TABLE room_notifications ADD COLUMN ` + name + ` ` + definition)
-	return err
-}
-
 func (h *Handler) listRoomNotifications(c *gin.Context) {
 	userID := currentUserID(c)
 	limit := parseLimit(c.Query("limit"), defaultRoomNotificationListLimit, maxRoomNotificationListLimit)
@@ -376,7 +336,7 @@ func (h *Handler) deleteRoomNotification(c *gin.Context) {
 		`INSERT INTO room_notification_deletions (
 			user_id, notification_type, notification_id, created_at
 		 ) VALUES (?, ?, ?, ?)
-		 ON DUPLICATE KEY UPDATE created_at = created_at`,
+		 ON CONFLICT DO UPDATE SET created_at = created_at`,
 		userID,
 		notificationType,
 		notificationID,
@@ -562,9 +522,9 @@ func (h *Handler) resolveRoomNotificationMessageID(
 		"m.type = ?",
 		"m.is_recalled = 0",
 		"m.is_force_deleted = 0",
-		"JSON_UNQUOTE(JSON_EXTRACT(m.attachments_json, '$[0].type')) = ?",
-		"JSON_UNQUOTE(JSON_EXTRACT(m.attachments_json, '$[0].event')) = ?",
-		"JSON_UNQUOTE(JSON_EXTRACT(m.attachments_json, '$[0].target.id')) = ?",
+		"m.attachments_json ->> '$[0].type' = ?",
+		"m.attachments_json ->> '$[0].event' = ?",
+		"m.attachments_json ->> '$[0].target.id' = ?",
 	}
 	args := []any{
 		roomID,
@@ -576,7 +536,7 @@ func (h *Handler) resolveRoomNotificationMessageID(
 	if actorID.Valid && strings.TrimSpace(actorID.String) != "" {
 		conditions = append(
 			conditions,
-			"JSON_UNQUOTE(JSON_EXTRACT(m.attachments_json, '$[0].actor.id')) = ?",
+			"m.attachments_json ->> '$[0].actor.id' = ?",
 		)
 		args = append(args, actorID.String)
 	}
@@ -588,8 +548,8 @@ func (h *Handler) resolveRoomNotificationMessageID(
 		}
 		conditions = append(
 			conditions,
-			"JSON_UNQUOTE(JSON_EXTRACT(m.attachments_json, '$[0].from_role')) = ?",
-			"JSON_UNQUOTE(JSON_EXTRACT(m.attachments_json, '$[0].to_role')) = ?",
+			"m.attachments_json ->> '$[0].from_role' = ?",
+			"m.attachments_json ->> '$[0].to_role' = ?",
 		)
 		args = append(args, fromRole.String, toRole.String)
 	}

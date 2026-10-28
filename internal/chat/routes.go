@@ -7,7 +7,6 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/zhuangkaiyi/gang-chat/server/internal/config"
 	"github.com/zhuangkaiyi/gang-chat/server/internal/eventbus"
-	"github.com/zhuangkaiyi/gang-chat/server/internal/model"
 	"github.com/zhuangkaiyi/gang-chat/server/internal/musicbox"
 	"github.com/zhuangkaiyi/gang-chat/server/internal/push"
 	"github.com/zhuangkaiyi/gang-chat/server/internal/storage"
@@ -82,34 +81,11 @@ func RegisterRoutes(g *gin.RouterGroup, db *sql.DB, cfg *config.Config, bus *eve
 		h.MusicBox.SetRoomOccupancyChecker(h.musicBoxRoomOccupied)
 		h.MusicBox.ReconcilePersistedRoomOccupancy()
 	}
-	if err := model.EnsureHistoricalMessageRetentionSchema(db); err != nil {
-		log.Printf("chat: ensure historical message retention schema: %v", err)
-	}
-	if err := model.EnsureLiveScreenViewerSchema(db); err != nil {
-		log.Printf("chat: ensure live screen viewer schema: %v", err)
-	}
-	if err := model.EnsureLiveCameraMirrorSchema(db); err != nil {
-		log.Printf("chat: ensure live camera mirror schema: %v", err)
-	}
-	if err := model.EnsureRoomAIVoicePreferencesSchema(db); err != nil {
-		log.Printf("chat: ensure room AI voice preferences schema: %v", err)
-	}
-	if err := h.ensureRoomNotificationSchema(); err != nil {
-		log.Printf("chat: ensure room notification schema: %v", err)
-	}
-	if err := h.ensureMessageHistorySchema(); err != nil {
-		log.Printf("chat: ensure message history schema: %v", err)
-	}
-	if err := h.ensureStickerAssetLifecycleSchema(); err != nil {
-		log.Printf("chat: ensure sticker asset lifecycle schema: %v", err)
-	}
-	if err := model.EnsureGangBotSchema(db); err != nil {
-		log.Printf("chat: ensure gang-bot schema: %v", err)
+	if err := h.backfillStickerAssetLifecycle(); err != nil {
+		log.Printf("chat: backfill sticker asset lifecycle: %v", err)
 	}
 	h.setupGangBot()
-	if err := h.Playlists.EnsureSchema(); err != nil {
-		log.Printf("chat: ensure music playlist schema: %v", err)
-	} else if mb != nil {
+	if mb != nil {
 		if err := mb.BackfillActivePlaylistCreatedAt(); err != nil {
 			log.Printf("chat: backfill active playlist creation time: %v", err)
 		}

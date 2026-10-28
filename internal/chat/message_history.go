@@ -16,19 +16,6 @@ const messageHistoryScanBatch = 100
 
 var messageHistoryLinkPattern = regexp.MustCompile(`(?i)(https?://|www\.)`)
 
-func (h *Handler) ensureMessageHistorySchema() error {
-	_, err := h.DB.Exec(
-		`CREATE TABLE IF NOT EXISTS message_history_deletions (
-			user_id VARCHAR(128) NOT NULL,
-			message_id VARCHAR(128) NOT NULL,
-			created_at BIGINT NOT NULL,
-			PRIMARY KEY (user_id, message_id),
-			INDEX idx_message_history_deletions_message (message_id)
-		)`,
-	)
-	return err
-}
-
 func (h *Handler) listMessageHistory(c *gin.Context) {
 	roomID := c.Param("room_id")
 	if !h.requireRoomAccess(c, roomID) {
@@ -311,7 +298,7 @@ func (h *Handler) hideMessageHistory(c *gin.Context) {
 			return
 		}
 		if _, err := tx.Exec(
-			`INSERT IGNORE INTO message_history_deletions (user_id, message_id, created_at) VALUES (?, ?, ?)`,
+			`INSERT OR IGNORE INTO message_history_deletions (user_id, message_id, created_at) VALUES (?, ?, ?)`,
 			userID,
 			messageID,
 			now,

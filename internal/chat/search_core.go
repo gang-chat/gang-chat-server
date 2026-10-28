@@ -346,17 +346,12 @@ func (h *Handler) searchFiles(userID, query string, limit, offset int) ([]messag
 		userID,
 		`(
 		    SELECT COUNT(*)
-		    FROM JSON_TABLE(m.attachments_json, '$[*]' COLUMNS (
-		      attachment_type VARCHAR(64) PATH '$.type' NULL ON EMPTY,
-		      attachment_name VARCHAR(1024) PATH '$.name' NULL ON EMPTY,
-		      attachment_filename VARCHAR(1024) PATH '$.filename' NULL ON EMPTY,
-		      asset_filename VARCHAR(1024) PATH '$.asset.filename' NULL ON EMPTY
-		    )) attachment
-		    WHERE (m.type = 'file' OR lower(COALESCE(attachment.attachment_type, '')) = 'file')
+		    FROM json_each(m.attachments_json) attachment
+		    WHERE (m.type = 'file' OR lower(COALESCE(`+jsonObjectField("attachment", "$.type")+`, '')) = 'file')
 		      AND (
-		        instr(lower(COALESCE(attachment.attachment_name, '')), lower(?)) > 0
-		        OR instr(lower(COALESCE(attachment.attachment_filename, '')), lower(?)) > 0
-		        OR instr(lower(COALESCE(attachment.asset_filename, '')), lower(?)) > 0
+		        instr(lower(COALESCE(`+jsonObjectField("attachment", "$.name")+`, '')), lower(?)) > 0
+		        OR instr(lower(COALESCE(`+jsonObjectField("attachment", "$.filename")+`, '')), lower(?)) > 0
+		        OR instr(lower(COALESCE(`+jsonObjectField("attachment", "$.asset.filename")+`, '')), lower(?)) > 0
 		      )
 		  ) > 0`,
 		[]any{query, query, query},

@@ -23,7 +23,7 @@ func (s *PlaylistStore) CloneRoomPlaylistToUser(
 	var lockedUserID string
 	if err := tx.QueryRowContext(
 		ctx,
-		`SELECT id FROM users WHERE id = ? FOR UPDATE`,
+		`SELECT id FROM users WHERE id = ?`,
 		ownerUserID,
 	).Scan(&lockedUserID); err != nil {
 		return PlaylistSummary{}, err
@@ -36,8 +36,7 @@ func (s *PlaylistStore) CloneRoomPlaylistToUser(
 		 FROM rooms r
 		 LEFT JOIN room_memberships rm
 		   ON rm.room_id = r.id AND rm.user_id = ?
-		 WHERE r.id = ?
-		 FOR UPDATE`,
+		 WHERE r.id = ?`,
 		ownerUserID,
 		roomID,
 	).Scan(&roomDisplayName); err != nil {

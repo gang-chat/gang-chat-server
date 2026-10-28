@@ -3,7 +3,6 @@ package musicbox
 import (
 	"database/sql"
 	"errors"
-	"fmt"
 	"time"
 )
 
@@ -11,82 +10,6 @@ import (
 // match the rest of the schema.
 type store struct {
 	db *sql.DB
-}
-
-type stateColumn struct {
-	name       string
-	definition string
-}
-
-var nextGenerationStateColumns = []stateColumn{
-	{name: "revision", definition: "BIGINT NOT NULL DEFAULT 0"},
-	{name: "playback_mode", definition: "VARCHAR(32) NOT NULL DEFAULT 'sequential'"},
-	{name: "active_source_type", definition: "VARCHAR(32) NOT NULL DEFAULT 'temporary'"},
-	{name: "active_playlist_id", definition: "VARCHAR(128) NULL"},
-	{name: "active_playlist_name", definition: "VARCHAR(255) NULL"},
-	{name: "active_playlist_owner_id", definition: "VARCHAR(128) NULL"},
-	{name: "active_playlist_created_at", definition: "BIGINT NOT NULL DEFAULT 0"},
-	{name: "active_snapshot_id", definition: "VARCHAR(128) NULL"},
-	// The play cursor (see Manager.playCursor) is written only by
-	// savePlayCursor, never by saveState, so a concurrent full-state save
-	// can't revert a newer cursor.
-	{name: "play_cursor_scope", definition: "VARCHAR(32) NULL"},
-	{name: "play_cursor_snapshot_id", definition: "VARCHAR(128) NULL"},
-	{name: "play_cursor_after_sort", definition: "BIGINT NOT NULL DEFAULT -1"},
-}
-
-var nextGenerationQueueColumns = []stateColumn{
-	{name: "queue_scope", definition: "VARCHAR(32) NOT NULL DEFAULT 'temporary'"},
-	{name: "snapshot_id", definition: "VARCHAR(128) NULL"},
-}
-
-// ensureNextGenerationSchema is an additive migration.  It deliberately does
-// not replace the legacy state table so a rolling deployment can keep serving
-// old clients while the new snapshot fields become available.
-func (s *store) ensureNextGenerationSchema() error {
-	for _, column := range nextGenerationStateColumns {
-		if err := s.ensureColumn("room_music_box_state", column); err != nil {
-			return err
-		}
-	}
-	for _, column := range nextGenerationQueueColumns {
-		if err := s.ensureColumn("room_music_box_queue", column); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-func (s *store) ensureColumn(table string, column stateColumn) error {
-	hasColumn := func() (bool, error) {
-		var count int
-		err := s.db.QueryRow(
-			`SELECT COUNT(*) FROM information_schema.COLUMNS
-			 WHERE TABLE_SCHEMA = DATABASE()
-			   AND TABLE_NAME = ? AND COLUMN_NAME = ?`,
-			table,
-			column.name,
-		).Scan(&count)
-		return count != 0, err
-	}
-	exists, err := hasColumn()
-	if err != nil {
-		return fmt.Errorf("inspect %s.%s: %w", table, column.name, err)
-	}
-	if exists {
-		return nil
-	}
-	if _, err := s.db.Exec(
-		"ALTER TABLE `" + table + "` ADD COLUMN `" + column.name + "` " + column.definition,
-	); err != nil {
-		// Multiple service instances can race during a rolling deployment. If
-		// the other instance added the column first, the migration succeeded.
-		if existsAfterRace, inspectErr := hasColumn(); inspectErr == nil && existsAfterRace {
-			return nil
-		}
-		return fmt.Errorf("add %s.%s: %w", table, column.name, err)
-	}
-	return nil
 }
 
 func nowMillis() int64 { return time.Now().UTC().UnixMilli() }
@@ -294,8 +217,7 @@ func temporaryQueueOrderForUpdate(tx *sql.Tx, roomID string) ([]string, error) {
 	rows, err := tx.Query(
 		`SELECT id FROM room_music_box_queue
 		 WHERE room_id = ? AND queue_scope = 'temporary'
-		 ORDER BY sort_order ASC, created_at ASC, id ASC
-		 FOR UPDATE`,
+		 ORDER BY sort_order ASC, created_at ASC, id ASC`,
 		roomID,
 	)
 	if err != nil {
@@ -705,8 +627,7 @@ func (s *store) expireRoomPlayback(roomID string) ([]*QueueItem, bool, error) {
 	rows, err := tx.Query(
 		`SELECT `+itemColumns+` FROM room_music_box_queue
 		 WHERE room_id = ?
-		 ORDER BY sort_order ASC, created_at ASC, id ASC
-		 FOR UPDATE`,
+		 ORDER BY sort_order ASC, created_at ASC, id ASC`,
 		roomID,
 	)
 	if err != nil {
@@ -736,7 +657,7 @@ func (s *store) expireRoomPlayback(roomID string) ([]*QueueItem, bool, error) {
 	stateErr := tx.QueryRow(
 		`SELECT state, current_item_id, position_ms, playback_mode,
 		        active_source_type, active_playlist_id, active_snapshot_id
-		 FROM room_music_box_state WHERE room_id = ? FOR UPDATE`,
+		 FROM room_music_box_state WHERE room_id = ?`,
 		roomID,
 	).Scan(
 		&state, &currentItemID, &positionMS, &playbackMode,
@@ -942,7 +863,7 @@ func (s *store) getRoomItem(roomID, id string) (*QueueItem, error) {
 
 func (s *store) ensureState(roomID string) (*RoomState, error) {
 	_, _ = s.db.Exec(
-		`INSERT IGNORE INTO room_music_box_state
+		`INSERT OR IGNORE INTO room_music_box_state
 		 (room_id, state, position_ms, volume, revision, playback_mode,
 		  active_source_type, updated_at)
 		 VALUES (?, 'stopped', 0, 100, 0, 'sequential', 'temporary', ?)`,
@@ -996,17 +917,17 @@ func (s *store) saveState(st RoomState) error {
 		  active_playlist_owner_id, active_playlist_created_at,
 		  active_snapshot_id, updated_at)
 		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-		 ON DUPLICATE KEY UPDATE
-		   state = VALUES(state), current_item_id = VALUES(current_item_id),
-		   position_ms = VALUES(position_ms), volume = VALUES(volume),
-		   revision = VALUES(revision), playback_mode = VALUES(playback_mode),
-		   active_source_type = VALUES(active_source_type),
-		   active_playlist_id = VALUES(active_playlist_id),
-		   active_playlist_name = VALUES(active_playlist_name),
-		   active_playlist_owner_id = VALUES(active_playlist_owner_id),
-		   active_playlist_created_at = VALUES(active_playlist_created_at),
-		   active_snapshot_id = VALUES(active_snapshot_id),
-		   updated_at = VALUES(updated_at)`,
+		 ON CONFLICT DO UPDATE SET
+		   state = excluded.state, current_item_id = excluded.current_item_id,
+		   position_ms = excluded.position_ms, volume = excluded.volume,
+		   revision = excluded.revision, playback_mode = excluded.playback_mode,
+		   active_source_type = excluded.active_source_type,
+		   active_playlist_id = excluded.active_playlist_id,
+		   active_playlist_name = excluded.active_playlist_name,
+		   active_playlist_owner_id = excluded.active_playlist_owner_id,
+		   active_playlist_created_at = excluded.active_playlist_created_at,
+		   active_snapshot_id = excluded.active_snapshot_id,
+		   updated_at = excluded.updated_at`,
 		st.RoomID, string(st.State), ns(st.CurrentItemID), st.PositionMS, st.Volume,
 		st.Revision, string(NormalizePlaybackMode(string(st.PlaybackMode))),
 		string(st.ActiveSourceType), ns(st.ActivePlaylistID), ns(st.ActivePlaylistName),
@@ -1025,10 +946,10 @@ func (s *store) savePlayCursor(roomID string, cursor playCursor) error {
 		  active_source_type, play_cursor_scope, play_cursor_snapshot_id,
 		  play_cursor_after_sort, updated_at)
 		 VALUES (?, 'stopped', 0, 100, 0, 'sequential', 'temporary', ?, ?, ?, ?)
-		 ON DUPLICATE KEY UPDATE
-		   play_cursor_scope = VALUES(play_cursor_scope),
-		   play_cursor_snapshot_id = VALUES(play_cursor_snapshot_id),
-		   play_cursor_after_sort = VALUES(play_cursor_after_sort)`,
+		 ON CONFLICT DO UPDATE SET
+		   play_cursor_scope = excluded.play_cursor_scope,
+		   play_cursor_snapshot_id = excluded.play_cursor_snapshot_id,
+		   play_cursor_after_sort = excluded.play_cursor_after_sort`,
 		roomID, ns(string(cursor.scope)), ns(cursor.snapshotID),
 		cursor.afterSort, nowMillis(),
 	)
@@ -1074,10 +995,10 @@ func (s *store) resetPlaybackOnStartup() error {
 func (s *store) backfillActivePlaylistCreatedAt() error {
 	_, err := s.db.Exec(
 		`UPDATE room_music_box_state AS state
-		 JOIN music_playlists AS playlist
-		   ON playlist.id = state.active_playlist_id
-		 SET state.active_playlist_created_at = playlist.created_at
-		 WHERE state.active_source_type <> 'temporary'
+		 SET active_playlist_created_at = playlist.created_at
+		 FROM music_playlists AS playlist
+		 WHERE playlist.id = state.active_playlist_id
+		   AND state.active_source_type <> 'temporary'
 		   AND state.active_playlist_created_at = 0`,
 	)
 	return err
@@ -1107,16 +1028,16 @@ func (s *store) recordTrackDuration(source, trackID string, durationMS int64) er
 func (s *store) backfillTrackDurations() error {
 	_, err := s.db.Exec(
 		`UPDATE music_tracks AS track
-		 JOIN (
+		 SET duration_ms = measured.duration_ms, updated_at = ?
+		 FROM (
 		   SELECT source, track_id, MAX(duration_ms) AS duration_ms
 		   FROM room_music_box_queue
 		   WHERE status = 'ready' AND duration_ms > 0
 		   GROUP BY source, track_id
 		 ) AS measured
-		   ON measured.source = track.source
-		  AND measured.track_id = track.external_track_id
-		 SET track.duration_ms = measured.duration_ms, track.updated_at = ?
-		 WHERE track.duration_ms IS NULL OR track.duration_ms <= 0`,
+		 WHERE measured.source = track.source
+		   AND measured.track_id = track.external_track_id
+		   AND (track.duration_ms IS NULL OR track.duration_ms <= 0)`,
 		nowMillis(),
 	)
 	return err

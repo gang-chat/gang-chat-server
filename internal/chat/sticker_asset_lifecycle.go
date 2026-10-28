@@ -15,23 +15,11 @@ const (
 	stickerAssetCleanupBatchSize = 100
 )
 
-// ensureStickerAssetLifecycleSchema creates the small amount of durable state
-// needed to expire orphaned sticker uploads. References remain authoritative in
-// their owning tables (messages, stickers, avatars); the lifecycle table only
-// records when an otherwise-unreferenced asset becomes eligible for cleanup.
-func (h *Handler) ensureStickerAssetLifecycleSchema() error {
-	if _, err := h.DB.Exec(
-		`CREATE TABLE IF NOT EXISTS sticker_asset_lifecycle (
-			asset_id VARCHAR(128) NOT NULL,
-			expires_at BIGINT NULL,
-			updated_at BIGINT NOT NULL,
-			PRIMARY KEY (asset_id),
-			INDEX idx_sticker_asset_lifecycle_expires_at (expires_at)
-		) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
-	); err != nil {
-		return err
-	}
-
+// backfillStickerAssetLifecycle schedules expiry for sticker uploads that have
+// no lifecycle row yet. References remain authoritative in their owning tables
+// (messages, stickers, avatars); the lifecycle table only records when an
+// otherwise-unreferenced asset becomes eligible for cleanup.
+func (h *Handler) backfillStickerAssetLifecycle() error {
 	rows, err := h.DB.Query(
 		`SELECT a.id
 		 FROM assets a
@@ -91,7 +79,7 @@ func (h *Handler) retainStickerAsset(assetID string) error {
 	_, err := h.DB.Exec(
 		`INSERT INTO sticker_asset_lifecycle (asset_id, expires_at, updated_at)
 		 SELECT id, NULL, ? FROM assets WHERE id = ? AND purpose = 'sticker'
-		 ON DUPLICATE KEY UPDATE expires_at = NULL, updated_at = VALUES(updated_at)`,
+		 ON CONFLICT (asset_id) DO UPDATE SET expires_at = NULL, updated_at = excluded.updated_at`,
 		nowMillis(), assetID,
 	)
 	return err
@@ -105,7 +93,7 @@ func (h *Handler) setStickerAssetExpiry(assetID string, expiresAt int64) error {
 	_, err := h.DB.Exec(
 		`INSERT INTO sticker_asset_lifecycle (asset_id, expires_at, updated_at)
 		 SELECT id, ?, ? FROM assets WHERE id = ? AND purpose = 'sticker'
-		 ON DUPLICATE KEY UPDATE expires_at = VALUES(expires_at), updated_at = VALUES(updated_at)`,
+		 ON CONFLICT (asset_id) DO UPDATE SET expires_at = excluded.expires_at, updated_at = excluded.updated_at`,
 		expiresAt, nowMillis(), assetID,
 	)
 	return err
@@ -154,41 +142,43 @@ func (h *Handler) stickerAssetReferenced(assetID string) (bool, error) {
 				FROM messages m
 				WHERE EXISTS (
 					SELECT 1
-					FROM JSON_TABLE(m.attachments_json, '$[*]' COLUMNS (
-						asset_id VARCHAR(128) PATH '$.asset.id' NULL ON EMPTY
-					)) attachment
-					WHERE attachment.asset_id = ?
+					FROM json_each(m.attachments_json) attachment
+					WHERE ` + jsonObjectField("attachment", "$.asset.id") + ` = ?
 				)
-				OR LOCATE(?, m.attachments_json) > 0
-				OR JSON_SEARCH(m.quote_json, 'one', ?, NULL, '$[*].preview_attachment.asset.id') IS NOT NULL
-				OR JSON_UNQUOTE(JSON_EXTRACT(m.quote_json, '$.preview_attachment.asset.id')) = ?
-				OR LOCATE(?, COALESCE(m.quote_json, '')) > 0
-				OR LOCATE(?, COALESCE(m.sender_avatar_url_snapshot, '')) > 0
+				OR instr(m.attachments_json, ?) > 0
+				OR (json_type(m.quote_json) = 'array' AND EXISTS (
+					SELECT 1
+					FROM json_each(m.quote_json) quoted
+					WHERE ` + jsonObjectField("quoted", "$.preview_attachment.asset.id") + ` = ?
+				))
+				OR m.quote_json ->> '$.preview_attachment.asset.id' = ?
+				OR instr(COALESCE(m.quote_json, ''), ?) > 0
+				OR instr(COALESCE(m.sender_avatar_url_snapshot, ''), ?) > 0
 				LIMIT 1
 			)`,
 			args: []any{assetID, assetURLNeedle, assetID, assetID, assetURLNeedle, assetURLNeedle},
 		},
 		{
-			query: `SELECT EXISTS(SELECT 1 FROM users WHERE LOCATE(?, COALESCE(avatar_url, '')) > 0 LIMIT 1)`,
+			query: `SELECT EXISTS(SELECT 1 FROM users WHERE instr(COALESCE(avatar_url, ''), ?) > 0 LIMIT 1)`,
 			args:  []any{assetURLNeedle},
 		},
 		{
 			query: `SELECT EXISTS(
 				SELECT 1 FROM rooms
-				WHERE avatar_asset_id = ? OR LOCATE(?, COALESCE(avatar_url, '')) > 0
+				WHERE avatar_asset_id = ? OR instr(COALESCE(avatar_url, ''), ?) > 0
 				LIMIT 1
 			)`,
 			args: []any{assetID, assetURLNeedle},
 		},
 		{
-			query: `SELECT EXISTS(SELECT 1 FROM room_invites WHERE LOCATE(?, COALESCE(room_avatar_url, '')) > 0 LIMIT 1)`,
+			query: `SELECT EXISTS(SELECT 1 FROM room_invites WHERE instr(COALESCE(room_avatar_url, ''), ?) > 0 LIMIT 1)`,
 			args:  []any{assetURLNeedle},
 		},
 		{
 			query: `SELECT EXISTS(
 				SELECT 1 FROM room_notifications
-				WHERE LOCATE(?, COALESCE(room_avatar_url, '')) > 0
-				   OR LOCATE(?, COALESCE(actor_avatar_url, '')) > 0
+				WHERE instr(COALESCE(room_avatar_url, ''), ?) > 0
+				   OR instr(COALESCE(actor_avatar_url, ''), ?) > 0
 				LIMIT 1
 			)`,
 			args: []any{assetURLNeedle, assetURLNeedle},
@@ -278,44 +268,46 @@ func (h *Handler) reconcileUnreferencedStickerAssets(ctx context.Context) error 
 	now := nowMillis()
 	_, err := h.DB.ExecContext(
 		ctx,
-		`UPDATE sticker_asset_lifecycle lifecycle
-		 JOIN assets a ON a.id = lifecycle.asset_id AND a.purpose = 'sticker'
-		 SET lifecycle.expires_at = ?, lifecycle.updated_at = ?
+		`UPDATE sticker_asset_lifecycle AS lifecycle
+		 SET expires_at = ?, updated_at = ?
 		 WHERE lifecycle.expires_at IS NULL
+		   AND EXISTS (SELECT 1 FROM assets a WHERE a.id = lifecycle.asset_id AND a.purpose = 'sticker')
 		   AND NOT EXISTS (SELECT 1 FROM stickers s WHERE s.asset_id = lifecycle.asset_id)
 		   AND NOT EXISTS (
 		     SELECT 1
 		     FROM messages m
 		     WHERE EXISTS (
 		       SELECT 1
-		       FROM JSON_TABLE(m.attachments_json, '$[*]' COLUMNS (
-		         asset_id VARCHAR(128) PATH '$.asset.id' NULL ON EMPTY
-		       )) attachment
-		       WHERE attachment.asset_id = lifecycle.asset_id
+		       FROM json_each(m.attachments_json) attachment
+		       WHERE `+jsonObjectField("attachment", "$.asset.id")+` = lifecycle.asset_id
 		     )
-		     OR LOCATE(CONCAT('/assets/', lifecycle.asset_id, '/'), m.attachments_json) > 0
-		     OR JSON_SEARCH(m.quote_json, 'one', lifecycle.asset_id, NULL, '$[*].preview_attachment.asset.id') IS NOT NULL
-		     OR JSON_UNQUOTE(JSON_EXTRACT(m.quote_json, '$.preview_attachment.asset.id')) = lifecycle.asset_id
-		     OR LOCATE(CONCAT('/assets/', lifecycle.asset_id, '/'), COALESCE(m.quote_json, '')) > 0
-		     OR LOCATE(CONCAT('/assets/', lifecycle.asset_id, '/'), COALESCE(m.sender_avatar_url_snapshot, '')) > 0
+		     OR instr(m.attachments_json, '/assets/' || lifecycle.asset_id || '/') > 0
+		     OR (json_type(m.quote_json) = 'array' AND EXISTS (
+		       SELECT 1
+		       FROM json_each(m.quote_json) quoted
+		       WHERE `+jsonObjectField("quoted", "$.preview_attachment.asset.id")+` = lifecycle.asset_id
+		     ))
+		     OR m.quote_json ->> '$.preview_attachment.asset.id' = lifecycle.asset_id
+		     OR instr(COALESCE(m.quote_json, ''), '/assets/' || lifecycle.asset_id || '/') > 0
+		     OR instr(COALESCE(m.sender_avatar_url_snapshot, ''), '/assets/' || lifecycle.asset_id || '/') > 0
 		   )
 		   AND NOT EXISTS (
 		     SELECT 1 FROM users u
-		     WHERE LOCATE(CONCAT('/assets/', lifecycle.asset_id, '/'), COALESCE(u.avatar_url, '')) > 0
+		     WHERE instr(COALESCE(u.avatar_url, ''), '/assets/' || lifecycle.asset_id || '/') > 0
 		   )
 		   AND NOT EXISTS (
 		     SELECT 1 FROM rooms r
 		     WHERE r.avatar_asset_id = lifecycle.asset_id
-		        OR LOCATE(CONCAT('/assets/', lifecycle.asset_id, '/'), COALESCE(r.avatar_url, '')) > 0
+		        OR instr(COALESCE(r.avatar_url, ''), '/assets/' || lifecycle.asset_id || '/') > 0
 		   )
 		   AND NOT EXISTS (
 		     SELECT 1 FROM room_invites invite
-		     WHERE LOCATE(CONCAT('/assets/', lifecycle.asset_id, '/'), COALESCE(invite.room_avatar_url, '')) > 0
+		     WHERE instr(COALESCE(invite.room_avatar_url, ''), '/assets/' || lifecycle.asset_id || '/') > 0
 		   )
 		   AND NOT EXISTS (
 		     SELECT 1 FROM room_notifications notification
-		     WHERE LOCATE(CONCAT('/assets/', lifecycle.asset_id, '/'), COALESCE(notification.room_avatar_url, '')) > 0
-		        OR LOCATE(CONCAT('/assets/', lifecycle.asset_id, '/'), COALESCE(notification.actor_avatar_url, '')) > 0
+		     WHERE instr(COALESCE(notification.room_avatar_url, ''), '/assets/' || lifecycle.asset_id || '/') > 0
+		        OR instr(COALESCE(notification.actor_avatar_url, ''), '/assets/' || lifecycle.asset_id || '/') > 0
 		   )`,
 		now+h.stickerAssetOrphanTTL().Milliseconds(), now,
 	)

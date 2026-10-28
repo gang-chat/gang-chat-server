@@ -155,11 +155,11 @@ func (h *Handler) joinRoom(c *gin.Context) {
 		_, err := h.DB.Exec(
 			`INSERT INTO join_requests (id, room_id, user_id, status, reason, created_at, updated_at)
 			 VALUES (?, ?, ?, 'pending', ?, ?, ?)
-			 ON DUPLICATE KEY UPDATE
+			 ON CONFLICT DO UPDATE SET
 			   status = 'pending',
-			   reason = VALUES(reason),
-			   created_at = VALUES(created_at),
-			   updated_at = VALUES(updated_at),
+			   reason = excluded.reason,
+			   created_at = excluded.created_at,
+			   updated_at = excluded.updated_at,
 			   reviewer_user_id = NULL,
 			   reviewed_at = NULL`,
 			id, roomID, userID, reason, now, now,
@@ -333,7 +333,7 @@ func (h *Handler) addRoomMemberTx(tx *sql.Tx, roomID, userID string, joinedAt in
 		role = "owner"
 	}
 	res, err := tx.Exec(
-		`INSERT IGNORE INTO room_memberships (room_id, user_id, role, joined_at)
+		`INSERT OR IGNORE INTO room_memberships (room_id, user_id, role, joined_at)
 		 VALUES (?, ?, ?, ?)`,
 		roomID, userID, role, joinedAt,
 	)
@@ -379,7 +379,7 @@ func (h *Handler) pruneOrRepairRoomTx(tx *sql.Tx, roomID string) (bool, error) {
 		 ORDER BY
 		   CASE WHEN rm.role = 'admin' THEN 0 ELSE 1 END,
 		   CASE WHEN lp.user_id IS NOT NULL THEN 0 ELSE 1 END,
-		   RAND()
+		   random()
 		 LIMIT 1`,
 		roomID,
 	).Scan(&nextOwner); err != nil {

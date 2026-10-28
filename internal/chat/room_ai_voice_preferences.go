@@ -23,7 +23,7 @@ func upsertAIVoiceAnnouncementsPreference(execer sqlExecer, roomID, userID strin
 	_, err := execer.Exec(
 		`INSERT INTO room_ai_voice_preferences (room_id, user_id, enabled, updated_at)
 		 VALUES (?, ?, ?, ?)
-		 ON DUPLICATE KEY UPDATE enabled = VALUES(enabled), updated_at = VALUES(updated_at)`,
+		 ON CONFLICT DO UPDATE SET enabled = excluded.enabled, updated_at = excluded.updated_at`,
 		roomID,
 		userID,
 		boolToInt(enabled),

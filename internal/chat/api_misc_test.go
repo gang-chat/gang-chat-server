@@ -2,6 +2,7 @@ package chat
 
 import (
 	"github.com/zhuangkaiyi/gang-chat/server/internal/idgen"
+	"github.com/zhuangkaiyi/gang-chat/server/internal/releases"
 	"net/http"
 	"testing"
 )
@@ -17,6 +18,26 @@ func TestAppVersionEndpoint(t *testing.T) {
 	}
 	if response["minimum_supported_version"] != latestClientVersion {
 		t.Fatalf("minimum version mismatch: %v", response)
+	}
+}
+
+func TestAppVersionReportsNewestPublishedRelease(t *testing.T) {
+	api := newAPIHarness(t)
+	owner := api.register("version_reader")
+	for _, release := range []releases.Release{
+		{Version: "0.9.10", Published: true, MinimumSupportedVersion: "0.9.0"},
+		{Version: "0.10.1", Published: true},
+		{Version: "0.11.0", Published: false},
+	} {
+		if err := releases.Save(api.db, release); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	status, response := api.request(http.MethodGet, "/app/version", owner.Token, nil)
+	api.requireStatus(status, http.StatusOK, response)
+	if response["latest_version"] != "0.10.1" || response["minimum_supported_version"] != "0.10.1" {
+		t.Fatalf("expected the newest published release, got %v", response)
 	}
 }
 

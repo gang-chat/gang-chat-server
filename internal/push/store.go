@@ -2,7 +2,6 @@ package push
 
 import (
 	"database/sql"
-	"errors"
 	"strings"
 	"time"
 )
@@ -17,31 +16,6 @@ type DeviceRegistration struct {
 
 type Store struct {
 	DB *sql.DB
-}
-
-func (s *Store) EnsureSchema() error {
-	if s == nil || s.DB == nil {
-		return errors.New("push store database is required")
-	}
-	_, err := s.DB.Exec(`CREATE TABLE IF NOT EXISTS push_devices (
-		provider VARCHAR(32) NOT NULL,
-		installation_id VARCHAR(128) NOT NULL,
-		user_id VARCHAR(128) NOT NULL,
-		session_id VARCHAR(128) NOT NULL,
-		token VARCHAR(1024) NOT NULL,
-		platform VARCHAR(32) NOT NULL DEFAULT 'android',
-		notifications_enabled TINYINT(1) NOT NULL DEFAULT 1,
-		created_at BIGINT NOT NULL,
-		updated_at BIGINT NOT NULL,
-		PRIMARY KEY (provider, installation_id),
-		KEY idx_push_devices_user (user_id, notifications_enabled),
-		KEY idx_push_devices_session (session_id),
-		CONSTRAINT fk_push_devices_user FOREIGN KEY (user_id)
-			REFERENCES users(id) ON DELETE CASCADE,
-		CONSTRAINT fk_push_devices_session FOREIGN KEY (session_id)
-			REFERENCES user_sessions(id) ON DELETE CASCADE
-	) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci`)
-	return err
 }
 
 func (s *Store) Upsert(userID, sessionID string, registration DeviceRegistration) error {
@@ -67,13 +41,13 @@ func (s *Store) Upsert(userID, sessionID string, registration DeviceRegistration
 			provider, installation_id, user_id, session_id, token, platform,
 			notifications_enabled, created_at, updated_at
 		 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-		 ON DUPLICATE KEY UPDATE
-			user_id = VALUES(user_id),
-			session_id = VALUES(session_id),
-			token = VALUES(token),
-			platform = VALUES(platform),
-			notifications_enabled = VALUES(notifications_enabled),
-			updated_at = VALUES(updated_at)`,
+		 ON CONFLICT DO UPDATE SET
+			user_id = excluded.user_id,
+			session_id = excluded.session_id,
+			token = excluded.token,
+			platform = excluded.platform,
+			notifications_enabled = excluded.notifications_enabled,
+			updated_at = excluded.updated_at`,
 		registration.Provider,
 		registration.InstallationID,
 		userID,
